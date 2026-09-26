@@ -9,11 +9,20 @@
   engines                                     list engines known to the launcher/registry
   hook                                        PreToolUse hook entry point (reads JSON on stdin)
 """
-import argparse
 import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+if __name__ == "__main__" and sys.argv[1:2] == ["hook"]:
+    # Hot path: runs before every Grep/Glob/Bash/PowerShell call, so skip argparse and the other modules.
+    from ueidx import hook
+    try:
+        sys.exit(hook.run())
+    except Exception:
+        sys.exit(0)  # a broken hook must never get in the way
+
+import argparse  # noqa: E402
 
 from ueidx import engine as eng  # noqa: E402
 
@@ -26,7 +35,11 @@ def _engine(a):
 
 def _require_index(e):
     state, detail = eng.status(e)
-    if state == "missing":
+    # "building" is reported before meta.json is checked, so a first build in progress has no index yet.
+    if not (e.index_dir() / "meta.json").is_file():
+        if state == "building":
+            raise eng.EngineError("the first index for %s is still being built (%s); try again when `status` says fresh"
+                                  % (e.root, detail))
         raise eng.EngineError("no index for %s: run `build` first" % e.root)
     if state != "fresh":
         print("warning: index is %s (%s); results may be out of date" % (state, detail), file=sys.stderr)
@@ -50,7 +63,7 @@ def cmd_status(a):
 
 def _wrapper_name():
     here = os.path.dirname(os.path.abspath(__file__)).replace("\\", "/")
-    return "sh %s/ue_index.sh" % here
+    return 'sh "%s/ue_index.sh"' % here  # quoted: agents copy this verbatim and profiles can contain spaces
 
 
 def cmd_build(a):
@@ -152,7 +165,7 @@ def main(argv=None):
             return 0
     try:
         return a.fn(a)
-    except eng.EngineError as ex:
+    except (eng.EngineError, ValueError, OSError) as ex:
         print("error: %s" % ex, file=sys.stderr)
         return 1
 

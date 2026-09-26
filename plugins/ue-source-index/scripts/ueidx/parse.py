@@ -127,7 +127,12 @@ UFUNC_RE = re.compile(r"\bUFUNCTION\s*\((?P<spec>" + _PAREN + r")\)")
 UPROP_RE = re.compile(r"\bUPROPERTY\s*\((?P<spec>" + _PAREN + r")\)")
 DELEGATE_RE = re.compile(r"\b(?P<macro>DECLARE_(?:DYNAMIC_)?(?:MULTICAST_)?(?:SPARSE_)?(?:TS_)?(?:DELEGATE|EVENT|DERIVED_EVENT)\w*)\s*\(")
 ALIAS_RE = re.compile(r"\b(?:typedef\s+(?P<t1>[^;{}]+?)\s+(?P<n1>[FTUAEI][A-Z]\w*)\s*;|using\s+(?P<n2>[FTUAEI][A-Z]\w*)\s*=\s*(?P<t2>[^;{}]+);)")
-API_FUNC_RE = re.compile(r"(?m)^[ \t]*(?:template\s*<[^;{}]*>\s*)?(?:(?:static|virtual|inline|FORCEINLINE|FORCENOINLINE|constexpr|explicit|friend)\s+)*(?P<api>\w+_API)\s+(?P<rest>[^;{}#]*?)\b(?P<name>~?[A-Za-z_]\w*|operator\s*[^\s(]+)\s*\(")
+# Leading qualifiers allowed before the *_API macro, including [[nodiscard]] / UE_NODISCARD (hundreds of Core APIs).
+_API_PREFIX = (r"(?:(?:static|virtual|inline|FORCEINLINE|FORCENOINLINE|constexpr|explicit|friend|UE_NODISCARD|UE_FORCEINLINE_HINT)\s+"
+               r"|\[\[[^\]]*\]\]\s*"
+               r"|UE_DEPRECATED\w*\s*\((?:[^()]|\([^()]*\))*\)\s*)*")
+API_FUNC_RE = re.compile(r"(?m)^[ \t]*(?:template\s*<[^;{}]*>\s*)?" + _API_PREFIX +
+                         r"(?P<api>\w+_API)\s+(?P<rest>[^;{}#]*?)\b(?P<name>~?[A-Za-z_]\w*|operator\s*[^\w\s(][^\s(]*)\s*\(")
 LOG_RE = re.compile(r"\b(?P<macro>(?:UE_)?(?:DECLARE_LOG_CATEGORY_EXTERN|DECLARE_LOG_CATEGORY_CLASS|DEFINE_LOG_CATEGORY_STATIC|DEFINE_LOG_CATEGORY_CLASS|DEFINE_LOG_CATEGORY))\s*\(\s*(?P<name>\w+)(?:\s*,\s*(?P<verb>\w+))?")
 CVAR_RE = re.compile(r"""\b(?P<ctor>TAutoConsoleVariable\s*<(?P<type>[^>]*)>|FAutoConsoleVariableRef|FAutoConsoleVariable|FAutoConsoleCommand\w*)
     \s+(?P<var>\w+)\s*[({]\s*(?:TEXT\s*\(\s*)?"(?P<name>[^"]+)\"""", re.X)
@@ -143,7 +148,8 @@ CPP_QUICK = ("ConsoleVariable", "ConsoleCommand", "LOG_CATEGORY", "GConfig", "GA
 
 _ACCESS = re.compile(r"\b(public|protected|private|virtual)\b")
 _MACROISH = re.compile(r"^[A-Z][A-Z0-9_]*$")
-_DECL_NOISE = re.compile(r"\b(?:virtual|static|inline|FORCEINLINE|FORCENOINLINE|explicit|constexpr|mutable|\w+_API|UE_NODISCARD|\[\[nodiscard\]\])\s+")
+_DECL_NOISE = re.compile(r"(?:\b(?:virtual|static|inline|FORCEINLINE|FORCENOINLINE|explicit|constexpr|mutable|\w+_API|UE_NODISCARD|UE_FORCEINLINE_HINT)\b|\[\[[^\]]*\]\])\s*")
+_OPERATOR = re.compile(r"\boperator\s*(\(\)|\[\]|[^\w\s(]+|(?:new|delete)(?:\s*\[\])?|[A-Za-z_][\w:<>,*& ]*?)\s*\(")
 _DEPR_MACRO = re.compile(r"\bUE_DEPRECATED\w*\s*\((?:[^()]|\([^()]*\))*\)\s*")
 
 
@@ -155,6 +161,15 @@ def clean_bases(b):
 
 def compact_spec(spec, maxlen=110):
     return squash(spec, maxlen)
+
+
+def has_specifier(spec, names):
+    """True if a bare top-level UHT specifier (not a Key=Value, not inside meta=()) is one of `names`.
+    `Category=Config` must not count as the `config` specifier."""
+    for tok in split_args(spec):
+        if "=" not in tok and tok.strip().lower() in names:
+            return True
+    return False
 
 
 def split_args(s):
@@ -176,10 +191,19 @@ def split_args(s):
 
 def func_name_and_sig(decl):
     """decl: squashed declaration text up to ';' or '{'. Returns (name, signature) or (None, None)."""
-    for m in re.finditer(r"(~?[A-Za-z_]\w*)\s*\(", decl):
-        n = m.group(1)
-        if n in ("decltype", "alignas", "sizeof", "TEXT") or (_MACROISH.match(n) and "_" in n) or n.startswith("UE_"):
+    m, n = None, None
+    for cand in re.finditer(r"(~?[A-Za-z_]\w*)\s*\(", decl):
+        cn = cand.group(1)
+        if cn in ("decltype", "alignas", "sizeof", "TEXT") or (_MACROISH.match(cn) and "_" in cn) or cn.startswith("UE_"):
             continue
+        m, n = cand, cn
+        break
+    op = _OPERATOR.search(decl)
+    if op and (m is None or op.start() <= m.start()):
+        # operator==(, operator()(, operator bool( ...: the name is the operator token, not an identifier.
+        tok = op.group(1)
+        m, n = op, ("operator " + squash(tok)) if tok[0].isalpha() else ("operator" + re.sub(r"\s+", "", tok))
+    if m is not None:
         ret = decl[: m.start()]
         ret = _DEPR_MACRO.sub("", ret)
         ret = _DECL_NOISE.sub("", ret + " ").strip()
@@ -281,8 +305,7 @@ def parse_source(text, is_header, module_name):
         r.symbols.append([m.group("name"), "uenum" if is_u else "enum", line_of(m.start()), "namespace-enum"])
 
     for m, name, o, c in types:
-        start = m.start("kw") if not m.group("umacro") else m.start()
-        outer_type, ns = _enclosing([s for s in spans if s[0] != o], o)
+        outer_type, ns = _enclosing(spans, o)  # a type's own span never contains its opening brace
         kw = m.group("kw").split()[0]
         umacro = m.group("umacro")
         kind = {"UCLASS": "uclass", "USTRUCT": "ustruct", "UENUM": "uenum", "UINTERFACE": "uiface"}.get(umacro, kw)
@@ -336,7 +359,7 @@ def parse_source(text, is_header, module_name):
         spec = compact_spec(spec_raw)
         ln = line_of(m.start())
         r.symbols.append(["%s::%s" % (owner, name) if owner else name, "uprop", ln, "%s | %s" % (typ, spec) if spec else typ])
-        if owner and re.search(r"\b(?:Config|GlobalConfig)\b", spec_raw, re.I):
+        if owner and has_specifier(spec_raw, ("config", "globalconfig")):
             r.cfgprops.append([owner, name, typ, ln])
 
     # ---- delegates
@@ -345,13 +368,16 @@ def parse_source(text, is_header, module_name):
         args = split_args(squash(code[m.end(): e - 1]))
         macro = m.group("macro")
         idx = 2 if "DERIVED_EVENT" in macro else 1 if "EVENT" in macro else 0
+        if "RetVal" in macro:
+            idx += 1  # DECLARE_*_DELEGATE_RetVal*(ReturnType, Name, ...)
         if len(args) <= idx or not re.match(r"^\w+$", args[idx]):
             continue
         owner, _ = _enclosing(spans, m.start())
         name = args[idx]
         rest = ", ".join(args[idx + 1:])
+        ret = (" -> " + args[idx - 1]) if "RetVal" in macro else ""
         r.symbols.append(["%s::%s" % (owner, name) if owner else name, "delegate", line_of(m.start()),
-                          squash("%s(%s)" % (macro, rest), 160)])
+                          squash("%s(%s)%s" % (macro, rest, ret), 160)])
 
     if is_header:
         # ---- aliases
@@ -373,8 +399,6 @@ def parse_source(text, is_header, module_name):
             name, sig = func_name_and_sig(decl)
             if not name:
                 continue
-            if name == "operator":
-                name = squash(m.group("name")).replace(" ", "")
             owner, ns = _enclosing(spans, m.start())
             qual = "%s::%s" % (owner, name) if owner else ("%s::%s" % (ns, name) if ns else name)
             stmt = max(bare.rfind(";", 0, m.start()), bare.rfind("}", 0, m.start()), bare.rfind("{", 0, m.start()))

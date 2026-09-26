@@ -3,16 +3,19 @@ import hashlib
 import json
 import os
 import re
+import socket
 import sys
 import time
 from pathlib import Path
 
 # Bump whenever the on-disk index format or parser output changes; forces a rebuild.
-SCHEMA = 1
+SCHEMA = 2
 
 HOME_INDEX = Path(os.path.expanduser("~")) / ".claude" / "ue-index"
 REGISTRY_FILE = HOME_INDEX / "engines.json"
-LOCK_STALE_SECONDS = 3 * 3600
+# A running build touches its lock at least every LOCK_HEARTBEAT_SECONDS; older than this means it died.
+LOCK_HEARTBEAT_SECONDS = 30
+LOCK_HEARTBEAT_STALE_SECONDS = 15 * 60
 
 
 class EngineError(Exception):
@@ -35,12 +38,15 @@ def read_json(path):
             return None
 
 
-def write_json(path, data):
+def write_json(path, data, compact=False):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
     with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=1, sort_keys=True)
+        if compact:
+            json.dump(data, f, separators=(",", ":"))
+        else:
+            json.dump(data, f, indent=1, sort_keys=True)
     os.replace(tmp, path)
 
 
@@ -167,7 +173,9 @@ def known_engines():
         except OSError:
             pass
     else:
-        ini = Path(os.path.expanduser("~/.config/Epic/UnrealEngine/Install.ini"))
+        # Source-build registrations: FPlatformProcess::ApplicationSettingsDir() differs per OS.
+        ini = Path(os.path.expanduser("~/Library/Application Support/Epic/UnrealEngine/Install.ini" if sys.platform == "darwin"
+                                      else "~/.config/Epic/UnrealEngine/Install.ini"))
         try:
             in_sec = False
             for line in ini.read_text().splitlines():
@@ -298,19 +306,52 @@ def lock_path(engine):
     return engine.index_dir() / ".lock"
 
 
+def pid_alive(pid):
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        import ctypes
+        k32 = ctypes.windll.kernel32
+        h = k32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not h:
+            return ctypes.GetLastError() == 5  # access denied: exists, owned by someone else
+        try:
+            code = ctypes.c_ulong()
+            return bool(k32.GetExitCodeProcess(h, ctypes.byref(code))) and code.value == 259  # STILL_ACTIVE
+        finally:
+            k32.CloseHandle(h)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def lock_text():
+    return "pid %d host %s started %s" % (os.getpid(), socket.gethostname(), time.strftime("%Y-%m-%d %H:%M"))
+
+
 def read_lock(engine):
-    lp = lock_path(engine)
+    return read_lock_at(lock_path(engine))
+
+
+def read_lock_at(lp):
+    """None if unlocked, else {"age": seconds since last heartbeat, "live": bool, "info": str}.
+    A lock is dead when its process is gone (same host) or its heartbeat stopped: a build killed
+    mid-run (task stopped, session closed) never reaches its cleanup, so neither can be trusted alone."""
     try:
         st = lp.stat()
+        info = lp.read_text().strip()
     except OSError:
         return None
     age = time.time() - st.st_mtime
-    info = ""
-    try:
-        info = lp.read_text().strip()
-    except OSError:
-        pass
-    return {"age": age, "stale": age > LOCK_STALE_SECONDS, "info": info}
+    live = age < LOCK_HEARTBEAT_STALE_SECONDS
+    m = re.match(r"pid (\d+) host (\S+)", info)
+    if live and m and m.group(2) == socket.gethostname():
+        live = pid_alive(int(m.group(1)))
+    return {"age": age, "live": live, "info": info}
 
 
 def status(engine):
@@ -318,15 +359,17 @@ def status(engine):
     d = engine.index_dir()
     lock = read_lock(engine)
     meta = read_json(d / "meta.json")
-    if lock and not lock["stale"]:
-        return "building", "build in progress for %dm (%s)" % (lock["age"] // 60, lock["info"])
+    if lock and lock["live"]:
+        return "building", "build in progress, last heartbeat %ds ago (%s)" % (lock["age"], lock["info"])
     if not meta:
         return "missing", "no index at %s" % d
+    if meta.get("incomplete"):
+        return "stale", "the last build was interrupted while swapping files in; rebuild"
     cur = engine.fingerprint()
     old = meta.get("fingerprint", {})
+    # engine_root is deliberately not compared: installed indexes are shared per version+changelist and all
+    # paths inside are engine-root-relative, so two installs of the same build can use one index.
     diffs = [k for k in sorted(set(cur) | set(old)) if cur.get(k) != old.get(k)]
-    if meta.get("engine_root") and norm(meta["engine_root"]) != norm(engine.root) and engine.installed:
-        diffs.append("engine_root")
     if diffs:
         return "stale", "changed: %s" % ", ".join(diffs)
     return "fresh", "built %s" % meta.get("built_at", "?")
@@ -339,7 +382,3 @@ def register(engine):
         write_json(REGISTRY_FILE, reg)
     except OSError:
         pass
-
-
-def is_tty():
-    return hasattr(sys.stdout, "isatty") and sys.stdout.isatty()

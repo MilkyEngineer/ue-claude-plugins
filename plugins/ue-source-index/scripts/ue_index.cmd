@@ -35,5 +35,5 @@ if not exist "%USERPROFILE%\.claude\ue-index" mkdir "%USERPROFILE%\.claude\ue-in
 > "%PYCACHE%" echo %PY%
 
 :run
-"%PY%" -X utf8 "%~dp0ue_index.py" %*
+"%PY%" -S -X utf8 "%~dp0ue_index.py" %*
 exit /b %ERRORLEVEL%

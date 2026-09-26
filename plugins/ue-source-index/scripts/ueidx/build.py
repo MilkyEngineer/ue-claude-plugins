@@ -16,8 +16,8 @@ SRC_EXT = {".h": True, ".hpp": True, ".inl": True, ".cpp": False, ".cc": False}
 ALWAYS_PRUNE = {"binaries", "intermediate", "saved", "thirdparty", "node_modules", "__pycache__"}
 # Skipped unless the folder is itself a module (e.g. Source/Developer/DerivedDataCache) or sits inside one.
 PRUNE_OUTSIDE_MODULES = {"content", "deriveddatacache", "documentation", "extras", "shaders", "resources", "docs", "doc"}
-TYPE_KINDS = {"class", "struct", "union", "enum", "uclass", "ustruct", "uenum", "uiface",
-              "cpp-class", "cpp-struct", "cpp-union"}
+REFLECTED_KINDS = {"uclass", "ustruct", "uenum", "uiface"}
+TYPE_KINDS = {"class", "struct", "union", "enum", "cpp-class", "cpp-struct", "cpp-union"} | REFLECTED_KINDS
 
 TSV_HEADERS = {
     "symbols": "name\tkind\tmodule\tfile:line\tdetail",
@@ -43,7 +43,7 @@ def tsv_line(fields):
 
 # ------------------------------------------------------------------ scan
 
-def scan(engine):
+def scan(engine, beat=lambda: None):
     root = engine.root
     root_s = str(root)
     rel = lambda p: os.path.relpath(p, root_s).replace("\\", "/")
@@ -51,6 +51,7 @@ def scan(engine):
     stack = [(str(engine.engine_dir), None, None)]
     while stack:
         path, mod, plug = stack.pop()
+        beat()
         try:
             entries = list(os.scandir(path))
         except OSError:
@@ -203,22 +204,33 @@ class Lock:
         for attempt in range(2):
             try:
                 fd = os.open(str(self.path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-                os.write(fd, ("pid %d started %s" % (os.getpid(), time.strftime("%Y-%m-%d %H:%M"))).encode())
+                os.write(fd, eng.lock_text().encode())
                 os.close(fd)
+                self.last_beat = time.time()
                 return self
             except FileExistsError:
-                try:
-                    lk = time.time() - self.path.stat().st_mtime
-                except OSError:
-                    continue
-                if attempt == 0 and (self.force or lk > eng.LOCK_STALE_SECONDS):
+                lk = eng.read_lock_at(self.path)
+                if lk is None:
+                    continue  # vanished between open and read: retry
+                if attempt == 0 and (self.force or not lk["live"]):
                     try:
                         self.path.unlink()
                     except OSError:
                         pass
                     continue
-                raise eng.EngineError("another build holds %s (age %dm). If it crashed, rerun with --force." % (self.path, lk // 60))
+                raise eng.EngineError("another build is running (%s, heartbeat %ds ago). If it is wedged, rerun with --force."
+                                      % (lk["info"], lk["age"]))
         raise eng.EngineError("could not acquire %s" % self.path)
+
+    def beat(self):
+        """Heartbeat: keeps the lock's mtime fresh so other processes can tell this build is alive."""
+        now = time.time()
+        if now - self.last_beat >= eng.LOCK_HEARTBEAT_SECONDS:
+            try:
+                os.utime(self.path)
+            except OSError:
+                pass
+            self.last_beat = now
 
     def __exit__(self, *a):
         try:
@@ -231,10 +243,10 @@ def build(engine, jobs=None, full=False, force=False):
     from . import notes
     d = engine.index_dir()
     t0 = time.time()
-    with Lock(engine, force):
+    with Lock(engine, force) as lock:
         log("engine %s" % engine.describe())
         log("index  %s" % d)
-        modules, plugins, inis = scan(engine)
+        modules, plugins, inis = scan(engine, lock.beat)
         nfiles = sum(len(m["files"]) for m in modules)
         log("scanned %d modules, %d plugins, %d source files, %d ini files in %.0fs"
             % (len(modules), len(plugins), nfiles, len(inis), time.time() - t0))
@@ -248,9 +260,10 @@ def build(engine, jobs=None, full=False, force=False):
         for k, w in writers.items():
             w.write("#" + TSV_HEADERS[k] + "\n")
 
-        state = {"uclass": {}, "cfgprops": [], "stats": {}, "errors": [], "totals": Counter()}
+        state = {"uclass": {}, "cfgprops": [], "errors": [], "totals": Counter()}
 
         def emit(m, out):
+            lock.beat()
             for k in TSV_HEADERS:
                 if k == "config":
                     continue
@@ -265,7 +278,7 @@ def build(engine, jobs=None, full=False, force=False):
                 state["uclass"].setdefault(n, (c, dc, b, mod))
             state["cfgprops"] += out["cfgprops"]
             state["errors"] += out["errors"]
-            state["stats"][m["dir"]] = write_module_doc(staging, m, out)
+            write_module_doc(staging, m, out)
 
         todo, cached = [], 0
         for m in modules:
@@ -288,7 +301,10 @@ def build(engine, jobs=None, full=False, force=False):
                 else map(parse_module, [(str(engine.root), m) for m in todo])
             for m, out in it:
                 emit(m, out)
-                eng.write_json(cache_dir / (module_key(m) + ".json"), {"fp": module_fp(m), "schema": eng.SCHEMA, "out": out})
+                # Per-module cache: makes source-build rebuilds incremental, and lets an interrupted
+                # installed-build run resume instead of starting over.
+                eng.write_json(cache_dir / (module_key(m) + ".json"),
+                               {"fp": module_fp(m), "schema": eng.SCHEMA, "out": out}, compact=True)
                 done_files += len(m["files"])
                 if total_files and done_files / total_files >= next_report:
                     el = time.time() - t1
@@ -296,9 +312,15 @@ def build(engine, jobs=None, full=False, force=False):
                     log("parsed %3.0f%% (%d/%d files) %.0fs elapsed, ~%.0fs left"
                         % (frac * 100, done_files, total_files, el, el / frac - el))
                     next_report = frac + 0.1
-        finally:
+        except BaseException:
+            if pool:
+                pool.terminate()  # don't let queued modules keep parsing after an error or Ctrl+C
+            raise
+        else:
             if pool:
                 pool.close()
+        finally:
+            if pool:
                 pool.join()
 
         # Config: UPROPERTY(Config) resolved through the UCLASS hierarchy, then ini defaults.
@@ -339,12 +361,17 @@ def build(engine, jobs=None, full=False, force=False):
             with open(staging / "build-errors.txt", "w", encoding="utf-8") as f:
                 f.write("\n".join(state["errors"]) + "\n")
 
-        # Swap staging into place. meta.json goes last so a crash mid-swap reads as stale, never fresh.
+        # Swap staging into place. Flag the existing index as incomplete first (rather than deleting meta.json)
+        # so a failed swap reads as "stale" and stays queryable, and write the real meta.json last.
+        old_meta = eng.read_json(d / "meta.json")
+        if old_meta:
+            old_meta["incomplete"] = True
+            eng.write_json(d / "meta.json", old_meta)
         try:
-            (d / "meta.json").unlink()
-        except OSError:
-            pass
-        swap(staging, d)
+            swap(staging, d)
+        except OSError as e:
+            raise eng.EngineError("could not move the new index into place (%s). Something probably had an index file "
+                                  "open. Run build again; parsed modules are cached, so it resumes quickly." % e)
         if not state["errors"]:
             try:
                 (d / "build-errors.txt").unlink()
@@ -372,6 +399,19 @@ def build(engine, jobs=None, full=False, force=False):
     log("read %s first" % (d / "INDEX.md"))
 
 
+def _replace(src, dst, attempts=40):
+    """os.replace, retrying on Windows sharing violations: a grep/ripgrep holding an index file open makes
+    the replace fail until it closes the file, usually within a second or two."""
+    for i in range(attempts):
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError:
+            if i == attempts - 1:
+                raise
+            time.sleep(0.25)
+
+
 def swap(staging, d):
     for item in list(staging.iterdir()):
         target = d / item.name
@@ -379,11 +419,11 @@ def swap(staging, d):
             old = d / (item.name + ".old")
             shutil.rmtree(old, ignore_errors=True)
             if target.exists():
-                os.replace(target, old)
-            os.replace(item, target)
+                _replace(target, old)
+            _replace(item, target)
             shutil.rmtree(old, ignore_errors=True)
         else:
-            os.replace(item, target)
+            _replace(item, target)
     staging.rmdir()
 
 
@@ -416,7 +456,7 @@ def write_module_doc(staging, m, out):
         counts[kind] += 1
         if kind in TYPE_KINDS and "::" not in name:
             f = loc.rsplit(":", 1)[0]
-            types_by_file[f].append(name + ("*" if kind.startswith("u") else ""))
+            types_by_file[f].append(name + ("*" if kind in REFLECTED_KINDS else ""))
     headers = [f for f, _, _ in m["files"] if SRC_EXT[os.path.splitext(f)[1].lower()]]
     files = sorted(set(headers) | set(types_by_file))
     by_folder = defaultdict(list)
@@ -454,7 +494,6 @@ def write_module_doc(staging, m, out):
     lines += ["", "## Folders (Read with offset=line)"] + toc + ["", ""] + body
     with open(staging / m["doc"], "w", encoding="utf-8", newline="\n") as f:
         f.write("\n".join(lines) + "\n")
-    return counts
 
 
 def write_index_md(staging, engine, modules, plugins, state):

@@ -27,7 +27,7 @@ UEI status --engine 5.7         # or an engine root path, or a source-build GUID
 |---|---|
 | `fresh` (0) | Go to step 2. |
 | `missing` (2) / `stale` (3) | Build it. Start `UEI build --engine "<root>"` **in the background** (Bash/PowerShell `run_in_background`) and tell the user it's building. A full build of an installed 5.8 takes ~5–6 min on an SSD (~80k files; the directory scan alone is 1–2 min cold), and several times longer on an HDD (add `--jobs 2` there). Source builds rebuild incrementally, so only changed modules get re-parsed. While it runs, keep engine searches narrow (one folder or file). |
-| `building` (4) | Another session is building it. Work narrowly, and re-check `status` later. |
+| `building` (4) | Another process is building it. If an index already exists, queries still work (possibly out of date); otherwise work narrowly and re-check `status` later. |
 
 Where indexes live:
 - **Installed** engines (have `Engine/Build/InstalledBuild.txt`): `~/.claude/ue-index/<ver>-CL<changelist>/`. Shared across all repos. Rebuilt only when `Build.version`, the Marketplace plugin set, or the index schema changes.
@@ -82,6 +82,7 @@ Not indexed: methods that are neither UFUNCTION nor `*_API`-exported (find the c
 ## Maintenance
 
 - `UEI engines` lists the engines the launcher and registry know about.
-- `UEI build --full` ignores the per-module cache. `--force` clears a lock left by a crashed build (locks older than 3h are ignored automatically).
+- `UEI build --full` ignores the per-module cache. A build that was killed is detected automatically: its process is gone, or it stopped updating its lock for 15 min. `--force` takes over a lock anyway.
+- If a build fails while moving the new index into place (e.g. a file was held open), the old index stays usable and reports `stale`. Run `build` again: parsed modules are cached, so it resumes quickly.
 - `build-errors.txt` in the index dir lists files that failed to parse (rare).
 - The plugin's PreToolUse hook reminds you about this skill once per session per engine, when a Grep/Glob/Bash/PowerShell search targets an engine directory.

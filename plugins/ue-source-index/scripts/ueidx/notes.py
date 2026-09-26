@@ -3,9 +3,11 @@ import difflib
 import hashlib
 import os
 import re
+import time
 from pathlib import Path
 
 from . import engine as eng
+from . import parse
 
 MAX_LEN = 280
 MAX_PER_MODULE = 15
@@ -19,7 +21,12 @@ Format: `nNNN [Module] Symbol - finding @file:line#anchorhash`. A `[STALE?]` mar
 
 """
 
-LINE_RE = re.compile(r"^(?P<id>n\d+) (?P<stale>\[STALE\?\] )?\[(?P<module>[^\]]+)\] (?P<symbol>\S+) - (?P<text>.*) @(?P<file>[^\s#]+):(?P<line>\d+)#(?P<hash>[0-9a-f]{8})$")
+# The anchor path may contain spaces or '#' (e.g. Marketplace plugin folders); note text never contains " @"
+# (add() rewrites it), so the last " @" on the line always starts the anchor.
+LINE_RE = re.compile(r"^(?P<id>n\d+) (?P<stale>\[STALE\?\] )?\[(?P<module>[^\]]+)\] (?P<symbol>\S+) - (?P<text>.*) @(?P<file>.+):(?P<line>\d+)#(?P<hash>[0-9a-f]{8})$")
+NOTE_LIKE_RE = re.compile(r"^n\d+ ")
+LOCK_WAIT_SECONDS = 15
+LOCK_STALE_SECONDS = 60
 
 
 class NoteError(Exception):
@@ -55,11 +62,48 @@ def load(path):
 def save(path, notes):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
+    # Never silently drop a note: lines that look like notes but no longer parse (hand edits) are kept verbatim.
+    unparsed = []
+    try:
+        unparsed = [l for l in path.read_text(encoding="utf-8").splitlines() if NOTE_LIKE_RE.match(l) and not LINE_RE.match(l)]
+    except OSError:
+        pass
     notes = sorted(notes, key=lambda n: (n.module.lower(), n.symbol.lower(), n.id))
     tmp = path.with_suffix(".tmp")
     with open(tmp, "w", encoding="utf-8", newline="\n") as f:
-        f.write(HEADER + "".join(n.render() + "\n" for n in notes))
+        f.write(HEADER + "".join(n.render() + "\n" for n in notes) + "".join(l + "\n" for l in unparsed))
     os.replace(tmp, path)
+
+
+class _NotesLock:
+    """Serialises NOTES.md read-modify-write between `note` commands and a build's after_build check."""
+
+    def __init__(self, engine):
+        self.path = notes_path(engine).with_suffix(".lock")
+
+    def __enter__(self):
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        deadline = time.time() + LOCK_WAIT_SECONDS
+        while True:
+            try:
+                os.close(os.open(str(self.path), os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+                return self
+            except FileExistsError:
+                try:
+                    if time.time() - self.path.stat().st_mtime > LOCK_STALE_SECONDS:
+                        self.path.unlink()
+                        continue
+                except OSError:
+                    continue
+                if time.time() > deadline:
+                    raise NoteError("NOTES.md is locked by another process (%s); try again shortly" % self.path)
+                time.sleep(0.2)
+
+    def __exit__(self, *a):
+        try:
+            self.path.unlink()
+        except OSError:
+            pass
 
 
 def _window_hash(lines, line):
@@ -71,9 +115,9 @@ def _window_hash(lines, line):
 
 
 def _read_lines(engine, rel):
+    """Lines numbered exactly as the index numbers them: same decoding (UTF-16/BOM aware) and '\\n'-only splits."""
     try:
-        with open(engine.root / rel, "r", encoding="utf-8", errors="replace") as f:
-            return f.read().splitlines()
+        return [l.rstrip("\r") for l in parse.read_text(engine.root / rel).split("\n")]
     except OSError:
         return None
 
@@ -93,6 +137,8 @@ def _normalise_anchor(engine, anchor):
     rel = rel.replace("\\", "/")
     if rel.startswith(".."):
         raise NoteError("anchor file is not inside the engine root %s" % engine.root)
+    if " @" in rel:
+        raise NoteError("anchor paths containing ' @' can't be stored in NOTES.md: %s" % rel)
     return rel, int(m.group(2))
 
 
@@ -133,32 +179,37 @@ def add(engine, module, symbol, anchor, text, replace_id=None):
         raise NoteError("anchor line %d is outside %s (%d lines)" % (line, rel, len(lines)))
 
     path = notes_path(engine)
-    notes = load(path)
-    if replace_id:
-        if not any(n.id == replace_id for n in notes):
-            raise NoteError("no note %s" % replace_id)
-        notes = [n for n in notes if n.id != replace_id]
-    same_mod = [n for n in notes if n.module == module]
-    for n in same_mod:
-        ratio = difflib.SequenceMatcher(None, n.text.lower(), text.lower()).ratio()
-        if ratio >= 0.8 or (n.file == rel and abs(n.line - line) <= 3 and n.symbol == symbol):
-            raise NoteError("near-duplicate of existing note; use `note replace %s` if it needs correcting:\n%s" % (n.id, n.render()))
-    if len(same_mod) >= MAX_PER_MODULE:
-        raise NoteError("[%s] already has %d notes (the cap). Replace the least useful one with `note replace <id> ...`:\n%s"
-                        % (module, len(same_mod), "\n".join(n.render() for n in same_mod)))
-    note = Note(replace_id or _next_id(load(path)), module, symbol, text, rel, line, h)
-    notes.append(note)
-    save(path, notes)
+    with _NotesLock(engine):
+        notes = load(path)
+        all_ids = list(notes)
+        if replace_id:
+            if not any(n.id == replace_id for n in notes):
+                raise NoteError("no note %s" % replace_id)
+            notes = [n for n in notes if n.id != replace_id]
+        same_mod = [n for n in notes if n.module == module]
+        for n in same_mod:
+            ratio = difflib.SequenceMatcher(None, n.text.lower(), text.lower()).ratio()
+            if ratio >= 0.8 or (n.file == rel and abs(n.line - line) <= 3 and n.symbol == symbol):
+                raise NoteError("near-duplicate of existing note; use `note replace %s` if it needs correcting:\n%s" % (n.id, n.render()))
+        if len(same_mod) >= MAX_PER_MODULE:
+            raise NoteError("[%s] already has %d notes (the cap). Replace the least useful one with `note replace <id> ...`:\n%s"
+                            % (module, len(same_mod), "\n".join(n.render() for n in same_mod)))
+        note = Note(replace_id or _next_id(all_ids), module, symbol, text, rel, line, h)
+        if not LINE_RE.match(note.render()):
+            raise NoteError("internal: note would not parse back from NOTES.md; not saved: %s" % note.render())
+        notes.append(note)
+        save(path, notes)
     return note
 
 
 def remove(engine, note_id):
     path = notes_path(engine)
-    notes = load(path)
-    keep = [n for n in notes if n.id != note_id]
-    if len(keep) == len(notes):
-        raise NoteError("no note %s" % note_id)
-    save(path, keep)
+    with _NotesLock(engine):
+        notes = load(path)
+        keep = [n for n in notes if n.id != note_id]
+        if len(keep) == len(notes):
+            raise NoteError("no note %s" % note_id)
+        save(path, keep)
 
 
 def verify(engine, notes):
@@ -193,11 +244,12 @@ def verify(engine, notes):
 
 def check(engine):
     path = notes_path(engine)
-    notes = load(path)
-    if not notes:
-        return "no notes"
-    kept, st = verify(engine, notes)
-    save(path, kept)
+    with _NotesLock(engine):
+        notes = load(path)
+        if not notes:
+            return "no notes"
+        kept, st = verify(engine, notes)
+        save(path, kept)
     return "notes: %(ok)d ok, %(relocated)d relocated, %(stale)d marked [STALE?], %(dropped)d dropped (file gone)" % st
 
 
@@ -228,5 +280,7 @@ def after_build(engine):
     kept, st = verify(engine, notes)
     kept = [n for n in kept if not n.stale]  # only carry notes whose anchors still match exactly
     if kept:
-        save(path, kept)
+        with _NotesLock(engine):
+            if not path.is_file():  # a `note add` may have created it meanwhile; don't clobber
+                save(path, kept)
     return "carried %d notes forward from %s (%d stale/missing not carried)" % (len(kept), src.name, st["stale"] + st["dropped"])

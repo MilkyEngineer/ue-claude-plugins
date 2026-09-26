@@ -34,7 +34,10 @@ def _score(value, term, lterm):
 
 def find(index_dir, term, kinds=None, limit=20, exact=False, regex=False):
     lterm = term.lower()
-    rx = re.compile(term, re.I) if regex else None
+    try:
+        rx = re.compile(term, re.I) if regex else None
+    except re.error as e:
+        raise ValueError("invalid --regex pattern %r: %s" % (term, e))
     results = []
     for fname, (cols, label) in FILES.items():
         if kinds and fname not in kinds:
@@ -109,11 +112,14 @@ def module_info(index_dir, name, dependents=False):
         for line in f:
             if line.startswith("#"):
                 continue
-            row = line.rstrip("\n").split("\t")
+            row = (line.rstrip("\n").split("\t") + [""] * 8)[:8]
             if row[0].lower() == ln:
                 rows.append(row)
-            elif dependents and (name in row[5].split(",") or name in row[6].split(",")):
-                users.append("%s (%s)" % (row[0], "public" if name in row[5].split(",") else "private"))
+            elif dependents:
+                pub = [x.lower() for x in row[5].split(",")]
+                priv = [x.lower() for x in row[6].split(",")]
+                if ln in pub or ln in priv:
+                    users.append("%s (%s)" % (row[0], "public" if ln in pub else "private"))
     out = []
     for r in rows:
         name_, typ, plugin, path, doc, pub, priv, purpose = (r + [""] * 8)[:8]

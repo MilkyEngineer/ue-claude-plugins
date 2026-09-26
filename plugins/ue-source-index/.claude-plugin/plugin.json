@@ -1,6 +1,6 @@
 {
   "name": "ue-source-index",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Greppable per-version index of Unreal Engine C++ source (types, UFUNCTIONs, UPROPERTYs, CVars, log categories, config keys, deprecations, module deps) plus anchored notes, so agents stop grepping the whole engine",
   "author": {
     "name": "Alex Stevens",

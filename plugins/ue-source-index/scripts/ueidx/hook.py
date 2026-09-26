@@ -1,29 +1,28 @@
 """PreToolUse hook: when an agent is about to search engine source, point it at the index (once per session per engine).
 
-Never blocks and never fails loudly; any problem just means no reminder."""
-import hashlib
-import json
+Never blocks and never fails loudly; any problem just means no reminder.
+
+This runs before every Grep/Glob/Bash/PowerShell call, so imports are deferred until the cheap
+substring pre-filter in run() says the call might be a search."""
 import os
-import re
 import sys
-import tempfile
-import time
-from pathlib import Path
 
-from . import engine as eng
-
-SEARCH_CMD = re.compile(r"\b(grep|egrep|rg|ag|findstr|select-string|sls|find|get-childitem|gci|dir|ls|fd|git\s+grep)\b", re.I)
-SCRIPTS = Path(__file__).resolve().parent.parent
+# Plain substrings, checked before anything heavier is imported. Grep/Glob calls always pass via the tool name.
+_MAYBE_SEARCH = ("grep", "glob", "rg ", "ag ", "findstr", "select-string", "sls ", "find", "get-childitem", "gci",
+                 "dir", "ls", "fd ")
+_SEARCH_CMD = r"\b(grep|egrep|rg|ag|findstr|select-string|sls|find|get-childitem|gci|dir|ls|fd|git\s+grep)\b"
+SCRIPTS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def _wrapper(tool):
     """Launcher spelled for the shell the agent is likely to use next (the .cmd mangles | ^ & in args)."""
     if os.name == "nt" and tool == "PowerShell":
-        return '& "%s"' % (SCRIPTS / "ue_index.cmd")
-    return "sh " + str(SCRIPTS / "ue_index.sh").replace("\\", "/")
+        return '& "%s"' % os.path.join(SCRIPTS, "ue_index.cmd")
+    return 'sh "%s"' % os.path.join(SCRIPTS, "ue_index.sh").replace("\\", "/")
 
 
 def _targets(data):
+    import re
     tool = data.get("tool_name") or ""
     ti = data.get("tool_input") or {}
     cwd = data.get("cwd") or os.getcwd()
@@ -34,13 +33,19 @@ def _targets(data):
         return [p or cwd], cwd
     if tool in ("Bash", "PowerShell"):
         cmd = ti.get("command") or ""
-        if not SEARCH_CMD.search(cmd):
+        if not re.search(_SEARCH_CMD, cmd, re.I):
             return [], cwd
         return [cmd, cwd], cwd
     return [], cwd
 
 
 def _marker(session, root):
+    import hashlib
+    import re
+    import tempfile
+    import time
+    from pathlib import Path
+    from . import engine as eng
     d = Path(tempfile.gettempdir()) / "ue-index-hook"
     d.mkdir(exist_ok=True)
     try:  # tidy markers from old sessions
@@ -54,8 +59,15 @@ def _marker(session, root):
 
 
 def run():
+    raw = sys.stdin.read()
+    low = raw.lower()
+    if not any(w in low for w in _MAYBE_SEARCH):
+        return 0
+    import json
+    import re
+    from . import engine as eng
     try:
-        data = json.load(sys.stdin)
+        data = json.loads(raw)
     except ValueError:
         return 0
     targets, cwd = _targets(data)
