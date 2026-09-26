@@ -1,0 +1,12 @@
+{
+  "name": "ue-source-index",
+  "version": "0.1.0",
+  "description": "Greppable per-version index of Unreal Engine C++ source (types, UFUNCTIONs, UPROPERTYs, CVars, log categories, config keys, deprecations, module deps) plus anchored notes, so agents stop grepping the whole engine",
+  "author": {
+    "name": "Alex Stevens",
+    "url": "https://github.com/MilkyEngineer"
+  },
+  "repository": "https://github.com/MilkyEngineer/ue-claude-plugins",
+  "license": "MIT",
+  "keywords": ["unreal", "unreal-engine", "ue5", "c++", "index", "search"]
+}

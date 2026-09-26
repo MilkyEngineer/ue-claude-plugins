@@ -1,0 +1,7 @@
+* text=auto
+# Shell scripts must stay LF even on Windows checkouts with core.autocrlf=true, or sh fails on \r.
+*.sh text eol=lf
+*.py text eol=lf
+# cmd.exe mis-parses goto labels in LF-only batch files.
+*.cmd text eol=crlf
+*.bat text eol=crlf
