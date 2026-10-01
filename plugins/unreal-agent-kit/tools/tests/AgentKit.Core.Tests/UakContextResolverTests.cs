@@ -193,16 +193,62 @@ public sealed class UakContextResolverTests
 		Assert.AreEqual(A, FromArgument.EngineRoot!.FullName);
 	}
 
+	// As Unreal (FDesktopPlatformBase::GetEngineIdentifierForProject): a non-empty EngineAssociation decides, even for a project
+	// inside another engine, and one that names no engine fails; only an empty one falls back to the engine around the project.
+
 	[TestMethod]
-	public void Engine_ContainingTheProject_IsUsed_BeforeTheAssociation()
+	public void Engine_Association_BeatsTheEngineThatContainsTheProject()
 	{
 		using TempTree Tree = new();
-		string Source = Tree.Engine("UESource");
+		Tree.Engine("UESource");
 		string Other = Tree.Engine("UEOther");
 		string Project = Tree.Project("UESource/Games/Game/Game.uproject", "5.8");
 		UakContext Context = UakContextResolver.Resolve(Options(Tree, Tree.Root, source: new FakeAssociationSource(("5.8", Other)), project: Project));
+		Assert.AreEqual(Other, Context.EngineRoot!.FullName);
+		StringAssert.Contains(Context.Provenance[UakContextResolver.EngineKey], "EngineAssociation \"5.8\"");
+	}
+
+	[TestMethod]
+	public void Engine_EmptyAssociation_UsesTheEngineThatContainsTheProject()
+	{
+		using TempTree Tree = new();
+		string Source = Tree.Engine("UESource");
+		string Project = Tree.Project("UESource/Games/Game/Game.uproject", "");
+		UakContext Context = UakContextResolver.Resolve(Options(Tree, Tree.Root, project: Project));
 		Assert.AreEqual(Source, Context.EngineRoot!.FullName);
-		Assert.AreEqual("the engine that contains the project", Context.Provenance[UakContextResolver.EngineKey]);
+		StringAssert.StartsWith(Context.Provenance[UakContextResolver.EngineKey], "the engine that contains the project");
+
+		// Next to Engine/, as a source build's own projects are.
+		string Beside = Tree.Project("UESource/Beside/Beside.uproject", "");
+		Assert.AreEqual(Source, UakContextResolver.Resolve(Options(Tree, Tree.Root, project: Beside)).EngineRoot!.FullName);
+	}
+
+	[TestMethod]
+	public void Engine_UnresolvableAssociation_InsideAnEngine_IsAnError_NotThatEngine()
+	{
+		using TempTree Tree = new();
+		Tree.Engine("UESource");
+		string Unknown = Tree.Project("UESource/Games/Game/Game.uproject", "{00000000-0000-0000-0000-000000000001}");
+		UakSetupException Error = Assert.ThrowsExactly<UakSetupException>(() => UakContextResolver.Resolve(Options(Tree, Tree.Root, project: Unknown)));
+		StringAssert.Contains(Error.Message, "{00000000-0000-0000-0000-000000000001}");
+
+		string BadPath = Tree.Project("UESource/Other/Other.uproject", "../Missing");
+		Error = Assert.ThrowsExactly<UakSetupException>(() => UakContextResolver.Resolve(Options(Tree, Tree.Root, project: BadPath)));
+		StringAssert.Contains(Error.Message, "is not an engine");
+
+		UakContext Context = UakContextResolver.Resolve(Options(Tree, Tree.Root, project: Unknown, requireEngine: false));
+		Assert.IsNull(Context.EngineRoot);
+	}
+
+	[TestMethod]
+	public void Engine_EmptyAssociation_TheProjectFolderItselfIsNotTheEngine()
+	{
+		// Unreal's search starts at the project folder's parent.
+		using TempTree Tree = new();
+		Tree.Engine("Odd");
+		string Project = Tree.Project("Odd/Odd.uproject", "");
+		UakSetupException Error = Assert.ThrowsExactly<UakSetupException>(() => UakContextResolver.Resolve(Options(Tree, Tree.Root, project: Project)));
+		StringAssert.Contains(Error.Message, "empty EngineAssociation");
 	}
 
 	[TestMethod]
@@ -313,7 +359,10 @@ public sealed class UakContextResolverTests
 	[DataRow("../UE", true)]
 	[DataRow(@"..\UE", true)]
 	[DataRow("./UE", true)]
-	[DataRow(".", true)]
+	[DataRow(@"C:\UE", true)]
+	[DataRow("/opt/UE", true)]
+	[DataRow(".", false)]
+	[DataRow("..", false)]
 	public void IsPathLikeAssociation(string association, bool expected) =>
 		Assert.AreEqual(expected, UakContextResolver.IsPathLikeAssociation(association));
 

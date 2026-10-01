@@ -1,5 +1,6 @@
 // Copyright Alex Stevens (@MilkyEngineer). All Rights Reserved.
 
+using System.Diagnostics;
 using System.Globalization;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -28,7 +29,7 @@ public sealed class RunsStartCommand : IUakCommand
 		  -result-file=  a file whose last PASSED/FAILED line `uak runs list` shows when there is no output
 		  -force         replace the record of a finished run with the same name
 		  The run takes the editor lock only if the command does; its lock requests show as "<name>/...".
-		  Follow it with `uak runs list`.
+		  `uak runs list` shows it; `uak runs wait -name=<name> -timeout=<seconds>` waits for it to end.
 		""";
 
 	/// <inheritdoc />
@@ -106,6 +107,7 @@ public sealed class RunsListCommand : IUakCommand
 		  Running runs first, then the rest, latest first. By default only running (and starting) runs show.
 		  -all     include finished runs
 		  -name=   only runs whose name matches this pattern (* and ? wildcards)
+		  It exits 0 whether or not anything matches: to wait for a run to end, use `uak runs wait`.
 		""";
 
 	/// <inheritdoc />
@@ -190,6 +192,126 @@ public sealed class RunsListCommand : IUakCommand
 		foreach (string[] cell in cells)
 		{
 			AppendRow(cell);
+		}
+		return text.ToString();
+	}
+}
+
+/// <summary>
+/// <c>uak runs wait -name=&lt;name&gt; [-timeout=&lt;seconds&gt;]</c>: waits until a run has ended, so one background command can
+/// stand in for an agent checking again and again. Its exit code says how the run ended.
+/// </summary>
+public sealed class RunsWaitCommand : IUakCommand
+{
+	/// <inheritdoc />
+	public string Name => "runs wait";
+
+	/// <inheritdoc />
+	public string Summary => "Wait until a detached run has ended, then print its end state and last line.";
+
+	/// <inheritdoc />
+	public string Usage => """
+		uak runs wait -name=<exact name> [-timeout=<seconds>]
+		  Reads the run's record every few seconds until the run has ended, then prints its end state and last line.
+		  -name=     the run's exact name (no wildcards)
+		  -timeout=  stop waiting after this many seconds (default: no limit)
+		  Exit code: 0 the run exited 0; 1 it exited with another code, or ended with no recorded exit code (an adopted
+		  run, or one that died or never started); 2 a usage error, or no such run; 3 -timeout passed while it still runs.
+		  Run it in a background shell whose own time limit is longer than -timeout (and within the shell's limit), so it
+		  costs nothing while it waits. On exit 3, start another wait.
+		""";
+
+	/// <inheritdoc />
+	public bool RequiresEngine => false;
+
+	/// <summary>How often the record is read. Reading it is cheap: one small JSON file, and a process check.</summary>
+	public TimeSpan PollInterval { get; init; } = TimeSpan.FromSeconds(5);
+
+	/// <summary>Where the result goes; null for the console.</summary>
+	public TextWriter? Output { get; init; }
+
+	/// <inheritdoc />
+	public async Task<int> RunAsync(UakContext context, IReadOnlyList<string> arguments, CancellationToken cancellationToken)
+	{
+		ArgumentNullException.ThrowIfNull(context);
+		UakArguments parsed = new(arguments);
+		string name = parsed.GetRequiredString("name");
+		int? timeoutSeconds = parsed.GetInt("timeout", 0);
+		parsed.ThrowIfUnknown();
+		parsed.ThrowIfMorePositionalThan(0);
+		if (!RunRegistry.IsValidName(name))
+		{
+			throw new UakUsageException($"-name= takes a run's exact name: letters, digits, '_', '.' and '-' (no wildcards): '{name}'.");
+		}
+		TimeSpan? timeout = timeoutSeconds is int seconds ? TimeSpan.FromSeconds(seconds) : null;
+		TextWriter output = Output ?? Console.Out;
+		RunRegistry registry = new(context.StateDirectory);
+		string recordFile = registry.GetRecordFile(name);
+		Stopwatch waited = Stopwatch.StartNew();
+		while (true)
+		{
+			RunRecord? record = registry.Read(name);
+			if (record is null && !File.Exists(recordFile))
+			{
+				context.Logger.LogError("No run named '{Name}' is recorded in {Directory}. `uak runs list -all` lists the runs.", name, registry.Directory);
+				return UakExitCodes.UsageError;
+			}
+			// A record that exists but can't be read is being rewritten (temporary file, then rename): read it again next time.
+			if (record is not null)
+			{
+				RunState state = RunRegistry.GetState(record, DateTime.UtcNow);
+				if (state is not (RunState.Running or RunState.Starting))
+				{
+					output.Write(Describe(record, state));
+					return state == RunState.Exited && record.ExitCode == 0 ? UakExitCodes.Success : UakExitCodes.Failure;
+				}
+				if (timeout is TimeSpan limit && waited.Elapsed >= limit)
+				{
+					string line = RunRegistry.GetDisplayLine(record, state);
+					output.Write(string.Create(CultureInfo.InvariantCulture,
+						$"Run '{name}' is still {(state == RunState.Starting ? "starting" : "running")} after waiting {LockStatusCommand.FormatSpan(limit)} (-timeout): start another wait.\n"));
+					if (line.Length > 0)
+					{
+						output.Write($"  Last line: {line}\n");
+					}
+					return UakExitCodes.TimedOut;
+				}
+			}
+			TimeSpan delay = PollInterval;
+			if (timeout is TimeSpan remaining && remaining - waited.Elapsed < delay)
+			{
+				delay = remaining - waited.Elapsed > TimeSpan.Zero ? remaining - waited.Elapsed : TimeSpan.Zero;
+			}
+			await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
+		}
+	}
+
+	/// <summary>A finished run's end state, how long it ran, its last line and its output file.</summary>
+	internal static string Describe(RunRecord record, RunState state)
+	{
+		string ending = state switch
+		{
+			RunState.Exited => string.Create(CultureInfo.InvariantCulture, $"exited {record.ExitCode}"),
+			RunState.Ended => "ended (an adopted run: no exit code is recorded, so whether it passed is unknown)",
+			RunState.Died => "died (its process has gone without recording an end: killed, or its wrapper crashed; no exit code)",
+			RunState.NeverStarted => "never started (its wrapper never recorded itself; no exit code)",
+			_ => state.ToString().ToLowerInvariant(),
+		};
+		StringBuilder text = new();
+		text.Append(CultureInfo.InvariantCulture, $"Run '{record.Name}' {ending}");
+		if (record.Started is DateTime started && record.Ended is DateTime ended)
+		{
+			text.Append(CultureInfo.InvariantCulture, $" after {LockStatusCommand.FormatSpan(ended - started)}");
+		}
+		text.Append('\n');
+		string line = RunRegistry.GetDisplayLine(record, state);
+		if (line.Length > 0)
+		{
+			text.Append(CultureInfo.InvariantCulture, $"  Last line: {line}\n");
+		}
+		if (!string.IsNullOrEmpty(record.OutputFile))
+		{
+			text.Append(CultureInfo.InvariantCulture, $"  Output: {record.OutputFile}\n");
 		}
 		return text.ToString();
 	}

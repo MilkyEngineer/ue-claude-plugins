@@ -1,0 +1,41 @@
+<Project>
+	<!--
+		Copyright Alex Stevens (@MilkyEngineer). All Rights Reserved.
+
+		Where the engine keeps EpicGames.Perforce's third-party dependencies, for building it from source (DESIGN.md, "Engine
+		libraries"). Imported by EpicGames.Perforce.FromSource and by src/AgentKit.Vcs/EpicGames.Perforce.props, which reference
+		the same files. build/EpicGames.props resolves UakEngineRoot first.
+
+		The engine's EpicGames.Perforce source uses System.Linq.Async up to UE 5.7, and OpenTelemetry.Api in UE 5.8. Neither
+		is a NuGet package here: each is looked for in the engine's own builds, in this order:
+		  1. Engine/Binaries/DotNET/UnrealBuildTool/ (UE 5.7 and older ship System.Linq.Async there);
+		  2. Engine/Binaries/DotNET/AutomationTool/;
+		  3. Engine/Binaries/DotNET/AutomationTool/AutomationUtils/;
+		  4. Engine/Binaries/DotNET/AutomationTool/AutomationUtils/<tfm>/ (UE 5.8 ships OpenTelemetry.Api there).
+		A source build has AutomationTool only once someone has built it, and UE 5.8's UnrealBuildTool has no OpenTelemetry.Api,
+		so a 5.8 source build needs AutomationTool built once: Engine/Build/BatchFiles/BuildUAT.bat (BuildUAT.sh on Linux and
+		Mac), which RunUAT also runs first. UakCheckPerforceDependencies says so instead of failing in the compiler.
+	-->
+	<PropertyGroup>
+		<_UakDotNetDir Condition="'$(UakEngineRoot)' != ''">$(UakEngineRoot)Engine/Binaries/DotNET/</_UakDotNetDir>
+
+		<UakLinqAsyncDll Condition="'$(_UakDotNetDir)' != '' and Exists('$(_UakDotNetDir)UnrealBuildTool/System.Linq.Async.dll')">$(_UakDotNetDir)UnrealBuildTool/System.Linq.Async.dll</UakLinqAsyncDll>
+		<UakLinqAsyncDll Condition="'$(UakLinqAsyncDll)' == '' and '$(_UakDotNetDir)' != '' and Exists('$(_UakDotNetDir)AutomationTool/System.Linq.Async.dll')">$(_UakDotNetDir)AutomationTool/System.Linq.Async.dll</UakLinqAsyncDll>
+		<UakLinqAsyncDll Condition="'$(UakLinqAsyncDll)' == '' and '$(_UakDotNetDir)' != '' and Exists('$(_UakDotNetDir)AutomationTool/AutomationUtils/System.Linq.Async.dll')">$(_UakDotNetDir)AutomationTool/AutomationUtils/System.Linq.Async.dll</UakLinqAsyncDll>
+		<UakLinqAsyncDll Condition="'$(UakLinqAsyncDll)' == '' and '$(_UakDotNetDir)' != '' and Exists('$(_UakDotNetDir)AutomationTool/AutomationUtils/$(TargetFramework)/System.Linq.Async.dll')">$(_UakDotNetDir)AutomationTool/AutomationUtils/$(TargetFramework)/System.Linq.Async.dll</UakLinqAsyncDll>
+
+		<UakOpenTelemetryDll Condition="'$(_UakDotNetDir)' != '' and Exists('$(_UakDotNetDir)UnrealBuildTool/OpenTelemetry.Api.dll')">$(_UakDotNetDir)UnrealBuildTool/OpenTelemetry.Api.dll</UakOpenTelemetryDll>
+		<UakOpenTelemetryDll Condition="'$(UakOpenTelemetryDll)' == '' and '$(_UakDotNetDir)' != '' and Exists('$(_UakDotNetDir)AutomationTool/OpenTelemetry.Api.dll')">$(_UakDotNetDir)AutomationTool/OpenTelemetry.Api.dll</UakOpenTelemetryDll>
+		<UakOpenTelemetryDll Condition="'$(UakOpenTelemetryDll)' == '' and '$(_UakDotNetDir)' != '' and Exists('$(_UakDotNetDir)AutomationTool/AutomationUtils/OpenTelemetry.Api.dll')">$(_UakDotNetDir)AutomationTool/AutomationUtils/OpenTelemetry.Api.dll</UakOpenTelemetryDll>
+		<UakOpenTelemetryDll Condition="'$(UakOpenTelemetryDll)' == '' and '$(_UakDotNetDir)' != '' and Exists('$(_UakDotNetDir)AutomationTool/AutomationUtils/$(TargetFramework)/OpenTelemetry.Api.dll')">$(_UakDotNetDir)AutomationTool/AutomationUtils/$(TargetFramework)/OpenTelemetry.Api.dll</UakOpenTelemetryDll>
+
+		<!-- Whether the engine's EpicGames.Perforce source uses OpenTelemetry (UE 5.8's IPerforceConnection has a Tracer). -->
+		<_UakPerforceSourceInterface Condition="'$(UakEngineRoot)' != ''">$(UakEngineRoot)Engine/Source/Programs/Shared/EpicGames.Perforce/IPerforceConnection.cs</_UakPerforceSourceInterface>
+		<UakPerforceSourceUsesOpenTelemetry Condition="'$(_UakPerforceSourceInterface)' != '' and Exists('$(_UakPerforceSourceInterface)') and $([System.IO.File]::ReadAllText('$(_UakPerforceSourceInterface)').Contains('OpenTelemetry'))">true</UakPerforceSourceUsesOpenTelemetry>
+	</PropertyGroup>
+
+	<Target Name="UakCheckPerforceDependencies" BeforeTargets="ResolveAssemblyReferences" Condition="'$(UakPerforceFromSource)' == 'true'">
+		<Error Condition="'$(UakPerforceSourceUsesOpenTelemetry)' == 'true' and '$(UakOpenTelemetryDll)' == ''"
+			Text="UnrealAgentKit: '$(UakEngineRoot)' has no prebuilt EpicGames.Perforce.dll, and its EpicGames.Perforce source needs OpenTelemetry.Api.dll, which this engine has only once AutomationTool is built (looked in $(_UakDotNetDir)UnrealBuildTool/, AutomationTool/, AutomationTool/AutomationUtils/ and AutomationTool/AutomationUtils/$(TargetFramework)/). Build AutomationTool once with Engine/Build/BatchFiles/BuildUAT.bat (BuildUAT.sh on Linux and Mac), then build the kit again. Or pass -p:UakPerforceDll=&lt;path to an EpicGames.Perforce.dll&gt;." />
+	</Target>
+</Project>

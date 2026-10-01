@@ -1,5 +1,8 @@
 // Copyright Alex Stevens (@MilkyEngineer). All Rights Reserved.
 
+using System.Reflection;
+using System.Runtime.InteropServices;
+using System.Runtime.Versioning;
 using System.Text.Json;
 using Microsoft.Extensions.Logging;
 
@@ -120,8 +123,28 @@ public sealed class EnvCommand : IUakCommand
 			yield return new("Requested VCS", $"{context.RequestedVersionControl} ({How(UakContextResolver.VcsKey)})");
 		}
 		(string FileName, IReadOnlyList<string> Prefix) = UakSelf.GetCommand();
-		yield return new("uak", $"{UakHost.Version} at {string.Join(' ', Prefix.Prepend(FileName))}");
+		yield return new("uak", $"{UakHost.Version} for {BuiltFramework ?? "unknown .NET"} (running on {RuntimeInformation.FrameworkDescription}), built against engine {BuiltEngineVersion ?? "unknown"}, at {string.Join(' ', Prefix.Prepend(FileName))}");
 	}
+
+	/// <summary>
+	/// The target framework uak was built for, such as "net10.0": the engine's own (DESIGN.md, "Build"). A project command
+	/// assembly must target this or an older one to load.
+	/// </summary>
+	public static string? BuiltFramework
+	{
+		get
+		{
+			// ".NETCoreApp,Version=v10.0" is net10.0.
+			string? Name = typeof(EnvCommand).Assembly.GetCustomAttribute<TargetFrameworkAttribute>()?.FrameworkName;
+			const string Marker = ",Version=v";
+			int At = Name?.IndexOf(Marker, StringComparison.Ordinal) ?? -1;
+			return Name is null || At < 0 ? Name : "net" + Name[(At + Marker.Length)..];
+		}
+	}
+
+	/// <summary>The version of the engine uak was built against ("5.8.3"), from its Build.version at build time; null when unknown.</summary>
+	public static string? BuiltEngineVersion => typeof(EnvCommand).Assembly.GetCustomAttributes<AssemblyMetadataAttribute>()
+		.FirstOrDefault(Attribute => Attribute.Key == "UakEngineVersion")?.Value is { Length: > 0 } Value ? Value : null;
 
 	static string Existing(string path) => File.Exists(path) ? path : path + " (missing)";
 }

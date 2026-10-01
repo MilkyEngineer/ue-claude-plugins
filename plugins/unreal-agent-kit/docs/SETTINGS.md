@@ -21,7 +21,7 @@ Environment variables go under `"env"` in any of these. Claude Code reads them a
 
 Under memory pressure, Claude Code may end background shells early. A build or test run then dies half-way, and an agent waits on a result that never comes. This variable turns that off.
 
-It does not stop the two-hour limit on background shells, or their death when Claude Code restarts. For those, start runs with `uak runs start`.
+It does not stop the two-hour limit on background shells, or their death when Claude Code restarts. For those, start anything that may run over an hour with `uak runs start`.
 
 ## Auto-compaction
 
@@ -70,6 +70,8 @@ This lets Claude Code carry on once a usage limit resets. It does not always wak
 ```
 
 See [INSTALL.md](INSTALL.md) for what each one means. `UAK_COMMAND_PATHS` takes absolute folders only; `uak` skips a relative entry with a warning.
+
+`UAK_ENGINE` also chooses the engine `uak` is built against when you publish it: Claude Code passes it to every command it runs in the project, including a publish, and the build reads it before it looks at the `dotnet` you run. So setting it here changes the next publish too. `uak env` shows the engine `uak` was built against.
 
 `UAK_PROJECT_COMMANDS=1` makes `uak` load the command DLLs in `<Project>/.uak/commands/`, which then run with your rights. Set it only in `settings.local.json`, and only for a project whose `.uak/commands/` you trust: a checked-in `settings.json` would turn it on for everyone who clones the project.
 

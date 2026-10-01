@@ -21,6 +21,8 @@ This adds the agents (`ue-runner`, `ue-low`, `ue-medium`, `ue-high`, `ue-xhigh`,
 
 The plugin you just installed holds the source. Claude Code keeps that copy under `~/.claude/plugins/` and replaces it on every update, which is fine: the publish (step 4) installs `uak` outside it. When you start Claude Code in an Unreal project, the plugin's SessionStart hook prints the exact path while this version's `uak` isn't published yet. Ask Claude to run the publish, or run it yourself.
 
+The hook is a POSIX `sh` script, so it needs `sh`. Linux and Mac have it. On Windows it comes with Git for Windows (Git Bash), which Claude Code on Windows uses to run hooks. Without `sh` the hook can't run, and nothing reminds you to publish.
+
 You can publish from a clone you control instead:
 
 ```
@@ -41,6 +43,8 @@ The engine ships a .NET SDK at `<Engine root>/Engine/Binaries/ThirdParty/DotNet/
 
 Below, `<dotnet>` means that program. Running the engine's own `dotnet` is enough for the build to find the engine: `uak` links the engine's prebuilt `EpicGames.*` libraries and the third-party libraries beside them, and targets the engine's own .NET version, all taken from the engine whose `dotnet` runs it. To link another engine, set `UAK_ENGINE` to its root, or pass `-p:UakEngineDir=<engine root>`.
 
+**`UAK_ENGINE` also chooses the engine you publish against.** The build reads `UAK_ENGINE` before it looks at the `dotnet` that runs it. So when `UAK_ENGINE` is set, in your environment or in a project's `.claude/settings.local.json` (Claude Code passes that to every command it runs in the project), the next publish links that engine's libraries and targets its .NET version, even when you run another engine's `dotnet` (which fails if that SDK is older than the engine's .NET). Unset it, or pass `-p:UakEngineDir=`, which beats it, to publish against another engine. `uak env` shows the engine `uak` was built against.
+
 **Set `DOTNET_GENERATE_ASPNET_CERTIFICATE=false` before the first use of the bundled SDK.** Without it, the SDK's first run installs an ASP.NET development HTTPS certificate in your user certificate store. `DOTNET_CLI_TELEMETRY_OPTOUT=1` and `DOTNET_NOLOGO=1` turn off telemetry and the welcome banner.
 
 ## 4. Publish `uak`
@@ -50,7 +54,7 @@ Below, `<dotnet>` means that program. Running the engine's own `dotnet` is enoug
 ```
 
 - **What it makes.** A self-contained `uak` for this machine's platform. It runs with no installed .NET and no `DOTNET_ROOT`.
-- **Where it goes.** `$UAK_HOME/<kit version>/`, where `UAK_HOME` defaults to `~/.unreal-agent-kit`. For kit version 0.1.0 that is `~/.unreal-agent-kit/0.1.0/uak.exe` on Windows, and `~/.unreal-agent-kit/0.1.0/uak` on Linux and Mac.
+- **Where it goes.** `$UAK_HOME/<kit version>/`, where `UAK_HOME` defaults to `~/.unreal-agent-kit`. The kit version is the `version` in `<kit>/.claude-plugin/plugin.json`. For kit version 0.2.0 that is `~/.unreal-agent-kit/0.2.0/uak.exe` on Windows, and `~/.unreal-agent-kit/0.2.0/uak` on Linux and Mac. The examples below use 0.2.0: use your kit's version.
   - The folder is outside the plugin, which Claude Code replaces on every update.
   - Each kit version gets its own folder, so publishing a new version never overwrites a `uak` that is running.
   - Republishing the same version over itself can fail while a detached run is going, because the run's wrapper keeps that folder's files open. Wait until `uak runs list` shows nothing running.
@@ -80,10 +84,10 @@ engine="$HOME/UnrealEngine"   # your engine root
 
 Every Claude Code session and every detached run must find the same `uak`. Either add the publish folder to `PATH` in your user environment, or write its full path in the project's CLAUDE.md.
 
-- **Windows:** add `%USERPROFILE%\.unreal-agent-kit\0.1.0` to your user `Path` (Settings, System, About, Advanced system settings, Environment Variables), or from PowerShell:
+- **Windows:** add `%USERPROFILE%\.unreal-agent-kit\0.2.0` to your user `Path` (Settings, System, About, Advanced system settings, Environment Variables), or from PowerShell:
 
   ```powershell
-  $dir = "$env:USERPROFILE\.unreal-agent-kit\0.1.0"
+  $dir = "$env:USERPROFILE\.unreal-agent-kit\0.2.0"
   $key = Get-Item "HKCU:\Environment"
   # Read the raw value, so entries such as %USERPROFILE%\bin stay unexpanded.
   $path = $key.GetValue("Path", "", [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
@@ -97,9 +101,9 @@ Every Claude Code session and every detached run must find the same `uak`. Eithe
 
   This writes the user `Path` only, keeps its existing entries as they were (including unexpanded ones like `%USERPROFILE%\bin`), and does nothing if the folder is already there. Programs started before the change keep the old `Path`: open a new terminal, and restart Claude Code from it, to pick it up.
 
-  By full path: `& "$env:USERPROFILE\.unreal-agent-kit\0.1.0\uak.exe" env` in PowerShell, or `~/.unreal-agent-kit/0.1.0/uak.exe env` in Git Bash.
-- **Linux:** add `export PATH="$HOME/.unreal-agent-kit/0.1.0:$PATH"` to `~/.profile` (or your shell's profile). By full path: `~/.unreal-agent-kit/0.1.0/uak env`.
-- **Mac:** add the same line to `~/.zprofile`. By full path: `~/.unreal-agent-kit/0.1.0/uak env`.
+  By full path: `& "$env:USERPROFILE\.unreal-agent-kit\0.2.0\uak.exe" env` in PowerShell, or `~/.unreal-agent-kit/0.2.0/uak.exe env` in Git Bash.
+- **Linux:** add `export PATH="$HOME/.unreal-agent-kit/0.2.0:$PATH"` to `~/.profile` (or your shell's profile). By full path: `~/.unreal-agent-kit/0.2.0/uak env`.
+- **Mac:** add the same line to `~/.zprofile`. By full path: `~/.unreal-agent-kit/0.2.0/uak env`.
 
 Restart Claude Code afterwards, so it sees the new `PATH`. When you publish a new kit version, point `PATH` (or CLAUDE.md) at the new version's folder. Then check:
 
@@ -122,7 +126,11 @@ With an SDK 8 engine (UE 5.7, or a 5.6 source build), which predates `--solution
 
 ## 7. Point `uak` at the project and engine
 
-Usually nothing is needed. `uak` finds the project by walking up from the current folder to the nearest `.uproject`. It finds the engine that contains the project, else the one the project's `EngineAssociation` names. A source build works the same way: a project inside the engine's root folder (next to `Engine/`) uses that engine, and a project elsewhere names it in `EngineAssociation` (the GUID `Setup.bat` registers). Set these only when that guess is wrong, for example with several projects in one folder or a source-built engine that isn't registered:
+Usually nothing is needed. `uak` finds the project by walking up from the current folder to the nearest `.uproject`. It finds the engine as Unreal does:
+- a project whose `EngineAssociation` is set uses the engine it names: a version such as `5.8` or a registered build's GUID (the one `Setup.bat` registers), or a path (any value with `/` or `\`), relative to the project's folder. If that engine can't be found, `uak` stops with an error, as Unreal does: it does not fall back to another engine;
+- a project whose `EngineAssociation` is empty uses the engine whose root folder holds it, at any depth (a project inside a source build, next to `Engine/` or below).
+
+`UAK_ENGINE` or `-engine=` overrides both. Set these only when that guess is wrong, for example with several projects in one folder, or a source-built engine that isn't registered:
 
 | Variable | Meaning |
 | --- | --- |
@@ -156,7 +164,7 @@ The keys come from the project folder and the engine root, so two projects never
 ## Project commands
 
 A project can add its own `uak` commands without changing the kit:
-1. Build a class library that references `AgentKit.Core.dll` and implements `AgentKit.Core.IUakCommand`.
+1. Build a class library that references `AgentKit.Core.dll` and implements `AgentKit.Core.IUakCommand`. Target a .NET no newer than `uak`'s own, which is the .NET of the engine `uak` was published with (`net10.0` for UE 5.8, `net8.0` for UE 5.7): `uak` can't load a library built for a newer .NET. `net8.0` loads in both. `uak env` shows `uak`'s .NET and engine on its `uak:` line.
 2. Put its DLL, and its dependencies, in `<Project>/.uak/commands/`, or in a folder listed in `UAK_COMMAND_PATHS`. That variable takes absolute folders only: `uak` skips a relative entry with a warning, because it would depend on the current folder.
 3. Turn project commands on. `<Project>/.uak/commands/` is off by default: set `UAK_PROJECT_COMMANDS=1` (or `true`), or list that folder in `UAK_COMMAND_PATHS`. While it is off, `uak help` and `uak env` mention the folder and say how to turn it on.
 

@@ -72,20 +72,24 @@ public sealed class BuildCommand : IUakCommand
 		EngineLayout Paths = Services.Paths(context);
 		ProcessInvocation Invocation = UbtCommandLine.Build(Paths, new UbtTarget(Target, Platform, Configuration, Project, MaxParallel));
 		string LogFile = Services.NewLogFile(context, "build");
+		// Named first, and written as it goes, so a long build can be followed in its log while it runs.
+		context.Logger.LogInformation("Log: {Log}", LogFile);
 
 		BuildLogParser Parser = new();
 		int ExitCode;
 		Stopwatch Timer;
-		await using (IAsyncDisposable Lock = await Services.Lock.AcquireAsync(context, $"uak build {Target}", cancellationToken).ConfigureAwait(false))
+		await using (StreamWriter Log = new(LogFile, append: false, new System.Text.UTF8Encoding(false)) { AutoFlush = true })
 		{
-			context.Logger.LogInformation("Building {Target} {Platform} {Configuration}...", Target, Platform.Name, Configuration);
-			Timer = Stopwatch.StartNew();
-			await using StreamWriter Log = new(LogFile, append: false, new System.Text.UTF8Encoding(false));
 			await Log.WriteLineAsync("> " + Invocation).ConfigureAwait(false);
+			await using IAsyncDisposable Lock = await Services.Lock.AcquireAsync(context, $"uak build {Target}", cancellationToken).ConfigureAwait(false);
+			context.Logger.LogInformation("Building {Target} {Platform} {Configuration}...", Target, Platform.Name, Configuration);
+			UbtProgress Progress = new(Services.Clock, UbtProgress.DefaultInterval, Text => context.Logger.LogInformation("  {Progress}", Text));
+			Timer = Stopwatch.StartNew();
 			ExitCode = await Services.RunToolAsync(Invocation, Line =>
 			{
 				Log.WriteLine(Line);
 				Parser.AddLine(Line);
+				Progress.AddLine(Line);
 			}, Lock, cancellationToken).ConfigureAwait(false);
 			Timer.Stop();
 		}

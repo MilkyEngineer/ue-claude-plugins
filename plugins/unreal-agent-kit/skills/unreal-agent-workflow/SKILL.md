@@ -11,7 +11,7 @@ Every run goes through `uak`, the kit's CLI. If `uak` is not found, publish it f
 
 - `uak build` and `uak test -filter=<prefix> [-gpu] -name=<unique>` take the editor lock themselves.
 - `uak lock run -name=<unique> -- <command...>` holds the lock around any other editor run; `uak lock status` shows the holder and the queue.
-- `uak runs start -name=<unique> -owner=<E# or lead> -- <command...>` starts a long run detached; `uak runs list [-all]` follows runs, and `uak runs adopt -pid=<PID> -name= -owner=` records one started some other way.
+- `uak runs start -name=<unique> -owner=<E# or lead> -- <command...>` starts a run that may take over an hour, detached; `uak runs list [-all]` lists runs, `uak runs wait -name=<name> -timeout=<seconds>` waits for one to end, and `uak runs adopt -pid=<PID> -name= -owner=` records one started some other way.
 - A `.ps1` command given to `uak lock run` or `uak runs start` runs with `-ExecutionPolicy Bypass`, so pass only scripts the project trusts.
 - `uak compile <file>... [-dependents]` checks single files without the lock.
 - `uak vcs status|changed|revision` reports version control (Git, Perforce or none).
@@ -32,7 +32,7 @@ Every run goes through `uak`, the kit's CLI. If `uak` is not found, publish it f
 - **Before spawning,** count the live agents by tier. Pick the lowest tier that can do the task well.
 - **Read the first few ue-low and ue-runner reports closely,** and do failure triage yourself: Sonnet may misread a failure.
 - **Why a runner that cannot edit:** a verification that "fixes" what it finds no longer verifies the tree it was given. A runner reports, and the requester decides.
-- **Why a read-only researcher:** engine investigations are long and need no edits. Read-only, it can run beside workers that are building, with no file conflicts, and its `file:line` answer saves each worker repeating the search.
+- **Why a read-only researcher:** engine investigations are long and need no edits. Its reading never conflicts with workers' edits, and its `file:line` answer saves each worker repeating the search. Its experiments (`uak compile`, `uak test`) queue on the lock like any run, and a compile experiment needs a module to put a temporary file in: name one in the spawn prompt if it may need it.
 
 ## 2. Plan a milestone: plan, briefs README, one brief per epic
 
@@ -49,7 +49,7 @@ Every run goes through `uak`, the kit's CLI. If `uak` is not found, publish it f
 - **Workers ask you** with SendMessage to "main". Answer promptly. Decisions that belong to the owner go to the owner.
 - **Runner requests.** For long, low-judgment work (chains of runs, following long runs, re-running jobs stuck on the lock), a worker asks you for a ue-runner. Spawn it within the caps with the requester's exact run list, in order, and what to report. Relay its report to the requester with SendMessage.
 - **Research requests.** For a long engine investigation, a worker may ask you for a ue-research. Spawn it with the exact question and what the answer is for, and relay the answer. Spawn one yourself before planning work that leans on an engine behaviour nobody has checked.
-- **Never spend an agent on waiting.** A background shell that waits for a run to end, or `uak runs list`, costs nothing. An agent that wakes up again and again to check costs a turn each time, and a large one costs more.
+- **Never spend an agent on waiting.** To wait for a detached run, run `uak runs wait -name=<name> -timeout=<seconds>` in a background shell whose own time limit is longer than `-timeout` and within the shell's two-hour limit. It costs nothing while it waits, and its end wakes you: exit 0 means the run exited 0, 1 that it failed or ended with no exit code, and 3 that `-timeout` passed with the run still going, so start another wait. An agent that wakes up again and again to check costs a turn each time, and a large one costs more.
 - **When a report arrives:**
   - check that the brief's Current state and Next step were updated;
   - check claims against evidence (run names, logs, test counts) before you repeat them;
@@ -89,7 +89,7 @@ If the project mirrors its spec in a separate document (for example a shared doc
     > Watchdog: check each agent spawned this session. For each that stopped at a usage limit or a restart, resume it with SendMessage, or respawn it from its brief (section 4): tell it to re-check any half-written files, rerun what it was waiting on, and carry on with its next step. Then run `uak runs list` and `uak lock status`, and resume any lead task that was interrupted.
 - **After a Claude Code restart:**
   - Agents do not restart themselves. They come back as stopped. Resume each one with SendMessage, or respawn it from its brief (section 4), and tell it to rerun what it was waiting on.
-  - Background shells are dead, and they also die after 2 hours. Long runs must go through `uak runs start`, which survives both; follow them with `uak runs list`. A run started some other way can be recorded with `uak runs adopt`.
+  - Background shells are dead, and they also die after two hours. Anything that may run over an hour must go through `uak runs start`, which survives both; `uak runs list` shows them, and `uak runs wait` waits for one. A run started some other way can be recorded with `uak runs adopt`.
   - The watchdog, if auto-resume is allowed, is gone. Recreate it.
 - **Auto-compaction.** Long lead sessions compact. Keep decisions and state in files (plans, briefs, review records, the project's CLAUDE.md or memory), not only in the conversation. See `${CLAUDE_PLUGIN_ROOT}/docs/SETTINGS.md` for the threshold.
 

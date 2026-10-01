@@ -45,14 +45,16 @@ All runs go through `uak`. See `uak help` and the kit's docs.
 
 - `uak build`, `uak test -filter=<prefix> [-gpu] -name=<unique>`: they take the editor lock themselves.
 - `uak lock run -name=<unique> -- <command...>`: any other editor, commandlet or game run, one invocation at a time. `uak lock status` shows the holder and the queue.
-- `uak runs start -name=<unique> -owner=<E#> -- <command...>`: runs that may outlive a shell (over two hours, or across a restart). `uak runs list [-all]` follows them.
+- `uak runs start -name=<unique> -owner=<E#> -- <command...>`: runs that may take over an hour, so they outlive a shell (which dies after two hours, and on a restart). `uak runs list [-all]` lists them.
+- `uak runs wait -name=<name> -timeout=<seconds>`: waits for a detached run to end. Run it in a background shell whose own time limit is longer than `-timeout` and within the shell's two-hour limit. Exit 0: the run exited 0. Exit 1: it failed, or ended with no exit code. Exit 3: `-timeout` passed with the run still going; start another wait.
 - `uak compile <file>... [-dependents]`: single-file compile checks, without the lock.
 - `uak vcs changed`, `uak vcs status <path>...`: what changed, through Git or Perforce.
 
 ## Gotchas everyone has hit
 
 - **Never wrap a long run in `timeout`.** It kills runs that are waiting on the lock.
-- **Background shells die when Claude Code restarts, and after two hours.** Use `uak runs start`.
+- **Background shells die when Claude Code restarts, and after two hours.** Use `uak runs start` for anything that may run over an hour.
+- **Never poll a run by hand.** Wait with one background `uak runs wait`; `uak runs list` hides finished runs and exits 0 either way.
 - **A crash in one test ends the whole run** and hides every later test. `uak test` then fails, because fewer tests completed than were found: read the editor log (`<Project>/Saved/Logs/<name>.log`).
 - **A green run without `-gpu` says nothing about GPU tests.** They skip.
 - **After editing a header that another module includes,** compile-check it through those modules (`uak compile <header> -dependents`). A clean build of your own module says nothing about the others.

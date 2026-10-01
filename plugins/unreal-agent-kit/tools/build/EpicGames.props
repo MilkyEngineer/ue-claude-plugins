@@ -46,7 +46,26 @@
 		<_UakRuntimeConfig Condition="'$(UakEpicGamesDir)' != '' and '$(_UakRuntimeConfig)' == '' and Exists('$(UakEpicGamesDir)AutomationTool.runtimeconfig.json')">$(UakEpicGamesDir)AutomationTool.runtimeconfig.json</_UakRuntimeConfig>
 		<_UakEngineTfm Condition="'$(_UakRuntimeConfig)' != ''">$([System.Text.RegularExpressions.Regex]::Replace($([System.IO.File]::ReadAllText('$(_UakRuntimeConfig)')), '(?s)^.*"tfm"\s*:\s*"(net\d+\.\d+)".*$', '$1'))</_UakEngineTfm>
 		<UakEngineTargetFramework Condition="'$(UakEngineTargetFramework)' == '' and '$(_UakEngineTfm)' != '' and $([System.Text.RegularExpressions.Regex]::IsMatch('$(_UakEngineTfm)', '^net\d+\.\d+$'))">$(_UakEngineTfm)</UakEngineTargetFramework>
+
+		<!--
+			When the engine's runtimeconfig.json can't be read, the running SDK's own .NET: its major version, from MSBuildBinPath's
+			<dotnet>/sdk/<sdk version>/ folder name (SDK 10.0.203: net10.0; SDK 8.0.412: net8.0). That SDK can always build for it.
+		-->
+		<_UakSdkTfm>$([System.Text.RegularExpressions.Regex]::Replace('$(MSBuildBinPath)', '(?s)^.*[/\\]sdk[/\\](\d+)\.[^/\\]*[/\\]?$', 'net$1.0'))</_UakSdkTfm>
+		<UakSdkTargetFramework Condition="$([System.Text.RegularExpressions.Regex]::IsMatch('$(_UakSdkTfm)', '^net\d+\.0$'))">$(_UakSdkTfm)</UakSdkTargetFramework>
+
+		<!-- The engine's version, Major.Minor.Patch from its Build.version: `uak env` shows it, and EpicGames.Perforce.FromSource is versioned by it. -->
+		<_UakBuildVersion Condition="'$(UakEngineRoot)' != '' and Exists('$(UakEngineRoot)Engine/Build/Build.version')">$([System.IO.File]::ReadAllText('$(UakEngineRoot)Engine/Build/Build.version'))</_UakBuildVersion>
+		<_UakEngineMajor Condition="'$(_UakBuildVersion)' != ''">$([System.Text.RegularExpressions.Regex]::Replace('$(_UakBuildVersion)', '(?s)^.*"MajorVersion"\s*:\s*(\d+).*$', '$1'))</_UakEngineMajor>
+		<_UakEngineMinor Condition="'$(_UakBuildVersion)' != ''">$([System.Text.RegularExpressions.Regex]::Replace('$(_UakBuildVersion)', '(?s)^.*"MinorVersion"\s*:\s*(\d+).*$', '$1'))</_UakEngineMinor>
+		<_UakEnginePatch Condition="'$(_UakBuildVersion)' != ''">$([System.Text.RegularExpressions.Regex]::Replace('$(_UakBuildVersion)', '(?s)^.*"PatchVersion"\s*:\s*(\d+).*$', '$1'))</_UakEnginePatch>
+		<UakEngineVersion Condition="$([System.Text.RegularExpressions.Regex]::IsMatch('$(_UakEngineMajor).$(_UakEngineMinor).$(_UakEnginePatch)', '^\d+\.\d+\.\d+$'))">$(_UakEngineMajor).$(_UakEngineMinor).$(_UakEnginePatch)</UakEngineVersion>
 	</PropertyGroup>
+
+	<ItemGroup Condition="'$(UakEngineVersion)' != ''">
+		<!-- Read by `uak env` (EnvCommand.BuiltEngineVersion). -->
+		<AssemblyMetadata Include="UakEngineVersion" Value="$(UakEngineVersion)" />
+	</ItemGroup>
 
 	<ItemGroup Condition="'$(UakEpicGamesDir)' != ''">
 		<!-- EpicGames.Build needs EpicGames.IoHash and EpicGames.MsBuild at run time. -->

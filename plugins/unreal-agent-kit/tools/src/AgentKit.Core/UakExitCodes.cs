@@ -13,6 +13,9 @@ public static class UakExitCodes
 
 	/// <summary>The command could not run: bad arguments, an unknown command, or no project or engine could be found.</summary>
 	public const int UsageError = 2;
+
+	/// <summary>A wait's time limit passed before what it waited for happened (<c>uak runs wait -timeout=</c>).</summary>
+	public const int TimedOut = 3;
 }
 
 /// <summary>

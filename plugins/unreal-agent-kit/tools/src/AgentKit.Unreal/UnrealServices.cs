@@ -108,7 +108,7 @@ public sealed class UnrealServices
 	/// <summary>The host platform.</summary>
 	public UnrealPlatform HostPlatform { get; init; } = UnrealPlatform.Host;
 
-	/// <summary>The clock, for log names.</summary>
+	/// <summary>The clock, for log names and progress echoes.</summary>
 	public TimeProvider Clock { get; init; } = TimeProvider.System;
 
 	/// <summary>The -MaxParallelActions to pass: the option when given, else UAK_MAX_PARALLEL_ACTIONS, else none.</summary>

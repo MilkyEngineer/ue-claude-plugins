@@ -10,7 +10,10 @@
 	<PropertyGroup>
 		<AssemblyName>EpicGames.Perforce</AssemblyName>
 		<RootNamespace>EpicGames.Perforce</RootNamespace>
+		<!-- The engine's code, so the engine's version (from its Build.version), not the kit's. -->
+		<Version Condition="'$(UakEngineVersion)' != ''">$(UakEngineVersion)</Version>
 		<UakPerforceSourceDir>$(UakEngineRoot)Engine/Source/Programs/Shared/EpicGames.Perforce/</UakPerforceSourceDir>
+		<UakPerforceFromSource>true</UakPerforceFromSource>
 		<EnableDefaultItems>false</EnableDefaultItems>
 		<ImplicitUsings>disable</ImplicitUsings>
 		<AllowUnsafeBlocks>true</AllowUnsafeBlocks>
@@ -21,14 +24,17 @@
 		<IsPackable>false</IsPackable>
 	</PropertyGroup>
 
+	<!-- UakLinqAsyncDll and UakOpenTelemetryDll, from the engine's own builds; it fails early when the source needs one that is missing. -->
+	<Import Project="Dependencies.props" />
+
 	<ItemGroup>
 		<Compile Include="$(UakPerforceSourceDir)**/*.cs" Exclude="$(UakPerforceSourceDir)obj/**;$(UakPerforceSourceDir)bin/**" />
 	</ItemGroup>
 
-	<ItemGroup Condition="'$(UakEpicGamesDir)' != ''">
-		<!-- EpicGames.Core comes from build/EpicGames.props. Its one third-party dependency, whichever this engine version uses. -->
-		<Reference Include="System.Linq.Async" HintPath="$(UakEpicGamesDir)System.Linq.Async.dll" Private="true" Condition="Exists('$(UakEpicGamesDir)System.Linq.Async.dll')" />
-		<Reference Include="OpenTelemetry.Api" HintPath="$(UakEpicGamesDir)OpenTelemetry.Api.dll" Private="true" Condition="Exists('$(UakEpicGamesDir)OpenTelemetry.Api.dll')" />
+	<ItemGroup>
+		<!-- EpicGames.Core comes from build/EpicGames.props. Its third-party dependency, whichever this engine version uses. -->
+		<Reference Include="System.Linq.Async" HintPath="$(UakLinqAsyncDll)" Private="true" Condition="'$(UakLinqAsyncDll)' != ''" />
+		<Reference Include="OpenTelemetry.Api" HintPath="$(UakOpenTelemetryDll)" Private="true" Condition="'$(UakOpenTelemetryDll)' != ''" />
 	</ItemGroup>
 
 	<Target Name="UakCheckPerforceSource" BeforeTargets="CoreCompile">

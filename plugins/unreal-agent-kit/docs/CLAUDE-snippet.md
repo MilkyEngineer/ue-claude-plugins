@@ -13,7 +13,7 @@ Paste the block below into your project's CLAUDE.md, then replace each `<...>`. 
   - review records: <Documentation/Reviews>.
 - **`uak`:** <on PATH | run as `~/.unreal-agent-kit/<version>/uak`>. If it is missing, publish the kit first (the plugin's docs/INSTALL.md). `uak env` shows what it resolved; `uak help <command>` gives the options.
 - **Builds and tests:** `uak build`; `uak test -filter=<Project>.<Area> -name=<unique>`; add `-gpu` for tests that need a GPU. Both take the editor lock themselves. Other editor runs: `uak lock run -name=<unique> -- <command...>`. Compile checks without the lock: `uak compile <file>... [-dependents]`. Parallelism cap: <UAK_MAX_PARALLEL_ACTIONS=3, because the machine has 16 GB RAM>.
-- **Long runs:** `uak runs start -name=<unique> -owner=<E# or lead> -- <command...>`; follow with `uak runs list`.
+- **Long runs:** anything that may run over an hour: `uak runs start -name=<unique> -owner=<E# or lead> -- <command...>`. Wait for it with `uak runs wait -name=<name> -timeout=<seconds>` in a background shell whose own time limit is longer than `-timeout` and within the shell's two-hour limit; on exit 3 (still running), start another wait. `uak runs list` shows what is running.
 - **Project tools:** <none | `uak` commands in `<Project>/.uak/commands/`, turned on with `UAK_PROJECT_COMMANDS=1` in `.claude/settings.local.json`: name them>.
 - **Tests:** automation tests live in <Source/<Project>Tests>, named <Project>.<Area>.<Name>.
 - **Style:** <file header text>, <tabs or spaces>, Unreal naming, and the comment density of the surrounding code. <Line endings.>

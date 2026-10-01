@@ -16,9 +16,9 @@ Work these out first; ask the user only if you can't.
 
 | Name | How to find it | Example |
 |---|---|---|
-| `PROJECT_DIR` | Folder containing the `.uproject` | `C:\Users\alex\Documents\Unreal\CodeProject` |
-| `PROJECT_NAME` | `.uproject` file name without extension | `CodeProject` |
-| `EDITOR_TARGET` | `Source/<Name>Editor.Target.cs` | `CodeProjectEditor` |
+| `PROJECT_DIR` | Folder containing the `.uproject` | `D:\Projects\MyGame` |
+| `PROJECT_NAME` | `.uproject` file name without extension | `MyGame` |
+| `EDITOR_TARGET` | `Source/<Name>Editor.Target.cs` | `MyGameEditor` |
 | `UE_ROOT` | Engine install. `EngineAssociation` in the `.uproject` gives the version; default path is `C:\Program Files\Epic Games\UE_<ver>` | `C:\Program Files\Epic Games\UE_5.8` |
 
 Check that `"%UE_ROOT%\Engine\Binaries\DotNET\UnrealBuildTool\UnrealBuildTool.exe"` exists.
@@ -65,7 +65,7 @@ setlocal
 if not defined UE_ROOT set "UE_ROOT=C:\Program Files\Epic Games\UE_5.8"
 
 "%UE_ROOT%\Engine\Binaries\DotNET\UnrealBuildTool\UnrealBuildTool.exe" -mode=GenerateClangDatabase ^
-    -project="%~dp0CodeProject.uproject" CodeProjectEditor Win64 Development ^
+    -project="%~dp0<PROJECT_NAME>.uproject" <EDITOR_TARGET> Win64 Development ^
     -OutputDir="%~dp0."
 ```
 
@@ -96,7 +96,7 @@ Create `%LOCALAPPDATA%\clangd\config.yaml` and **merge** into it if it already e
 If:
   PathMatch: C:/Program Files/Epic Games/UE_5\.8/.*
 CompileFlags:
-  CompilationDatabase: C:/Users/alex/Documents/Unreal/CodeProject
+  CompilationDatabase: <PROJECT_DIR, with forward slashes, e.g. D:/Projects/MyGame>
 # Borrowed flags lack each engine module's private include paths/API macros, so diagnostics there are noise.
 Diagnostics:
   Suppress: "*"
@@ -174,5 +174,5 @@ Tell the user to:
 - **Delete** any renamed `graphify-out.engine-old` and other leftovers themselves. Don't `rm -rf` large directories without explicit approval.
 
 Do not:
-- Suggest WSL- or Docker-based indexers (e.g. Embark's UnrealClaudeFileHelper). This user's WSL memory constraints make them unusable.
+- Suggest WSL- or Docker-based indexers (e.g. Embark's UnrealClaudeFileHelper). They need WSL or Docker and far more memory than this setup.
 - Build a clangd or graphify index over the whole engine. That size problem is exactly what this setup avoids.

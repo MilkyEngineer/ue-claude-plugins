@@ -1,10 +1,10 @@
 # UnrealAgentKit: design
 
 UnrealAgentKit is a Claude Code plugin with two parts:
-- a multi-agent workflow for Unreal Engine projects: tiered agents, a read-only reviewer, epic briefs, and delegation;
+- a multi-agent workflow for Unreal Engine projects: tiered workers, a runner that cannot edit, a read-only researcher and a read-only reviewer, epic briefs, and delegation;
 - the tools that workflow needs, gathered in one CLI, `uak`:
   - a queued lock around editor and build runs;
-  - detached runs that are tracked;
+  - detached runs that are tracked, and a wait for one to end;
   - a single-file compile check;
   - build and test wrappers;
   - a version-control abstraction.
@@ -21,8 +21,8 @@ The owner decided on 2026-10-01:
 ```
 plugins/unreal-agent-kit/
   .claude-plugin/plugin.json
-  agents/            tiered workers and the reviewer (generic ground rules)
-  skills/            the workflow skill (briefs, delegation, reviews, doc sync) and templates
+  agents/            tiered workers, the runner, the researcher and the reviewer (generic ground rules)
+  skills/            the workflow skill (briefs, delegation, resume or respawn, reviews, doc sync) and templates
   hooks/             SessionStart: says when this version's uak isn't published yet
   docs/              install, settings, CLAUDE.md snippet
   tools/
@@ -41,7 +41,7 @@ plugins/unreal-agent-kit/
 
 `<Engine>/Binaries/ThirdParty/DotNet/<version>/<platform>/dotnet build tools/UnrealAgentKit.sln`, using the engine's bundled SDK.
 
-- **Target framework:** the engine's own, read from the `tfm` in its `UnrealBuildTool.runtimeconfig.json` (`UakEngineTargetFramework`), so the engine's libraries always load. UE 5.8 bundles SDK 10.0.203 (`net10.0`); UE 5.7 bundles 8.0.412 (`net8.0`, C# 12).
+- **Target framework:** the engine's own, read from the `tfm` in its `UnrealBuildTool.runtimeconfig.json` (`UakEngineTargetFramework`), so the engine's libraries always load. UE 5.8 bundles SDK 10.0.203 (`net10.0`); UE 5.7 bundles 8.0.412 (`net8.0`, C# 12). When that file can't be read, the running SDK's own major version (`UakSdkTargetFramework`, from the `sdk/<version>` folder name in `MSBuildBinPath`), which that SDK can always build; `net10.0` only when neither is known.
 - **Newer .NET APIs** stay out of the code, or behind `#if NET9_0_OR_GREATER` with a .NET 8 path (`UakJson`'s tab indentation is the one case). Differences between engine versions' libraries are keyed on what the engine ships, not on its version: `UAK_PERFORCE_TRACER` is defined when OpenTelemetry.Api sits beside EpicGames.Perforce (UE 5.8's `IPerforceConnection` has a `Tracer`; 5.7's has none).
 - Output goes under `tools/bin` and `tools/obj`. Never write into an engine directory: installed engines sit under Program Files. (The bundled SDK may update its own metadata folder under the engine's DotNet directory; the kit's build writes nothing else there.)
 - Tests: from `tools/`, `dotnet test --solution UnrealAgentKit.sln` with SDK 10 (Microsoft.Testing.Platform, set in `tools/global.json`, which is only found from `tools/`), or `dotnet test UnrealAgentKit.sln` with SDK 8 (VSTest; the test projects support both).
@@ -53,19 +53,22 @@ plugins/unreal-agent-kit/
 - **How:** a self-contained publish of `tools/src/uak` for the host's runtime identifier, so it runs with no system-wide dotnet.
 - **Where:** `$UAK_HOME` (default `~/.unreal-agent-kit`) plus `/<kit version>/`. That is outside the plugin folder, because Claude Code replaces plugin folders on update, and versioned, so an update never overwrites a running binary.
 - **Fallback:** if self-contained doesn't work cleanly, `<engine dotnet> uak.dll`.
+- **Which engine:** the publish builds against the engine `build/EpicGames.props` finds, so a `UAK_ENGINE` set in the environment (or in a project's `.claude/settings.local.json`, which Claude Code passes to every command) chooses the engine of the next publish too, even when another engine's `dotnet` runs it. The docs say so.
 - **NuGet:** the bundled SDKs carry no .NET runtime pack, so the first self-contained publish downloads one (Microsoft.NETCore.App.Runtime.<rid>). `-p:SelfContained=false` needs nothing from NuGet, but then `uak` runs on the engine's dotnet (`DOTNET_ROOT`).
-- **Project commands:** the host also loads `IUakCommand` assemblies from the folders in `UAK_COMMAND_PATHS`, and from `<Project>/.uak/commands/` only when `UAK_PROJECT_COMMANDS=1` (or `true`) or that folder is listed in `UAK_COMMAND_PATHS` (a cloned repository's code never runs by default). Folders outside the kit load lazily: only for a command the kit lacks, or for `uak help -all`. Entries in `UAK_COMMAND_PATHS` must be absolute; a relative entry is skipped with a warning, because it would depend on the current folder. That way a project adds its own tools without changing the kit.
+- **Project commands:** the host also loads `IUakCommand` assemblies from the folders in `UAK_COMMAND_PATHS`, and from `<Project>/.uak/commands/` only when `UAK_PROJECT_COMMANDS=1` (or `true`) or that folder is listed in `UAK_COMMAND_PATHS` (a cloned repository's code never runs by default). Folders outside the kit load lazily: only for a command the kit lacks, or for `uak help -all`. Entries in `UAK_COMMAND_PATHS` must be absolute; a relative entry is skipped with a warning, because it would depend on the current folder. That way a project adds its own tools without changing the kit. A command assembly must target a framework no newer than `uak`'s, which is the engine's that `uak` was published with (`net8.0` loads on both UE 5.7 and 5.8 builds); `uak env`'s `uak:` line shows `uak`'s framework, the runtime it runs on, and the engine version it was built against (`UakEngineVersion`, embedded at build time as assembly metadata by `build/EpicGames.props`).
 
 ## Engine libraries
 
 `build/EpicGames.props` is owned by Core.
-- **Engine directory.** It finds the engine from the `UakEngineDir` property, else from the `UAK_ENGINE` environment variable, else from the engine whose bundled dotnet runs the build. It resolves `UakEngineRoot` (the root, with a trailing slash) and `UakEpicGamesDir` (`<root>Engine/Binaries/DotNET/UnrealBuildTool/`).
+- **Engine directory.** It finds the engine from the `UakEngineDir` property, else from the `UAK_ENGINE` environment variable, else from the engine whose bundled dotnet runs the build. It resolves `UakEngineRoot` (the root, with a trailing slash) and `UakEpicGamesDir`: `<root>Engine/Binaries/DotNET/UnrealBuildTool/`, or `AutomationTool/` beside it when `UnrealBuildTool/` has no `EpicGames.Build.dll`. It also reads `UakEngineVersion` (Major.Minor.Patch) from the engine's `Build.version`.
 - **References.** It references the prebuilt `EpicGames.Core`, `.Build`, `.IoHash` and `.MsBuild` that the engine ships in `.../UnrealBuildTool`, and their run-time dependency closure from the same folder (Microsoft.Extensions.*, Polly, Blake3 and its native library, and the rest, as `UnrealBuildTool.deps.json` lists them). All are file references with `Private=true`, so they are copied next to `uak`. No NuGet package is involved, and the versions always match the engine.
 - **EpicGames.Perforce.** The engine ships it prebuilt with AutomationTool: in `AutomationUtils/<tfm>/` in UE 5.8, and directly in `AutomationUtils/` in UE 5.7. AgentKit.Vcs references that DLL itself, based on `$(UakEngineRoot)`: the resolved engine root, with a trailing slash. `UakEngineDir` is only the optional input. It is not in `build/EpicGames.props`, because only AgentKit.Vcs and its tests need it.
-  - Its one third-party dependency comes from the engine too: OpenTelemetry.Api beside it (5.8), or System.Linq.Async in `AutomationTool/` (5.7).
+  - Its one third-party dependency comes from the engine too: OpenTelemetry.Api beside it (5.8), or System.Linq.Async in `AutomationTool/` (5.7). No NuGet package.
   - We use our own `P4ProcessConnection`, an `IPerforceConnection` that runs `p4 -G` (found on PATH only) with a per-command timeout (`UAK_P4_TIMEOUT`, 15 s by default), so no native library is needed.
   - `src/AgentKit.Vcs/EpicGames.Perforce.props` holds the reference. It prefers `AutomationUtils/$(TargetFramework)/`, then `AutomationUtils/`, and `-p:UakPerforceDll=<path>` overrides both.
-  - **Source builds** have no AutomationTool until someone runs it, so there is no prebuilt DLL. Then `src/EpicGames.Perforce.FromSource` compiles the engine's own `Engine/Source/Programs/Shared/EpicGames.Perforce` source (assembly name `EpicGames.Perforce`) into the kit's `tools/bin`, against the engine's prebuilt EpicGames.Core and its System.Linq.Async from `UnrealBuildTool/`. Nothing is written into the engine. The kit's warning and analyzer rules don't apply to that code.
+  - **Source builds** have no AutomationTool until someone builds it, so there is no prebuilt DLL. Then `src/EpicGames.Perforce.FromSource` compiles the engine's own `Engine/Source/Programs/Shared/EpicGames.Perforce` source (assembly name `EpicGames.Perforce`, versioned with `UakEngineVersion`) into the kit's `tools/bin`, against the engine's prebuilt EpicGames.Core. Nothing is written into the engine. The kit's warning and analyzer rules don't apply to that code.
+    - Its third-party dependency (System.Linq.Async up to UE 5.7, OpenTelemetry.Api in 5.8) is looked for, by `src/EpicGames.Perforce.FromSource/Dependencies.props`, in the engine's `UnrealBuildTool/`, then `AutomationTool/`, then `AutomationTool/AutomationUtils/` and `AutomationUtils/<tfm>/`. A 5.7 or older source build has System.Linq.Async in `UnrealBuildTool/`. A 5.8 source build has no OpenTelemetry.Api until AutomationTool is built: when the engine's `IPerforceConnection.cs` uses OpenTelemetry and no `OpenTelemetry.Api.dll` exists in those folders, the build fails at once, telling the user to run `Engine/Build/BatchFiles/BuildUAT.bat` (`BuildUAT.sh` on Linux and Mac) once.
+    - It is not in the solution, so `Directory.Build.props` sets `ShouldUnsetParentConfigurationAndPlatform=false` (and the reference passes `SetConfiguration`): a Release build builds it as Release.
   - The build fails with a clear message if there is neither a DLL nor the source.
   - We don't use `PerforceConnection` itself: it starts a bare `p4.exe` (which Windows looks up in the current directory first) and has no time limit.
   - The API we use, the same in 5.7 and 5.8: `PerforceSettings(IPerforceEnvironment)`, `IPerforceConnection`, `IPerforceOutput`, `PerforceRecord.FromFields`, `TryGetInfoAsync`, `TryGetChangesAsync`, `TryFStatAsync`, `TryAddAsync`, `AddOptions.IncludeWildcards` and `InfoOptions`.
@@ -88,9 +91,10 @@ Global options (`-project=`, `-engine=`, `-vcs=`, `-verbose`, `-help`) are parse
 
   Only assemblies that reference AgentKit.Core are loaded. A duplicate name is a warning.
 - **`uak env` sections** come from the `IUakEnvReporter` implementations in the kit's own assemblies. Kit commands, `uak env`, `uak help` and `uak help <kit command>` never load other folders (`uak help <a name the kit lacks>` and `uak help -all` load the opted-in ones); when the project folder exists but isn't opted in, `help` and `env` say so in one line on stderr.
-- **Exit codes:** 0 for success, 1 for failure (including a cancel), and 2 for a usage or setup error. The first Ctrl+C cancels the command; a second one kills `uak`.
+- **Exit codes:** 0 for success, 1 for failure (including a cancel), and 2 for a usage or setup error. `uak runs wait` alone also uses 3: its `-timeout` passed while the run still runs. The first Ctrl+C cancels the command; a second one kills `uak`.
 - **`UAK_HOME`** (default `~/.unreal-agent-kit`) holds both the versioned installs and the fallback `State/` folder.
 - **Version:** `Directory.Build.props`'s `<Version>` must equal `.claude-plugin/plugin.json`'s version.
+- **Release rule:** every change that reaches users (anything under the plugin folder that an installed copy would see: agents, skills, hooks, docs or `uak` itself) bumps the version, in both files, in the same commit. Claude Code delivers a plugin update only when the version changes, and the SessionStart hook prompts a republish of `uak` only for a version that has no install yet.
 
 ## Resolving the engine and project
 
@@ -104,13 +108,14 @@ The project comes from:
 The engine comes from:
 1. `-engine=`;
 2. the `UAK_ENGINE` environment variable;
-3. otherwise, the engine root that contains the project (a source build with the project inside it);
-4. otherwise, the `.uproject`'s `EngineAssociation`:
-   - a path-like value is used as a path;
-   - on Windows, other values are looked up in `HKCU\Software\Epic Games\Unreal Engine\Builds`, then in the launcher's installs (`HKLM\SOFTWARE\EpicGames\Unreal Engine\<version>` InstalledDirectory, then `LauncherInstalled.dat`);
-   - on Linux and Mac, they are looked up in UE's application settings folder (`~/.config/Epic` on Linux, `~/Library/Application Support/Epic` on Mac): `UnrealEngine/Install.ini` [Installations], then `UnrealEngineLauncher/LauncherInstalled.dat`.
+3. otherwise, the `.uproject`'s `EngineAssociation`, read as Unreal reads it (UE 5.8, `FDesktopPlatformBase::GetEngineIdentifierForProject` in `Engine/Source/Developer/DesktopPlatform/Private/DesktopPlatformBase.cpp`):
+   - A non-empty value decides. A value holding `/` or `\` is a path, relative to the project's folder. Any other value is an identifier, looked up:
+     - on Windows, in `HKCU\Software\Epic Games\Unreal Engine\Builds`, then in the launcher's installs (`HKLM\SOFTWARE\EpicGames\Unreal Engine\<version>` InstalledDirectory, then `LauncherInstalled.dat`);
+     - on Linux and Mac, in UE's application settings folder (`~/.config/Epic` on Linux, `~/Library/Application Support/Epic` on Mac): `UnrealEngine/Install.ini` [Installations], then `UnrealEngineLauncher/LauncherInstalled.dat`.
+   - A non-empty value that names no engine is an error, as in Unreal: `uak` never falls back to an engine that happens to contain the project.
+   - An empty value means the engine root that contains the project (a source build with the project inside it). As in Unreal, the search starts at the project folder's parent and walks up.
 
-   GUIDs match with or without braces. `-project=` also accepts a directory that holds exactly one `.uproject`.
+   GUIDs match with or without braces. Unreal recognises an engine root by its `Engine/Binaries` and `Engine/Build` folders; `uak` needs `Engine/Build/Build.version` (below). The HKLM key is a `uak` addition: the launcher writes it for the same installs as `LauncherInstalled.dat`. `-project=` also accepts a directory that holds exactly one `.uproject`.
 
 The engine root is the directory that contains `Engine/Build/Build.version`. Paths may be given as the root or as its `Engine` folder.
 
@@ -153,7 +158,11 @@ The engine root is the directory that contains `Engine/Build/Build.version`. Pat
   - It is recorded in `<State>/Runs/<name>.json`, with output in `<name>.log`.
   - The run takes the lock only if the command itself does.
   - `-priority` passes `UAK_LOCK_PRIORITY` to the child, and the lock's name defaults to `UAK_LOCK_NAME`.
-- `uak runs list [-all] [-name=<pattern>]` and `uak runs adopt -pid= -name= -owner= [-output=] [-result-file=]`.
+- `uak runs list [-all] [-name=<pattern>]` and `uak runs adopt -pid= -name= -owner= [-output=] [-result-file=]`. `runs list` shows only running runs by default and always exits 0, so it can't tell a waiter when a run ended.
+- `uak runs wait -name=<exact name> [-timeout=<seconds>]` reads the run's record every 5 s until the run has ended, then prints its end state, how long it ran, its last line and its output file.
+  - Exit code 0 when the run exited 0; 1 when it exited with another code, or ended with no recorded exit code (an adopted run, one that died, or one that never started), which it says; 2 for a usage error or no such run; 3 when `-timeout` passed while the run still runs.
+  - A record that exists but can't be read (it is being rewritten) is read again on the next poll.
+  - **How agents wait:** one background shell runs `uak runs wait -name=<name> -timeout=<seconds>`, with its own time limit longer than `-timeout` and within the shell's two-hour limit. It costs nothing while it waits, and its end wakes the agent. On exit 3, the agent starts another wait. Agents never poll a run themselves, and anything that may run over an hour goes through `uak runs start`.
 - **Starting safely:** a run's name is claimed with `<Name>.claim` (create-new, delete-on-close) around the name check and the first record write, so concurrent starts of one name start one run. The output is emptied on every start. Bare program names resolve on PATH only; a missing one fails the start, and the failure is recorded.
 - **Detaching:**
   - Windows: `CreateProcess` with `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB`, falling back without breakaway when the job refuses it.
@@ -193,7 +202,7 @@ Writes stay out of scope for now: no commit, submit, checkout or edit.
 
 ## Unreal operations (Unreal)
 
-- **`uak compile <file>... [-dependents] [-target=] [-config=] [-platform=] [-MaxParallelActions=] [-maxerrors=] [-resultfile=]`** checks files through UBT's `-SingleFile=<file>` for the project's editor target (`<Project>Editor`, else the `Editor` target in `Source/*.Target.cs`, else `UnrealEditor`), with the platform's real compiler. Nothing is linked, and objects go to a separate `SingleFile/` folder, so it is safe while an editor runs.
+- **`uak compile <file>... [-dependents] [-target=] [-config=] [-platform=] [-MaxParallelActions=] [-maxerrors=] [-resultfile=]`** checks files through UBT's `-SingleFile=<file>` for the project's editor target (`<Project>Editor`, else the `Editor` target in `Source/*.Target.cs`, else `UnrealEditor`), with the platform's real compiler. A `Type = TargetType.Editor` inside a `//` or `/* */` comment doesn't count. Nothing is linked, and objects go to a separate `SingleFile/` folder, so it is safe while an editor runs.
   - UBT compiles a header on its own, through a generated `<Name>.h.cpp`, so headers must be self-contained (lead's decision, 2026-10-01: keep this strict default). `-dependents` adds `-SingleFileBuildDependents`.
   - UBT silently drops a file that isn't in the target, or a header marked HEADER_UNIT_SKIP, and skips a file whose `SingleFile` object is newer. So uak first deletes the requested files' old `SingleFile` objects (only under the project folder), then checks that a compile action ran for each file. A file that didn't compile is NOT COMPILED, exit code 2.
   - It passes `-WaitMutex`, and does not take the editor lock. UBT's own mutex already makes compile checks run one at a time.
@@ -203,6 +212,8 @@ Writes stay out of scope for now: no commit, submit, checkout or edit.
   - The log is `<Project>/Saved/Logs/<name>.log`, deleted before the run. The report goes to `<State>/TestReports/<name>`.
   - A run passes only when all of these hold: tests were found; the found count equals the completed count; none failed; at least one passed (all skipped is NOTHING RAN); the queue finished; and the editor exited 0. A non-zero editor exit fails the run even when every test passed (lead's decision: keep it strict, and print the editor's exit code next to the test counts).
 - **Logs:** compile and build write UBT's output to `<State>/Logs/<command>-<UTC time>-<pid>.log`. UBT and Build-script output is decoded with `ProcessRunner.ConsoleEncoding` (the OEM code page on Windows).
+  - Both print `Log: <path>` first, and flush the log line by line, so a long run can be followed while it goes.
+  - Both echo UBT's latest `[n/N]` action line, with the time so far, at most once a minute (`UbtProgress`, on `UnrealServices.Clock`), so a long build is visibly alive. A run shorter than a minute echoes nothing.
 - **`-filter`** rejects `,` `;` `|` quotes, backticks and white space, which would break the `-ExecCmds` list.
 - **Headers under `-dependents`:** the header counts as compiled only through its own `<Name>.h.cpp` (or `.h.obj`) action. The other compiled units are reported on their own lines and never stand in for it.
 - **Other rules:**
@@ -215,24 +226,27 @@ Writes stay out of scope for now: no commit, submit, checkout or edit.
   - `ue-low`, running on Sonnet;
   - `ue-medium`, `ue-high` and `ue-xhigh`;
   - `ue-runner`, on Sonnet at low effort, which cannot edit: it runs a given list and reports, so a verification never changes what it verifies;
-  - `ue-research`, read-only at high effort, for engine investigations answered with `file:line` evidence; read-only, it runs beside workers that are building;
+  - `ue-research`, read-only at high effort, for engine investigations answered with `file:line` evidence. Its reading never conflicts with workers' edits, but its experiments queue like any run: `uak test` takes the editor lock, and `uak compile` waits for UBT's mutex. `uak compile` only compiles files inside a module, so an experiment compiles existing project files, or a temporary copy inside a module the lead names, removed afterwards and reported;
   - `ue-review`, read-only.
 - **Their ground rules:**
   - never spawn agents (`disallowedTools: Agent`);
   - never kill processes or commit unless told;
   - take the lock for editor and build runs;
-  - start long runs detached through `uak runs start`;
+  - start anything that may run over an hour detached through `uak runs start`, and wait for it with one background `uak runs wait`;
   - ask the lead with SendMessage to "main";
-  - ask for a low worker for long, low-judgment work;
+  - ask for a ue-runner for long, low-judgment work;
   - follow epic briefs, and rewrite their Current state and Next step at every hand-back, so the lead can respawn a fresh agent from the brief instead of resuming a large context;
   - no new batch or shell scripts: tools go in `uak`.
-- **The workflow skill:** briefs (a README plus E#.md per milestone), caps, effort tiers, reviews, spec-doc sync, and an opt-in usage-limit watchdog (only if the project's owner allows auto-resume).
+- **The workflow skill:** briefs (a README plus E#.md per milestone), caps, effort tiers, delegation (runner and research requests), when to resume an agent and when to respawn it from its brief, reviews, spec-doc sync, and an opt-in usage-limit watchdog (only if the project's owner allows auto-resume).
 - **Docs:**
   - the install steps;
   - recommended settings: `CLAUDE_CODE_DISABLE_BG_SHELL_PRESSURE_REAP=1`, the auto-compact window;
   - a CLAUDE.md snippet;
   - how to build `uak` on first use.
-- **SessionStart hook** (`hooks/hooks.json`, `hooks/check-uak.sh`): at startup, only in an Unreal project (a `.uproject` at or above the project folder, or an engine root), it checks for `$UAK_HOME/<plugin version>/uak`. When that is missing it shows the user a one-line notice and gives Claude the publish command, with the plugin's own path, so it can offer to run it. A plugin update therefore prompts a republish. It only reads files, always exits 0, and is POSIX `sh`, because it must run on every user's machine before `uak` exists (Claude Code runs hooks in Git Bash on Windows). Publishing from the installed plugin copy is fine: only its throwaway `tools/bin` and `tools/obj` are written there, and the install goes to `$UAK_HOME`.
+- **SessionStart hook** (`hooks/hooks.json`, `hooks/check-uak.sh`): at startup, only in an Unreal project (a `.uproject` at or above the project folder, or an engine root), it checks for `$UAK_HOME/<plugin version>/uak`. When that is missing it shows the user a one-line notice and gives Claude the publish command, with the plugin's own path, so it can offer to run it. A plugin update therefore prompts a republish. It only reads files, always exits 0, and is POSIX `sh`, because it must run on every user's machine before `uak` exists (Claude Code runs hooks in Git Bash on Windows, so it needs Git for Windows there; the docs say so). Publishing from the installed plugin copy is fine: only its throwaway `tools/bin` and `tools/obj` are written there, and the install goes to `$UAK_HOME`.
+  - The walk up for a `.uproject` stops before the filesystem root and after 40 levels, and never searches a UNC host: in Git Bash, `/` globs as `//*`, which browses the network for seconds.
+  - On Windows, paths are converted to POSIX form with `cygpath -u` when it exists, and the default `UAK_HOME` is under `USERPROFILE`, as `uak` itself finds it, not Git Bash's `HOME`.
+  - A test runs it through `sh` when `sh` is on PATH (`HookTests`).
 
 ## Shared contracts
 

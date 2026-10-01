@@ -4,8 +4,12 @@
 	<!-- Finds the engine and references its EpicGames.* assemblies (UakEngineDir, UakEngineTargetFramework). -->
 	<Import Project="$(MSBuildThisFileDirectory)build\EpicGames.props" Condition="Exists('$(MSBuildThisFileDirectory)build\EpicGames.props')" />
 	<PropertyGroup>
-		<!-- The engine's own .NET version (UE 5.8: net10.0, UE 5.7: net8.0), so its EpicGames.* assemblies load. -->
+		<!--
+			The engine's own .NET version (UE 5.8: net10.0, UE 5.7: net8.0), so its EpicGames.* assemblies load. When it can't be
+			read, the running SDK's (UakSdkTargetFramework), which that SDK can always build; net10.0 only if neither is known.
+		-->
 		<TargetFramework>$(UakEngineTargetFramework)</TargetFramework>
+		<TargetFramework Condition="'$(TargetFramework)' == ''">$(UakSdkTargetFramework)</TargetFramework>
 		<TargetFramework Condition="'$(TargetFramework)' == ''">net10.0</TargetFramework>
 		<LangVersion>latest</LangVersion>
 		<Nullable>enable</Nullable>
@@ -15,8 +19,15 @@
 		<Deterministic>true</Deterministic>
 		<InvariantGlobalization>true</InvariantGlobalization>
 		<!-- The kit's version: keep it equal to .claude-plugin/plugin.json. `uak help` shows it, and the publish folder is named after it. -->
-		<Version>0.1.0</Version>
+		<Version>0.2.0</Version>
 		<IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
+		<!--
+			EpicGames.Perforce.FromSource is not in the solution. In a solution build, MSBuild drops a reference's SetConfiguration
+			for such a project and removes the inherited Configuration, so it (directly, or through a transitive reference) would
+			build as Debug in a Release build. Keeping the parent's Configuration and Platform builds it in the build's own
+			configuration; projects in the solution get theirs from the solution as before.
+		-->
+		<ShouldUnsetParentConfigurationAndPlatform>false</ShouldUnsetParentConfigurationAndPlatform>
 		<!-- Keep build output inside the kit: never write into an engine directory. -->
 		<UakRoot>$(MSBuildThisFileDirectory)</UakRoot>
 		<BaseOutputPath>$(UakRoot)bin\$(MSBuildProjectName)\</BaseOutputPath>

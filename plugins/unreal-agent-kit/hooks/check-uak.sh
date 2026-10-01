@@ -10,26 +10,60 @@
 root="${CLAUDE_PLUGIN_ROOT:-$(dirname "$0")/..}"
 project="${CLAUDE_PROJECT_DIR:-$PWD}"
 
+# On Windows (Git Bash, MSYS or Cygwin), paths may come in Windows form (C:\...). The POSIX form (/c/...) walks up cleanly to
+# "/", where dirname stops; the Windows form would stop at "C:".
+windows=
+case "$(uname -s 2>/dev/null)" in
+	MINGW*|MSYS*|CYGWIN*) windows=1 ;;
+esac
+posix_path() {
+	if [ -n "$windows" ] && command -v cygpath >/dev/null 2>&1; then
+		cygpath -u "$1" 2>/dev/null || printf '%s\n' "$1"
+	else
+		printf '%s\n' "$1"
+	fi
+}
+root=$(posix_path "$root")
+project=$(posix_path "$project")
+
 # Only in an Unreal project: a .uproject here or above, or an engine source tree (a project may sit inside it).
+# The walk stops before the filesystem root and after 40 levels: in Git Bash, "/" globs as "//*", which browses the network
+# for UNC hosts and takes seconds. A UNC host ("//server") is never searched either.
 is_unreal() {
 	dir="$1"
 	[ -f "$dir/Engine/Build/Build.version" ] && return 0
-	while [ -n "$dir" ]; do
+	depth=0
+	while [ -n "$dir" ] && [ "$depth" -lt 40 ]; do
+		case "$dir" in
+			/|//) break ;;
+			//*/*) ;;
+			//*) break ;;
+		esac
 		for file in "$dir"/*.uproject; do
 			[ -f "$file" ] && return 0
 		done
 		parent=$(dirname "$dir")
 		[ "$parent" = "$dir" ] && break
 		dir="$parent"
+		depth=$((depth + 1))
 	done
 	return 1
 }
 is_unreal "$project" || exit 0
 
-version=$(sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$root/.claude-plugin/plugin.json" | head -n 1)
+version=$(sed -n 's/^.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$root/.claude-plugin/plugin.json" | head -n 1)
 [ -n "$version" ] || exit 0
 
-home="${UAK_HOME:-$HOME/.unreal-agent-kit}"
+# The user's folder as uak itself finds it: on Windows that is USERPROFILE, which Git Bash's HOME need not match.
+user_home="$HOME"
+if [ -n "$windows" ] && [ -n "$USERPROFILE" ]; then
+	user_home=$(posix_path "$USERPROFILE")
+fi
+if [ -n "$UAK_HOME" ]; then
+	home=$(posix_path "$UAK_HOME")
+else
+	home="$user_home/.unreal-agent-kit"
+fi
 if [ -f "$home/$version/uak" ] || [ -f "$home/$version/uak.exe" ]; then
 	exit 0
 fi

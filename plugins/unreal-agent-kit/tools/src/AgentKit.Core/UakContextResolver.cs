@@ -189,9 +189,21 @@ public static class UakContextResolver
 		}
 	}
 
-	/// <summary>Whether an EngineAssociation is a path rather than an identifier: it holds a separator, is rooted, or starts with '.'.</summary>
-	public static bool IsPathLikeAssociation(string association) =>
-		association.IndexOfAny(['/', '\\']) >= 0 || Path.IsPathRooted(association) || association.StartsWith('.');
+	/// <summary>
+	/// Whether an EngineAssociation is a path rather than an identifier: it holds a '/' or '\', as Unreal decides
+	/// (FDesktopPlatformBase::GetEngineIdentifierForProject). Anything else, even ".", is an identifier.
+	/// </summary>
+	public static bool IsPathLikeAssociation(string association) => association.IndexOfAny(['/', '\\']) >= 0;
+
+	/// <summary>
+	/// The engine root that holds the project, for an empty EngineAssociation: as Unreal does, the search starts at the project
+	/// folder's parent (the project folder itself is never the engine root) and walks up to the file-system root.
+	/// </summary>
+	static string? FindEngineAboveProject(FileInfo project)
+	{
+		string? Parent = Path.GetDirectoryName(EngineLocator.TrimSeparators(project.DirectoryName!));
+		return Parent is null ? null : EngineLocator.FindContainingEngineRoot(Parent);
+	}
 
 	static (string? Root, string How) ResolveEngine(UakResolveOptions options, FileInfo? project)
 	{
@@ -209,16 +221,15 @@ public static class UakContextResolver
 			return (null, "there is no project to take it from, and neither -engine nor " + EngineVariable + " was given");
 		}
 
-		string? Containing = EngineLocator.FindContainingEngineRoot(project.DirectoryName!);
-		if (Containing is not null)
-		{
-			return (Containing, "the engine that contains the project");
-		}
-
+		// As Unreal's FDesktopPlatformBase::GetEngineIdentifierForProject: a non-empty EngineAssociation decides, and when it
+		// names no engine that is a failure (no fallback). Only an empty one falls back to an engine that contains the project.
 		string Association = ReadEngineAssociation(project);
 		if (Association.Length == 0)
 		{
-			return (null, $"{project.Name} has an empty EngineAssociation and no engine contains it");
+			string? Containing = FindEngineAboveProject(project);
+			return Containing is not null
+				? (Containing, "the engine that contains the project (its EngineAssociation is empty)")
+				: (null, $"{project.Name} has an empty EngineAssociation and no engine contains it");
 		}
 		if (IsPathLikeAssociation(Association))
 		{

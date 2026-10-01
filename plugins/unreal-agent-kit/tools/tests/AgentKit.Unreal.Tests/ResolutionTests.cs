@@ -28,6 +28,48 @@ public sealed class ResolutionTests
 	}
 
 	[TestMethod]
+	public void CommentedOutEditorTypesDoNotCount()
+	{
+		using Sandbox Box = new();
+		string Source = Path.Combine(Box.ProjectDirectory, "Source");
+		// A game target that once was an editor target, in line and block comments, and a "//" inside a string before them.
+		Sandbox.Write(Path.Combine(Source, "GameClient.Target.cs"), """
+			public class GameClientTarget : TargetRules
+			{
+				public GameClientTarget(TargetInfo Target) : base(Target)
+				{
+					string Url = "http://example.com"; // Type = TargetType.Editor;
+					// Type = TargetType.Editor;
+					/* Type = TargetType.Editor; */
+					/*
+					Type = TargetType.Editor;
+					*/
+					Type = TargetType.Client;
+				}
+			}
+			""");
+		Assert.AreEqual("GameEditor", TargetResolver.ResolveEditorTarget(Box.ProjectFile));
+
+		// With the real editor target gone, only comments name an editor type: there is none.
+		File.Delete(Path.Combine(Source, "GameEditor.Target.cs"));
+		Assert.ThrowsExactly<UakSetupException>(() => TargetResolver.ResolveEditorTarget(Box.ProjectFile));
+	}
+
+	[TestMethod]
+	public void StripCommentsKeepsCodeAndLiterals()
+	{
+		Assert.AreEqual("a \nb", TargetResolver.StripComments("a // x\nb"));
+		Assert.AreEqual("a   b", TargetResolver.StripComments("a /* x */ b"));
+		Assert.AreEqual("a  \n\n\nb", TargetResolver.StripComments("a /* x\ny\n*/\nb"));
+		Assert.AreEqual("s = \"// not a comment\"; ", TargetResolver.StripComments("s = \"// not a comment\"; // gone"));
+		Assert.AreEqual("s = @\"C:\\x\"\"//\"\"\"; ", TargetResolver.StripComments("s = @\"C:\\x\"\"//\"\"\"; // gone"));
+		Assert.AreEqual("s = \"\"\"// raw\"\"\"; ", TargetResolver.StripComments("s = \"\"\"// raw\"\"\"; // gone"));
+		Assert.AreEqual("c = '/'; d = \"\\\"//\"; ", TargetResolver.StripComments("c = '/'; d = \"\\\"//\"; // gone"));
+		Assert.AreEqual("e = \"\"; ", TargetResolver.StripComments("e = \"\"; // x"));
+		Assert.AreEqual("open  ", TargetResolver.StripComments("open /* never closed"));
+	}
+
+	[TestMethod]
 	public void AProjectWithoutSourceUsesTheEngineEditor()
 	{
 		using Sandbox Box = new();

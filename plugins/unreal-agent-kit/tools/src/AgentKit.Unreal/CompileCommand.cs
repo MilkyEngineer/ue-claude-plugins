@@ -104,17 +104,21 @@ public sealed class CompileCommand : IUakCommand
 		ProcessInvocation Invocation = UbtCommandLine.Build(Paths, UbtTarget, Extra);
 
 		string LogFile = Services.NewLogFile(context, "compile");
+		// Named first, and written as it goes, so a long compile can be followed in its log while it runs.
+		context.Logger.LogInformation("Log: {Log}", LogFile);
 		context.Logger.LogInformation("Compiling {Count} file(s) for {Target} {Platform} {Configuration} (UBT -SingleFile)...", Files.Count, Target, Platform.Name, Configuration);
 		BuildLogParser Parser = new();
+		UbtProgress Progress = new(Services.Clock, UbtProgress.DefaultInterval, Text => context.Logger.LogInformation("  {Progress}", Text));
 		Stopwatch Timer = Stopwatch.StartNew();
 		int ExitCode;
-		await using (StreamWriter Log = new(LogFile, append: false, new System.Text.UTF8Encoding(false)))
+		await using (StreamWriter Log = new(LogFile, append: false, new System.Text.UTF8Encoding(false)) { AutoFlush = true })
 		{
 			await Log.WriteLineAsync("> " + Invocation).ConfigureAwait(false);
 			ExitCode = await Services.RunToolAsync(Invocation, Line =>
 			{
 				Log.WriteLine(Line);
 				Parser.AddLine(Line);
+				Progress.AddLine(Line);
 			}, cancellationToken).ConfigureAwait(false);
 		}
 		Timer.Stop();

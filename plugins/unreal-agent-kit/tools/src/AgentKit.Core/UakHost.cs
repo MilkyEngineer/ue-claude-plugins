@@ -345,8 +345,10 @@ public static class UakHost
 		}
 		writer.WriteLine();
 		writer.WriteLine("The project is -project=, else UAK_PROJECT, else the nearest .uproject above the current directory.");
-		writer.WriteLine("The engine is -engine=, else UAK_ENGINE, else the engine containing the project, else its EngineAssociation.");
-		writer.WriteLine("Exit codes: 0 success, 1 failure, 2 usage or setup error. 'uak help <command>' shows a command's usage.");
+		writer.WriteLine("The engine is -engine=, else UAK_ENGINE, else the project's EngineAssociation, as Unreal reads it: a version,");
+		writer.WriteLine("  a registered build's GUID or a path names the engine (one that names none is an error); an empty one means the");
+		writer.WriteLine("  engine whose folder holds the project.");
+		writer.WriteLine("Exit codes: 0 success, 1 failure, 2 usage or setup error (3: 'uak runs wait' timed out). 'uak help <command>' shows a command's usage.");
 	}
 
 	/// <summary>One line on stderr when the project has commands that are not loaded because the user has not opted in.</summary>

@@ -15,7 +15,7 @@ Set `DOTNET_CLI_TELEMETRY_OPTOUT=1` and `DOTNET_NOLOGO=1` first if you like.
 2. the `UAK_ENGINE` environment variable;
 3. the engine whose bundled `dotnet` runs the build.
 
-So running the engine's own `dotnet` needs no setting. With any other `dotnet` and no engine given, the build stops with an error that says what to set. The build's output goes only to `tools/bin` and `tools/obj`. NuGet is used only by the tests (MSTest) and by a self-contained publish (the .NET runtime pack), which go to your user NuGet cache. The bundled SDK may still update its own metadata folder under the engine's `Binaries/ThirdParty/DotNet` directory, as any dotnet does on first use.
+So running the engine's own `dotnet` needs no setting. A `UAK_ENGINE` left set in your environment, or in a project's `.claude/settings.local.json`, beats the `dotnet` you run: the next build or publish uses that engine. With any other `dotnet` and no engine given, the build stops with an error that says what to set. The build's output goes only to `tools/bin` and `tools/obj`. NuGet is used only by the tests (MSTest) and by a self-contained publish (the .NET runtime pack), which go to your user NuGet cache. The bundled SDK may still update its own metadata folder under the engine's `Binaries/ThirdParty/DotNet` directory, as any dotnet does on first use.
 
 ## Build and test
 
@@ -35,7 +35,7 @@ With UE 5.7's SDK (8.0), which predates `--solution`, the test command is `<dotn
 ```
 
 - **What it makes.** A self-contained `uak` for this machine. It needs no installed .NET, and no `DOTNET_ROOT`.
-- **Where it goes.** To `$UAK_HOME/<kit version>/`, where `UAK_HOME` defaults to `~/.unreal-agent-kit`. For example: `~/.unreal-agent-kit/0.1.0/uak.exe` on Windows, `~/.unreal-agent-kit/0.1.0/uak` elsewhere.
+- **Where it goes.** To `$UAK_HOME/<kit version>/`, where `UAK_HOME` defaults to `~/.unreal-agent-kit`. The kit version is the `version` in `.claude-plugin/plugin.json` (and `<Version>` in `Directory.Build.props`). For kit version 0.2.0: `~/.unreal-agent-kit/0.2.0/uak.exe` on Windows, `~/.unreal-agent-kit/0.2.0/uak` elsewhere.
   - The folder is outside the plugin, which Claude Code replaces on every update.
   - Each kit version gets its own folder, so publishing never overwrites a `uak` that is running.
 - **What to do next.** Put that folder on `PATH`, or call `uak` by its full path, then check it with `uak env`.
@@ -47,7 +47,7 @@ With UE 5.7's SDK (8.0), which predates `--solution`, the test command is `<dotn
 ## Project commands
 
 A project can add its own `uak` commands without changing the kit:
-1. Build a class library that references `AgentKit.Core.dll` and implements `AgentKit.Core.IUakCommand`.
+1. Build a class library that references `AgentKit.Core.dll` and implements `AgentKit.Core.IUakCommand`. Target a .NET no newer than `uak`'s, which is the .NET of the engine `uak` was published with (`net10.0` for UE 5.8, `net8.0` for UE 5.7); `net8.0` loads in both. `uak env` shows `uak`'s .NET and engine.
 2. Put its DLL in `<Project>/.uak/commands/`, or in a folder listed in `UAK_COMMAND_PATHS` (separated by `;` on Windows, `:` elsewhere). List absolute folders only: a relative entry is skipped with a warning.
 3. `<Project>/.uak/commands/` is off by default. Turn it on with `UAK_PROJECT_COMMANDS=1` (or `true`), or by listing it in `UAK_COMMAND_PATHS`.
 
