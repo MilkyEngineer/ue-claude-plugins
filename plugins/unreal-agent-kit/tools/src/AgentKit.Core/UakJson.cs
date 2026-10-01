@@ -4,6 +4,9 @@ using System.Globalization;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+#if !NET9_0_OR_GREATER
+using System.Text.RegularExpressions;
+#endif
 
 namespace AgentKit.Core;
 
@@ -20,8 +23,19 @@ public static class UakJson
 	/// <summary>UTF-8 without a byte-order mark.</summary>
 	public static Encoding Utf8NoBom { get; } = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
 
-	/// <summary>Serializes a value to JSON text.</summary>
+	/// <summary>Serializes a value to JSON text, indented with tabs, with "\n" line ends.</summary>
+#if NET9_0_OR_GREATER
 	public static string Serialize<T>(T value) => JsonSerializer.Serialize(value, Options);
+#else
+	public static string Serialize<T>(T value) => TabIndented(JsonSerializer.Serialize(value, Options));
+
+	/// <summary>
+	/// .NET 8 (UE 5.7) can't set the indent or the line end: it indents with two spaces and ends lines with
+	/// Environment.NewLine. JSON strings never hold a raw line break, so every line break, and the spaces after it, is layout.
+	/// </summary>
+	static string TabIndented(string json) =>
+		Regex.Replace(json, "\r?\n( *)", match => "\n" + new string('\t', match.Groups[1].Length / 2));
+#endif
 
 	/// <summary>Serializes a value to UTF-8 bytes without a BOM, ending with a newline: the content of a kit JSON file.</summary>
 	public static byte[] SerializeToUtf8<T>(T value) => Utf8NoBom.GetBytes(Serialize(value) + "\n");
@@ -60,13 +74,15 @@ public static class UakJson
 		JsonSerializerOptions Result = new(JsonSerializerDefaults.General)
 		{
 			WriteIndented = true,
+#if NET9_0_OR_GREATER
 			IndentCharacter = '\t',
 			IndentSize = 1,
+			NewLine = "\n",
+#endif
 			AllowTrailingCommas = true,
 			ReadCommentHandling = JsonCommentHandling.Skip,
 			PropertyNameCaseInsensitive = true,
 			DefaultIgnoreCondition = JsonIgnoreCondition.Never,
-			NewLine = "\n",
 		};
 		Result.Converters.Add(new JsonStringEnumConverter());
 		Result.Converters.Add(new UtcDateTimeConverter());

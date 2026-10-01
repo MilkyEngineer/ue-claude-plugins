@@ -49,10 +49,10 @@ public sealed class LockUnitTests
 			Assert.AreEqual(LockPriority.Normal, EditorLock.ResolvePriority(null));
 			Assert.AreEqual(LockPriority.High, EditorLock.ResolvePriority(LockPriority.High));
 
-			Environment.SetEnvironmentVariable(EditorLock.NameVariable, "W3-Verify");
+			Environment.SetEnvironmentVariable(EditorLock.NameVariable, "E3-Verify");
 			Environment.SetEnvironmentVariable(EditorLock.PriorityVariable, "high");
-			Assert.AreEqual("W3-Verify/build", EditorLock.ResolveName("build"));
-			Assert.AreEqual("W3-Verify", EditorLock.ResolveName(null));
+			Assert.AreEqual("E3-Verify/build", EditorLock.ResolveName("build"));
+			Assert.AreEqual("E3-Verify", EditorLock.ResolveName(null));
 			Assert.AreEqual(LockPriority.High, EditorLock.ResolvePriority(null));
 			Assert.AreEqual(LockPriority.Normal, EditorLock.ResolvePriority(LockPriority.Normal), "An explicit priority wins.");
 

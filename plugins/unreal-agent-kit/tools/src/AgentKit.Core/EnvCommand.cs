@@ -78,7 +78,7 @@ public sealed class EnvCommand : IUakCommand
 				}
 				Object[Unique] = Value;
 			}
-			Writer.WriteLine(JsonSerializer.Serialize(Object, UakJson.Options));
+			Writer.WriteLine(UakJson.Serialize(Object));
 		}
 		else
 		{

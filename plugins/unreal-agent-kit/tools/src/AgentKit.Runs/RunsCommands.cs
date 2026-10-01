@@ -22,7 +22,7 @@ public sealed class RunsStartCommand : IUakCommand
 	public string Usage => """
 		uak runs start -name=<unique> -owner=<who> [-priority=High|Normal] [-output=<file>] [-result-file=<file>] [-force] -- <command> [<arguments>...]
 		  -name=         the run's unique name: letters, digits, '_', '.' and '-'
-		  -owner=        who started it (a workstream such as W3, or lead)
+		  -owner=        who started it (an epic such as E3, or lead)
 		  -priority=     the priority of the run's lock requests (sets UAK_LOCK_PRIORITY for the command)
 		  -output=       the output file (default <State>/Runs/<name>.log); it is emptied when the run starts
 		  -result-file=  a file whose last PASSED/FAILED line `uak runs list` shows when there is no output

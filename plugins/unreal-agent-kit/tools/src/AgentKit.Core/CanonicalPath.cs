@@ -82,7 +82,7 @@ public static class CanonicalPath
 			// Nothing filled in: a file system that cannot tell.
 			return null;
 		}
-		return $"win:{volume:x16}:{Convert.ToHexStringLower(info, 8, 16)}";
+		return $"win:{volume:x16}:{Convert.ToHexString(info, 8, 16).ToLowerInvariant()}";
 	}
 
 	[UnsupportedOSPlatform("windows")]

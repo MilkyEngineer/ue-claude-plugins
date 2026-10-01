@@ -29,7 +29,7 @@ Below, `<kit>` means `ue-claude-plugins/plugins/unreal-agent-kit` in that clone.
 
 ## 3. Find the engine's dotnet
 
-The engine ships a .NET SDK at `<Engine root>/Engine/Binaries/ThirdParty/DotNet/<version>/<platform>/`. For UE 5.8 the version folder is `10.0`. The platform folder is:
+The engine ships a .NET SDK at `<Engine root>/Engine/Binaries/ThirdParty/DotNet/<version>/<platform>/`. The version folder is `10.0` in UE 5.8 and `8.0.412` in UE 5.7. The platform folder is:
 
 | Host | Folder | Program |
 | --- | --- | --- |
@@ -37,7 +37,7 @@ The engine ships a .NET SDK at `<Engine root>/Engine/Binaries/ThirdParty/DotNet/
 | Linux | `linux-x64` (`linux-arm64` on Arm) | `dotnet` |
 | Mac | `mac-arm64` (`mac-x64` on Intel) | `dotnet` |
 
-Below, `<dotnet>` means that program. Running the engine's own `dotnet` is enough for the build to find the engine: `uak` links the engine's prebuilt `EpicGames.*` libraries, and the build takes them from the engine whose `dotnet` runs it. To link another engine, set `UAK_ENGINE` to its root, or pass `-p:UakEngineDir=<engine root>`.
+Below, `<dotnet>` means that program. Running the engine's own `dotnet` is enough for the build to find the engine: `uak` links the engine's prebuilt `EpicGames.*` libraries and the third-party libraries beside them, and targets the engine's own .NET version, all taken from the engine whose `dotnet` runs it. To link another engine, set `UAK_ENGINE` to its root, or pass `-p:UakEngineDir=<engine root>`.
 
 **Set `DOTNET_GENERATE_ASPNET_CERTIFICATE=false` before the first use of the bundled SDK.** Without it, the SDK's first run installs an ASP.NET development HTTPS certificate in your user certificate store. `DOTNET_CLI_TELEMETRY_OPTOUT=1` and `DOTNET_NOLOGO=1` turn off telemetry and the welcome banner.
 
@@ -52,9 +52,9 @@ Below, `<dotnet>` means that program. Running the engine's own `dotnet` is enoug
   - The folder is outside the plugin, which Claude Code replaces on every update.
   - Each kit version gets its own folder, so publishing a new version never overwrites a `uak` that is running.
   - Republishing the same version over itself can fail while a detached run is going, because the run's wrapper keeps that folder's files open. Wait until `uak runs list` shows nothing running.
-- **The first publish restores NuGet packages,** so it needs network access once. Build output stays in `<kit>/tools/bin` and `<kit>/tools/obj`, and NuGet packages go to your user NuGet cache. The kit's build writes nothing into the engine itself. The bundled SDK may still update its own metadata folder under the engine's `Binaries/ThirdParty/DotNet` directory on first use, as any dotnet does, if that folder can be written.
-- **Overrides.** `-r <runtime id>` publishes for another platform, `-o <folder>` publishes somewhere else, and `-p:SelfContained=false` makes a smaller build that needs `DOTNET_ROOT` set to the engine's `dotnet` folder.
-- **Fallback.** If the self-contained publish fails, build the solution (step 6) and run `<dotnet> <kit>/tools/bin/uak/Debug/net10.0/uak.dll <command...>` wherever these docs say `uak`.
+- **The first self-contained publish downloads the .NET runtime pack from NuGet,** because the engine's SDK doesn't include one, so it needs network access once. That is the only package `uak` needs. Build output stays in `<kit>/tools/bin` and `<kit>/tools/obj`, and the runtime pack goes to your user NuGet cache. The kit's build writes nothing into the engine itself. The bundled SDK may still update its own metadata folder under the engine's `Binaries/ThirdParty/DotNet` directory on first use, as any dotnet does, if that folder can be written.
+- **Overrides.** `-r <runtime id>` publishes for another platform, `-o <folder>` publishes somewhere else, and `-p:SelfContained=false` makes a smaller build that needs nothing from NuGet, but needs `DOTNET_ROOT` set to the engine's `dotnet` folder.
+- **Fallback.** If the self-contained publish fails, build the solution (step 6) and run `<dotnet> <kit>/tools/bin/uak/Debug/<tfm>/uak.dll <command...>` (`<tfm>` is `net10.0` for UE 5.8, `net8.0` for UE 5.7) wherever these docs say `uak`.
 
 **Windows (PowerShell):**
 

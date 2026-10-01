@@ -1,7 +1,7 @@
 # UnrealAgentKit: design
 
 UnrealAgentKit is a Claude Code plugin with two parts:
-- a multi-agent workflow for Unreal Engine projects: tiered agents, a read-only reviewer, workstream briefs, and delegation;
+- a multi-agent workflow for Unreal Engine projects: tiered agents, a read-only reviewer, epic briefs, and delegation;
 - the tools that workflow needs, gathered in one CLI, `uak`:
   - a queued lock around editor and build runs;
   - detached runs that are tracked;
@@ -9,13 +9,12 @@ UnrealAgentKit is a Claude Code plugin with two parts:
   - build and test wrappers;
   - a version-control abstraction.
 
-It must not depend on any particular engine, project, platform or version-control system. Apart from Claude Code, it uses only what building Unreal Engine already requires: the engine's bundled .NET SDK, the engine's `EpicGames.*` C# libraries, and NuGet.
+It must not depend on any particular engine, project, platform or version-control system. Apart from Claude Code, it uses only what building Unreal Engine already requires: the engine's bundled .NET SDK, and the prebuilt C# libraries the engine ships (`EpicGames.*` and the third-party libraries beside them). `uak` itself needs no NuGet package. NuGet is needed only for the tests (MSTest.Sdk) and for a self-contained publish (the .NET runtime pack, which the bundled SDK lacks).
 
 The owner decided on 2026-10-01:
 - the name is UnrealAgentKit, living in the `ue-claude-plugins` marketplace;
-- UE 5.8 first (5.7 later);
-- Windows now, but keep everything platform-neutral (no Windows-only code without a Linux/Mac path or a clear TODO);
-- NuGet packages are fine.
+- UE 5.8 and 5.7;
+- Windows now, but keep everything platform-neutral (no Windows-only code without a Linux/Mac path or a clear TODO).
 
 ## Layout
 
@@ -38,10 +37,12 @@ plugins/unreal-agent-kit/
 
 ## Build
 
-`<Engine>/Binaries/ThirdParty/DotNet/<version>/<platform>/dotnet build tools/UnrealAgentKit.sln`, using the engine's bundled SDK. For UE 5.8 that is 10.0.203, so the target is `net10.0`.
+`<Engine>/Binaries/ThirdParty/DotNet/<version>/<platform>/dotnet build tools/UnrealAgentKit.sln`, using the engine's bundled SDK.
 
+- **Target framework:** the engine's own, read from the `tfm` in its `UnrealBuildTool.runtimeconfig.json` (`UakEngineTargetFramework`), so the engine's libraries always load. UE 5.8 bundles SDK 10.0.203 (`net10.0`); UE 5.7 bundles 8.0.412 (`net8.0`, C# 12).
+- **Newer .NET APIs** stay out of the code, or behind `#if NET9_0_OR_GREATER` with a .NET 8 path (`UakJson`'s tab indentation is the one case). Differences between engine versions' libraries are keyed on what the engine ships, not on its version: `UAK_PERFORCE_TRACER` is defined when OpenTelemetry.Api sits beside EpicGames.Perforce (UE 5.8's `IPerforceConnection` has a `Tracer`; 5.7's has none).
 - Output goes under `tools/bin` and `tools/obj`. Never write into an engine directory: installed engines sit under Program Files. (The bundled SDK may update its own metadata folder under the engine's DotNet directory; the kit's build writes nothing else there.)
-- Tests: from `tools/`, `dotnet test --solution UnrealAgentKit.sln` (Microsoft.Testing.Platform, set in `tools/global.json`, which is only found from `tools/`).
+- Tests: from `tools/`, `dotnet test --solution UnrealAgentKit.sln` with SDK 10 (Microsoft.Testing.Platform, set in `tools/global.json`, which is only found from `tools/`), or `dotnet test UnrealAgentKit.sln` with SDK 8 (VSTest; the test projects support both).
 - Set `DOTNET_CLI_TELEMETRY_OPTOUT=1`, `DOTNET_NOLOGO=1` and `DOTNET_GENERATE_ASPNET_CERTIFICATE=false` for kit builds.
 - Warnings are errors.
 
@@ -50,25 +51,25 @@ plugins/unreal-agent-kit/
 - **How:** a self-contained publish of `tools/src/uak` for the host's runtime identifier, so it runs with no system-wide dotnet.
 - **Where:** `$UAK_HOME` (default `~/.unreal-agent-kit`) plus `/<kit version>/`. That is outside the plugin folder, because Claude Code replaces plugin folders on update, and versioned, so an update never overwrites a running binary.
 - **Fallback:** if self-contained doesn't work cleanly, `<engine dotnet> uak.dll`.
+- **NuGet:** the bundled SDKs carry no .NET runtime pack, so the first self-contained publish downloads one (Microsoft.NETCore.App.Runtime.<rid>). `-p:SelfContained=false` needs nothing from NuGet, but then `uak` runs on the engine's dotnet (`DOTNET_ROOT`).
 - **Project commands:** the host also loads `IUakCommand` assemblies from the folders in `UAK_COMMAND_PATHS`, and from `<Project>/.uak/commands/` only when `UAK_PROJECT_COMMANDS=1` (or `true`) or that folder is listed in `UAK_COMMAND_PATHS` (a cloned repository's code never runs by default). Folders outside the kit load lazily: only for a command the kit lacks, or for `uak help -all`. Entries in `UAK_COMMAND_PATHS` must be absolute; a relative entry is skipped with a warning, because it would depend on the current folder. That way a project adds its own tools without changing the kit.
 
 ## Engine libraries
 
 `build/EpicGames.props` is owned by Core.
 - **Engine directory.** It finds the engine from the `UakEngineDir` property, else from the `UAK_ENGINE` environment variable, else from the engine whose bundled dotnet runs the build. It resolves `UakEngineRoot` (the root, with a trailing slash) and `UakEpicGamesDir` (`<root>Engine/Binaries/DotNET/UnrealBuildTool/`).
-- **References.** It references the prebuilt `EpicGames.*.dll` that the engine ships (for example under `Engine/Binaries/DotNET/AutomationTool` and `.../UnrealBuildTool`), with `Private=true` so they are copied next to `uak`.
-- **EpicGames.Perforce.** UE 5.8 ships it prebuilt at `Engine/Binaries/DotNET/AutomationTool/AutomationUtils/<tfm>/EpicGames.Perforce.dll`. AgentKit.Vcs references that DLL itself, based on `$(UakEngineRoot)`: the resolved engine root, with a trailing slash. `UakEngineDir` is only the optional input. It is not in `build/EpicGames.props` (K3's decision, 2026-10-01).
-  - Its runtime needs the OpenTelemetry.Api NuGet package.
+- **References.** It references the prebuilt `EpicGames.Core`, `.Build`, `.IoHash` and `.MsBuild` that the engine ships in `.../UnrealBuildTool`, and their run-time dependency closure from the same folder (Microsoft.Extensions.*, Polly, Blake3 and its native library, and the rest, as `UnrealBuildTool.deps.json` lists them). All are file references with `Private=true`, so they are copied next to `uak`. No NuGet package is involved, and the versions always match the engine.
+- **EpicGames.Perforce.** The engine ships it prebuilt with AutomationTool: in `AutomationUtils/<tfm>/` in UE 5.8, and directly in `AutomationUtils/` in UE 5.7. AgentKit.Vcs references that DLL itself, based on `$(UakEngineRoot)`: the resolved engine root, with a trailing slash. `UakEngineDir` is only the optional input. It is not in `build/EpicGames.props`, because only AgentKit.Vcs and its tests need it.
+  - Its one third-party dependency comes from the engine too: OpenTelemetry.Api beside it (5.8), or System.Linq.Async in `AutomationTool/` (5.7).
   - We use our own `P4ProcessConnection`, an `IPerforceConnection` that runs `p4 -G` (found on PATH only) with a per-command timeout (`UAK_P4_TIMEOUT`, 15 s by default), so no native library is needed.
-  - The TFM folder is probed, not hard-coded, because 5.7 is probably on net8.0.
-  - `src/AgentKit.Vcs/EpicGames.Perforce.props` holds the reference. It prefers `AutomationUtils/$(TargetFramework)/`, else probes `AutomationUtils/*/`, and `-p:UakPerforceDll=<path>` overrides both. The build fails with a clear message if the DLL is missing or ambiguous.
+  - `src/AgentKit.Vcs/EpicGames.Perforce.props` holds the reference. It prefers `AutomationUtils/$(TargetFramework)/`, then `AutomationUtils/`, and `-p:UakPerforceDll=<path>` overrides both. The build fails with a clear message if the DLL is missing.
   - We don't use `PerforceConnection` itself: it starts a bare `p4.exe` (which Windows looks up in the current directory first) and has no time limit.
-  - The API we use, to check for 5.7: `PerforceSettings(IPerforceEnvironment)`, `IPerforceConnection`, `IPerforceOutput`, `PerforceRecord.FromFields`, `TryGetInfoAsync`, `TryGetChangesAsync`, `TryFStatAsync`, `TryAddAsync`, `AddOptions.IncludeWildcards` and `InfoOptions`.
+  - The API we use, the same in 5.7 and 5.8: `PerforceSettings(IPerforceEnvironment)`, `IPerforceConnection`, `IPerforceOutput`, `PerforceRecord.FromFields`, `TryGetInfoAsync`, `TryGetChangesAsync`, `TryFStatAsync`, `TryAddAsync`, `AddOptions.IncludeWildcards` and `InfoOptions`.
 - **Use what exists.** Where an EpicGames library already does the job, use it. Examples:
   - `EpicGames.Core`: `SingleInstanceMutex`, `ManagedProcess`, `FileReference` and `DirectoryReference`, `CommandLineArguments`, JSON helpers;
   - `EpicGames.Build`: `GlobalSingleInstanceMutex.GetUniqueMutexForPath`;
   - `EpicGames.Perforce`: its `-G` record parsing and settings, behind our `P4ProcessConnection`.
-- **Version skew.** Keep the surface we use small, because 5.7 support will follow.
+- **Version skew.** Keep the surface we use small, and build and test with every supported engine's own SDK. `ManagedProcess.Kill` is one example: 5.8 has it and 5.7 doesn't, so `ProcessRunner` disposes the process instead, which terminates it the same way.
 
 ## Command line
 
@@ -217,25 +218,16 @@ Writes stay out of scope for now: no commit, submit, checkout or edit.
   - start long runs detached through `uak runs start`;
   - ask the lead with SendMessage to "main";
   - ask for a low worker for long, low-judgment work;
-  - follow workstream briefs;
+  - follow epic briefs;
   - no new batch or shell scripts: tools go in `uak`.
-- **The workflow skill:** briefs (a README plus W#.md per milestone), caps, effort tiers, reviews, spec-doc sync, and an opt-in usage-limit watchdog (only if the project's owner allows auto-resume).
+- **The workflow skill:** briefs (a README plus E#.md per milestone), caps, effort tiers, reviews, spec-doc sync, and an opt-in usage-limit watchdog (only if the project's owner allows auto-resume).
 - **Docs:**
   - the install steps;
   - recommended settings: `CLAUDE_CODE_DISABLE_BG_SHELL_PRESSURE_REAP=1`, the auto-compact window;
   - a CLAUDE.md snippet;
   - how to build `uak` on first use.
 
-## Workstreams and file ownership
+## Shared contracts
 
-| Workstream | Owns |
-| --- | --- |
-| K1 Core and host | `Directory.Build.props`, `global.json`, `build/`, `src/AgentKit.Core`, `src/uak`, `tests/AgentKit.Core.Tests`, `UnrealAgentKit.sln` |
-| K2 Locking and Runs | `src/AgentKit.Locking`, `src/AgentKit.Runs` and their test projects |
-| K3 Version control | `src/AgentKit.Vcs` and its tests |
-| K4 Unreal operations | `src/AgentKit.Unreal` and its tests |
-| K5 Plugin and docs | `.claude-plugin/`, `agents/`, `skills/`, `docs/`, `README.md`, and this plugin's entry in the marketplace `README.md` and `marketplace.json` |
-
-- **The shared contracts** are `IUakCommand` and `UakContext` (in Core). The other workstreams build against them.
-- **Changing them:** if a workstream needs something added to Core, it asks K1 through the lead, or adds it itself only if the addition is purely additive, and tells the lead.
-- **This file** belongs to the lead. Suggest changes to the lead instead of editing it.
+- `IUakCommand` and `UakContext` (in Core) are what every other library, and every project command (see "Installing `uak`"), builds against.
+- Keep changes to them additive. Project commands are built separately from the kit, so a breaking change would break them silently.

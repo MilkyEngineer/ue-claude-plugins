@@ -15,7 +15,7 @@ namespace AgentKit.Locking;
 /// </summary>
 public sealed class LockTicketInfo
 {
-	/// <summary>Who is waiting, for status output (for example "W3-Verify/build").</summary>
+	/// <summary>Who is waiting, for status output (for example "E3-Verify/build").</summary>
 	public string Name { get; set; } = "";
 
 	/// <summary>The waiting process.</summary>

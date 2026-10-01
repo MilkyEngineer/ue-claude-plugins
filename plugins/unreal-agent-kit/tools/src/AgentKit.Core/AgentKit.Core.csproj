@@ -4,9 +4,7 @@
 		<!-- Core is the shared contract: every public member needs an XML doc comment (CS1591 is an error here). -->
 		<GenerateDocumentationFile>true</GenerateDocumentationFile>
 	</PropertyGroup>
-	<ItemGroup>
-		<PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.6" />
-	</ItemGroup>
+	<!-- Microsoft.Extensions.Logging.Abstractions is the engine's own copy, from build/EpicGames.props. -->
 	<ItemGroup>
 		<InternalsVisibleTo Include="AgentKit.Core.Tests" />
 	</ItemGroup>

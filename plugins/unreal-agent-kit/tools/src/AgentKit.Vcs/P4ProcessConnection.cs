@@ -6,7 +6,9 @@ using System.Globalization;
 using AgentKit.Core;
 using EpicGames.Perforce;
 using Microsoft.Extensions.Logging;
+#if UAK_PERFORCE_TRACER
 using OpenTelemetry.Trace;
+#endif
 
 namespace AgentKit.Vcs;
 
@@ -49,8 +51,10 @@ public sealed class P4ProcessConnection : IPerforceConnection
 	/// <inheritdoc/>
 	public ILogger Logger { get; }
 
+#if UAK_PERFORCE_TRACER
 	/// <inheritdoc/>
 	public Tracer Tracer { get; } = TracerProvider.Default.GetTracer("AgentKit.Vcs");
+#endif
 
 	/// <summary>How long one p4 command may run.</summary>
 	public TimeSpan Timeout { get; }

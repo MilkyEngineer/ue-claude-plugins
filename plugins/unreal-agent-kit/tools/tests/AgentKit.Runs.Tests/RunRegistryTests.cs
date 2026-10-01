@@ -35,8 +35,8 @@ public sealed class RunRegistryTests
 		DateTime started = new(2026, 10, 1, 6, 5, 0, DateTimeKind.Utc);
 		RunRecord record = new()
 		{
-			Name = "W3-Verify",
-			Owner = "W3",
+			Name = "E3-Verify",
+			Owner = "E3",
 			Pid = 1234,
 			ProcessStart = started,
 			Command = "Build.bat",
@@ -47,7 +47,7 @@ public sealed class RunRegistryTests
 			Started = started,
 		};
 		_registry.Write(record);
-		string text = File.ReadAllText(_registry.GetRecordFile("W3-Verify"));
+		string text = File.ReadAllText(_registry.GetRecordFile("E3-Verify"));
 		foreach (string field in new[] { "Name", "Owner", "Pid", "ProcessStart", "Command", "Arguments", "CommandLine", "OutputFile", "ResultFile",
 			"Priority", "Adopted", "Started", "Ended", "ExitCode", "LastLine" })
 		{
@@ -56,7 +56,7 @@ public sealed class RunRegistryTests
 		StringAssert.Contains(text, "\"Priority\": \"High\"");
 		StringAssert.Contains(text, "\"Ended\": null");
 
-		RunRecord read = _registry.Read("W3-Verify")!;
+		RunRecord read = _registry.Read("E3-Verify")!;
 		Assert.AreEqual(1234, read.Pid);
 		Assert.AreEqual(started, read.ProcessStart);
 		CollectionAssert.AreEqual(new[] { "a b", "c;d" }, read.Arguments);
@@ -71,7 +71,7 @@ public sealed class RunRegistryTests
 		Directory.CreateDirectory(_registry.Directory);
 		File.WriteAllText(_registry.GetRecordFile("Old"), """
 			{
-			    "Name": "Old", "Owner": "W8", "Pid": 4321, "ProcessStart": "2026-10-01T05:00:00.123Z",
+			    "Name": "Old", "Owner": "E8", "Pid": 4321, "ProcessStart": "2026-10-01T05:00:00.123Z",
 			    "Command": "C:\\x\\Verify.ps1", "Arguments": ["-Keep"], "CommandLine": "Verify.ps1 -Keep",
 			    "OutputFile": null, "ResultFile": null, "Priority": "Normal", "Adopted": false,
 			    "Started": "2026-10-01T05:00:00.456Z", "Ended": "2026-10-01T06:00:00.000Z", "ExitCode": 0, "LastLine": "PASSED"
@@ -145,7 +145,7 @@ public sealed class RunRegistryTests
 	[TestMethod]
 	public void NamesAreValidated()
 	{
-		foreach (string name in new[] { "A", "W3-Verify3", "run_1.2" })
+		foreach (string name in new[] { "A", "E3-Verify3", "run_1.2" })
 		{
 			Assert.IsTrue(RunRegistry.IsValidName(name), name);
 		}
@@ -160,9 +160,9 @@ public sealed class RunRegistryTests
 	{
 		DateTime now = DateTime.UtcNow;
 		ProcessIdentity self = ProcessIdentity.Current;
-		_registry.Write(new RunRecord { Name = "Old", Owner = "W1", Pid = 1, ProcessStart = now.AddYears(-1), Started = now.AddHours(-3), Ended = now.AddHours(-2), ExitCode = 0, LastLine = "done" });
-		_registry.Write(new RunRecord { Name = "New", Owner = "W2", Pid = 1, ProcessStart = now.AddYears(-1), Started = now.AddHours(-1), Ended = now.AddMinutes(-30), ExitCode = 1, LastLine = "broke" });
-		_registry.Write(new RunRecord { Name = "Live", Owner = "W3", Pid = self.Pid, ProcessStart = self.StartTimeUtc, Started = now.AddHours(-5) });
+		_registry.Write(new RunRecord { Name = "Old", Owner = "E1", Pid = 1, ProcessStart = now.AddYears(-1), Started = now.AddHours(-3), Ended = now.AddHours(-2), ExitCode = 0, LastLine = "done" });
+		_registry.Write(new RunRecord { Name = "New", Owner = "E2", Pid = 1, ProcessStart = now.AddYears(-1), Started = now.AddHours(-1), Ended = now.AddMinutes(-30), ExitCode = 1, LastLine = "broke" });
+		_registry.Write(new RunRecord { Name = "Live", Owner = "E3", Pid = self.Pid, ProcessStart = self.StartTimeUtc, Started = now.AddHours(-5) });
 
 		List<RunsListCommand.RunRow> all = RunsListCommand.GetRows(_registry, all: true, "*", now);
 		CollectionAssert.AreEqual(new[] { "Live", "New", "Old" }, all.Select(r => r.Name).ToArray());

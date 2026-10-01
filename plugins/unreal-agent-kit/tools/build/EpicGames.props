@@ -11,10 +11,8 @@
 		  3. the engine whose bundled .NET SDK runs this build (<Root>/Engine/Binaries/ThirdParty/DotNet/<version>/<platform>/dotnet).
 		Each may be the engine root (the directory holding Engine/Build/Build.version) or its Engine folder.
 
-		The EpicGames.* assemblies are file references into the engine, copied to the output (Private=true). Their third-party
-		dependencies come from NuGet, at the versions the engine's UnrealBuildTool.deps.json lists (UE 5.8 below), because
-		Blake3 carries native runtime assets that a plain file reference would not copy. A newer package than the engine was built
-		against is fine: .NET binds a reference to any equal or higher assembly version.
+		The EpicGames.* assemblies and their third-party dependencies are all file references into the engine, copied to the
+		output (Private=true): no NuGet package is needed, and the versions are always the ones the engine was built with.
 		Nothing is ever written into the engine directory.
 	-->
 	<PropertyGroup>
@@ -39,6 +37,15 @@
 		<!-- UnrealBuildTool's folder ships EpicGames.Core and EpicGames.Build in 5.8; AutomationTool's is the fallback. -->
 		<UakEpicGamesDir Condition="'$(UakEngineRoot)' != '' and Exists('$(UakEngineRoot)Engine/Binaries/DotNET/UnrealBuildTool/EpicGames.Build.dll')">$(UakEngineRoot)Engine/Binaries/DotNET/UnrealBuildTool/</UakEpicGamesDir>
 		<UakEpicGamesDir Condition="'$(UakEpicGamesDir)' == '' and '$(UakEngineRoot)' != '' and Exists('$(UakEngineRoot)Engine/Binaries/DotNET/AutomationTool/EpicGames.Build.dll')">$(UakEngineRoot)Engine/Binaries/DotNET/AutomationTool/</UakEpicGamesDir>
+
+		<!--
+			The engine's .NET version, from the "tfm" of the runtimeconfig.json next to its EpicGames.* assemblies (UE 5.8: net10.0,
+			UE 5.7: net8.0). Directory.Build.props targets it, so those assemblies load. Empty when it can't be read.
+		-->
+		<_UakRuntimeConfig Condition="'$(UakEpicGamesDir)' != '' and Exists('$(UakEpicGamesDir)UnrealBuildTool.runtimeconfig.json')">$(UakEpicGamesDir)UnrealBuildTool.runtimeconfig.json</_UakRuntimeConfig>
+		<_UakRuntimeConfig Condition="'$(UakEpicGamesDir)' != '' and '$(_UakRuntimeConfig)' == '' and Exists('$(UakEpicGamesDir)AutomationTool.runtimeconfig.json')">$(UakEpicGamesDir)AutomationTool.runtimeconfig.json</_UakRuntimeConfig>
+		<_UakEngineTfm Condition="'$(_UakRuntimeConfig)' != ''">$([System.Text.RegularExpressions.Regex]::Replace($([System.IO.File]::ReadAllText('$(_UakRuntimeConfig)')), '(?s)^.*"tfm"\s*:\s*"(net\d+\.\d+)".*$', '$1'))</_UakEngineTfm>
+		<UakEngineTargetFramework Condition="'$(UakEngineTargetFramework)' == '' and '$(_UakEngineTfm)' != '' and $([System.Text.RegularExpressions.Regex]::IsMatch('$(_UakEngineTfm)', '^net\d+\.\d+$'))">$(_UakEngineTfm)</UakEngineTargetFramework>
 	</PropertyGroup>
 
 	<ItemGroup Condition="'$(UakEpicGamesDir)' != ''">
@@ -47,19 +54,42 @@
 		<Reference Include="EpicGames.Build" HintPath="$(UakEpicGamesDir)EpicGames.Build.dll" Private="true" />
 		<Reference Include="EpicGames.IoHash" HintPath="$(UakEpicGamesDir)EpicGames.IoHash.dll" Private="true" />
 		<Reference Include="EpicGames.MsBuild" HintPath="$(UakEpicGamesDir)EpicGames.MsBuild.dll" Private="true" />
-	</ItemGroup>
 
-	<ItemGroup Condition="'$(UakEpicGamesDir)' != ''">
-		<!-- The dependency closure of EpicGames.Core and EpicGames.Build (UE 5.8 UnrealBuildTool.deps.json). -->
-		<PackageReference Include="JetBrains.Annotations" Version="2024.3.0" />
-		<PackageReference Include="Microsoft.Extensions.Configuration" Version="10.0.6" />
-		<PackageReference Include="Microsoft.Extensions.Http.Polly" Version="10.0.6" />
-		<PackageReference Include="Microsoft.Extensions.Logging.Console" Version="10.0.6" />
-		<PackageReference Include="Microsoft.Extensions.ObjectPool" Version="10.0.6" />
-		<PackageReference Include="OpenTracing" Version="0.12.1" />
-		<PackageReference Include="Microsoft.Extensions.FileSystemGlobbing" Version="10.0.6" />
-		<PackageReference Include="Blake3" Version="2.2.1" />
-		<PackageReference Include="Microsoft.Build.Locator" Version="1.11.2" />
+		<!--
+			Their run-time dependency closure (UnrealBuildTool.deps.json; the same in UE 5.7 and 5.8), from the same folder, so the
+			versions always match the engine. UE 5.7 also lists System.Drawing.Common, System.Security.Permissions and their
+			Windows-only helpers, for EpicGames.MsBuild code that uak never calls; and Microsoft.Build, which MSBuildLocator loads
+			from an SDK.
+		-->
+		<Reference Include="Blake3" HintPath="$(UakEpicGamesDir)Blake3.dll" Private="true" />
+		<Reference Include="JetBrains.Annotations" HintPath="$(UakEpicGamesDir)JetBrains.Annotations.dll" Private="true" />
+		<Reference Include="Microsoft.Build.Locator" HintPath="$(UakEpicGamesDir)Microsoft.Build.Locator.dll" Private="true" />
+		<Reference Include="Microsoft.Extensions.Configuration" HintPath="$(UakEpicGamesDir)Microsoft.Extensions.Configuration.dll" Private="true" />
+		<Reference Include="Microsoft.Extensions.Configuration.Abstractions" HintPath="$(UakEpicGamesDir)Microsoft.Extensions.Configuration.Abstractions.dll" Private="true" />
+		<Reference Include="Microsoft.Extensions.Configuration.Binder" HintPath="$(UakEpicGamesDir)Microsoft.Extensions.Configuration.Binder.dll" Private="true" />
+		<Reference Include="Microsoft.Extensions.DependencyInjection" HintPath="$(UakEpicGamesDir)Microsoft.Extensions.DependencyInjection.dll" Private="true" />
+		<Reference Include="Microsoft.Extensions.DependencyInjection.Abstractions" HintPath="$(UakEpicGamesDir)Microsoft.Extensions.DependencyInjection.Abstractions.dll" Private="true" />
+		<Reference Include="Microsoft.Extensions.Diagnostics" HintPath="$(UakEpicGamesDir)Microsoft.Extensions.Diagnostics.dll" Private="true" />
+		<Reference Include="Microsoft.Extensions.Diagnostics.Abstractions" HintPath="$(UakEpicGamesDir)Microsoft.Extensions.Diagnostics.Abstractions.dll" Private="true" />
+		<Reference Include="Microsoft.Extensions.FileSystemGlobbing" HintPath="$(UakEpicGamesDir)Microsoft.Extensions.FileSystemGlobbing.dll" Private="true" />
+		<Reference Include="Microsoft.Extensions.Http" HintPath="$(UakEpicGamesDir)Microsoft.Extensions.Http.dll" Private="true" />
+		<Reference Include="Microsoft.Extensions.Http.Polly" HintPath="$(UakEpicGamesDir)Microsoft.Extensions.Http.Polly.dll" Private="true" />
+		<Reference Include="Microsoft.Extensions.Logging" HintPath="$(UakEpicGamesDir)Microsoft.Extensions.Logging.dll" Private="true" />
+		<Reference Include="Microsoft.Extensions.Logging.Abstractions" HintPath="$(UakEpicGamesDir)Microsoft.Extensions.Logging.Abstractions.dll" Private="true" />
+		<Reference Include="Microsoft.Extensions.Logging.Configuration" HintPath="$(UakEpicGamesDir)Microsoft.Extensions.Logging.Configuration.dll" Private="true" />
+		<Reference Include="Microsoft.Extensions.Logging.Console" HintPath="$(UakEpicGamesDir)Microsoft.Extensions.Logging.Console.dll" Private="true" />
+		<Reference Include="Microsoft.Extensions.ObjectPool" HintPath="$(UakEpicGamesDir)Microsoft.Extensions.ObjectPool.dll" Private="true" />
+		<Reference Include="Microsoft.Extensions.Options" HintPath="$(UakEpicGamesDir)Microsoft.Extensions.Options.dll" Private="true" />
+		<Reference Include="Microsoft.Extensions.Options.ConfigurationExtensions" HintPath="$(UakEpicGamesDir)Microsoft.Extensions.Options.ConfigurationExtensions.dll" Private="true" />
+		<Reference Include="Microsoft.Extensions.Primitives" HintPath="$(UakEpicGamesDir)Microsoft.Extensions.Primitives.dll" Private="true" />
+		<Reference Include="OpenTracing" HintPath="$(UakEpicGamesDir)OpenTracing.dll" Private="true" />
+		<Reference Include="Polly" HintPath="$(UakEpicGamesDir)Polly.dll" Private="true" />
+		<Reference Include="Polly.Extensions.Http" HintPath="$(UakEpicGamesDir)Polly.Extensions.Http.dll" Private="true" />
+
+		<!-- Blake3's native library for the target platform, next to uak, where .NET looks for it. -->
+		<_UakNativeLibrary Include="$(UakEpicGamesDir)runtimes/$(RuntimeIdentifier)/native/*blake3_dotnet*" Condition="'$(RuntimeIdentifier)' != ''" />
+		<_UakNativeLibrary Include="$(UakEpicGamesDir)runtimes/$(NETCoreSdkRuntimeIdentifier)/native/*blake3_dotnet*" Condition="'$(RuntimeIdentifier)' == ''" />
+		<None Include="@(_UakNativeLibrary)" Link="%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" Visible="false" />
 	</ItemGroup>
 
 	<Target Name="UakCheckEngine" BeforeTargets="ResolveAssemblyReferences;CollectPackageReferences">

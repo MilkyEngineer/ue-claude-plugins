@@ -21,7 +21,7 @@ internal static class HeldMarkers
 	/// </summary>
 	private static readonly string? s_inherited = Environment.GetEnvironmentVariable(EditorLock.HeldVariable);
 
-	private static readonly Lock s_gate = new();
+	private static readonly object s_gate = new();
 	private static readonly List<string> s_own = [];
 
 	/// <summary>The inherited value, or null when this process runs under no holder.</summary>

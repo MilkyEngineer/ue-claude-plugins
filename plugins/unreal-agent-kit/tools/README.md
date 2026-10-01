@@ -1,10 +1,10 @@
 # uak: building, testing and installing
 
-`uak` is built with the .NET SDK that ships inside Unreal Engine. It links the engine's own prebuilt `EpicGames.*` libraries, so no other .NET install is needed. Every command below is one line, run from the kit's `tools` folder, and uses the engine's `dotnet`:
+`uak` is built with the .NET SDK that ships inside Unreal Engine. It links the engine's own prebuilt `EpicGames.*` libraries and the third-party libraries beside them, and targets the engine's .NET version, so no other .NET install and no NuGet package is needed to build it. Every command below is one line, run from the kit's `tools` folder, and uses the engine's `dotnet` (`<version>` is `10.0` in UE 5.8, `8.0.412` in UE 5.7):
 
-- Windows: `<Engine>/Engine/Binaries/ThirdParty/DotNet/10.0/win-x64/dotnet.exe` (`win-arm64` on Arm).
-- Linux: `<Engine>/Engine/Binaries/ThirdParty/DotNet/10.0/linux-x64/dotnet` (`linux-arm64` on Arm).
-- Mac: `<Engine>/Engine/Binaries/ThirdParty/DotNet/10.0/mac-arm64/dotnet` (`mac-x64` on Intel).
+- Windows: `<Engine>/Engine/Binaries/ThirdParty/DotNet/<version>/win-x64/dotnet.exe` (`win-arm64` on Arm).
+- Linux: `<Engine>/Engine/Binaries/ThirdParty/DotNet/<version>/linux-x64/dotnet` (`linux-arm64` on Arm).
+- Mac: `<Engine>/Engine/Binaries/ThirdParty/DotNet/<version>/mac-arm64/dotnet` (`mac-x64` on Intel).
 
 Set `DOTNET_CLI_TELEMETRY_OPTOUT=1` and `DOTNET_NOLOGO=1` first if you like.
 
@@ -15,7 +15,7 @@ Set `DOTNET_CLI_TELEMETRY_OPTOUT=1` and `DOTNET_NOLOGO=1` first if you like.
 2. the `UAK_ENGINE` environment variable;
 3. the engine whose bundled `dotnet` runs the build.
 
-So running the engine's own `dotnet` needs no setting. With any other `dotnet` and no engine given, the build stops with an error that says what to set. The build's output goes only to `tools/bin` and `tools/obj` (and NuGet packages to your user NuGet cache). The bundled SDK may still update its own metadata folder under the engine's `Binaries/ThirdParty/DotNet` directory, as any dotnet does on first use.
+So running the engine's own `dotnet` needs no setting. With any other `dotnet` and no engine given, the build stops with an error that says what to set. The build's output goes only to `tools/bin` and `tools/obj`. NuGet is used only by the tests (MSTest) and by a self-contained publish (the .NET runtime pack), which go to your user NuGet cache. The bundled SDK may still update its own metadata folder under the engine's `Binaries/ThirdParty/DotNet` directory, as any dotnet does on first use.
 
 ## Build and test
 
@@ -25,6 +25,8 @@ Run these from `tools/`, not from the plugin root: `global.json`, which selects 
 <dotnet> build UnrealAgentKit.sln
 <dotnet> test --solution UnrealAgentKit.sln
 ```
+
+With UE 5.7's SDK (8.0), which predates `--solution`, the test command is `<dotnet> test UnrealAgentKit.sln`.
 
 ## Install (publish)
 

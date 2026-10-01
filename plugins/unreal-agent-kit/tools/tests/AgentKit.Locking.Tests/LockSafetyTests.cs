@@ -575,7 +575,7 @@ public sealed class LockSafetyTests
 	/// <summary>Collects log lines as "Level: message".</summary>
 	private sealed class ListLogger : ILogger
 	{
-		private readonly Lock _gate = new();
+		private readonly object _gate = new();
 		private readonly List<string> _lines = [];
 
 		public IReadOnlyList<string> Lines

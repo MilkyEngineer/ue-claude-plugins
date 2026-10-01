@@ -318,14 +318,9 @@ public sealed class ProcessRunner : IProcessRunner, IProcessCapture
 			}
 			catch (OperationCanceledException)
 			{
-				// We started it, so we stop it, with everything it started.
-				try
-				{
-					Child.Kill(killDescendants: true);
-				}
-				catch (Exception Error) when (Error is Win32Exception or InvalidOperationException)
-				{
-				}
+				// We started it, so we stop it. Disposing a ManagedProcess terminates it and waits (UE 5.8's Kill does no more on
+				// Windows, and UE 5.7's ManagedProcess has no Kill); closing Group, when there is one, ends everything it started.
+				Child.Dispose();
 				throw;
 			}
 			await DrainAsync(InputTask, OutTask, ErrTask).ConfigureAwait(false);

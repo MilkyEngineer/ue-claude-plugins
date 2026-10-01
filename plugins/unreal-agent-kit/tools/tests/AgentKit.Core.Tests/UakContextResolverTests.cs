@@ -450,7 +450,7 @@ public sealed class UakContextResolverTests
 	{
 		// Pinned so a change to the hashing, which would orphan every existing state folder, is deliberate.
 		string Root = OperatingSystem.IsWindows() ? @"C:\Program Files\Epic Games\UE_5.8" : "/opt/UE_5.8";
-		string Expected = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(OperatingSystem.IsWindows() ? Root.ToLowerInvariant() : Root)))[..16];
+		string Expected = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(OperatingSystem.IsWindows() ? Root.ToLowerInvariant() : Root)), 0, 8).ToLowerInvariant();
 		Assert.AreEqual(Expected, UakContextResolver.GetEngineStateKey(Root));
 	}
 

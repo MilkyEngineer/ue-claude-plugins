@@ -9,7 +9,7 @@
     {
       "name": "unreal-agent-kit",
       "source": "./plugins/unreal-agent-kit",
-      "description": "Multi-agent workflow for Unreal Engine projects (tiered workers, a read-only reviewer, workstream briefs, delegation) plus uak, a CLI for a queued editor lock, detached runs, single-file compile checks, and build and test wrappers"
+      "description": "Multi-agent workflow for Unreal Engine projects (tiered workers, a read-only reviewer, epic briefs, delegation) plus uak, a CLI for a queued editor lock, detached runs, single-file compile checks, and build and test wrappers"
     }
   ]
 }

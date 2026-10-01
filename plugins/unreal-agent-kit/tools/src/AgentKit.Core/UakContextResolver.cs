@@ -322,7 +322,7 @@ public static class UakContextResolver
 			Normal = Normal.ToLowerInvariant();
 		}
 		byte[] Hash = System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(Normal));
-		return Convert.ToHexStringLower(Hash)[..16];
+		return Convert.ToHexString(Hash, 0, 8).ToLowerInvariant();
 	}
 
 	static FileInfo ProjectFromPath(string path, string currentDirectory, string from)

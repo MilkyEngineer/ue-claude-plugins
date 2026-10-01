@@ -16,7 +16,7 @@ public sealed class RunRecord
 	/// <summary>The run's unique name: letters, digits, '_', '.' and '-'.</summary>
 	public string Name { get; set; } = "";
 
-	/// <summary>Who started it (for example a workstream, "W3", or "lead").</summary>
+	/// <summary>Who started it (for example an epic, "E3", or "lead").</summary>
 	public string Owner { get; set; } = "";
 
 	/// <summary>The run's top process: the wrapper, or the adopted process. Null until the wrapper has recorded itself.</summary>

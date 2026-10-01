@@ -5,7 +5,9 @@ using System.Text;
 using EpicGames.Perforce;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
+#if UAK_PERFORCE_TRACER
 using OpenTelemetry.Trace;
+#endif
 
 namespace AgentKit.Vcs.Tests;
 
@@ -111,7 +113,9 @@ internal sealed class FakePerforceConnection : IPerforceConnection
 
 	public ILogger Logger { get; } = NullLogger.Instance;
 
+#if UAK_PERFORCE_TRACER
 	public Tracer Tracer { get; } = TracerProvider.Default.GetTracer("AgentKit.Vcs.Tests");
+#endif
 
 	public List<PerforceCall> Calls { get; } = [];
 
