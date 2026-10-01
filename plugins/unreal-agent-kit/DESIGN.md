@@ -226,7 +226,7 @@ Writes stay out of scope for now: no commit, submit, checkout or edit.
   - `ue-low`, running on Sonnet;
   - `ue-medium`, `ue-high` and `ue-xhigh`;
   - `ue-runner`, on Sonnet at low effort, which cannot edit: it runs a given list and reports, so a verification never changes what it verifies;
-  - `ue-research`, read-only at high effort, for engine investigations answered with `file:line` evidence. Its reading never conflicts with workers' edits, but its experiments queue like any run: `uak test` takes the editor lock, and `uak compile` waits for UBT's mutex. `uak compile` only compiles files inside a module, so an experiment compiles existing project files, or a temporary copy inside a module the lead names, removed afterwards and reported;
+  - `ue-research`, read-only at high effort, for engine investigations answered with `file:line` evidence. Its reading never conflicts with workers' edits, but its experiments queue like any run: `uak test` takes the editor lock, and `uak compile` waits for UBT's mutex. `uak compile` only compiles files inside a module, so an experiment compiles existing project files only; one that needs new code asks the lead, and a worker writes it (a file a researcher added to a module would be picked up by other agents' builds);
   - `ue-review`, read-only.
 - **Their ground rules:**
   - never spawn agents (`disallowedTools: Agent`);
