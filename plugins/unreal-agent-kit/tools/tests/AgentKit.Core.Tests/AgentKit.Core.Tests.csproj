@@ -1,0 +1,19 @@
+<Project Sdk="MSTest.Sdk/4.0.2">
+	<PropertyGroup>
+		<RootNamespace>AgentKit.Core.Tests</RootNamespace>
+		<IsPackable>false</IsPackable>
+		<!-- The quoting tests call CommandLineToArgvW through LibraryImport, whose generated code is unsafe. -->
+		<AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+	</PropertyGroup>
+	<ItemGroup>
+		<ProjectReference Include="..\..\src\AgentKit.Core\AgentKit.Core.csproj" />
+		<!-- Built first, but not referenced: its DLL is copied to SampleCommands/ and loaded as a project command assembly. -->
+		<ProjectReference Include="..\UakSampleCommands\UakSampleCommands.csproj" ReferenceOutputAssembly="false" Private="false" />
+	</ItemGroup>
+	<Target Name="CopySampleCommands" AfterTargets="Build">
+		<MSBuild Projects="..\UakSampleCommands\UakSampleCommands.csproj" Targets="GetTargetPath">
+			<Output TaskParameter="TargetOutputs" ItemName="_UakSampleCommandsAssembly" />
+		</MSBuild>
+		<Copy SourceFiles="@(_UakSampleCommandsAssembly)" DestinationFolder="$(OutDir)SampleCommands" SkipUnchangedFiles="true" />
+	</Target>
+</Project>

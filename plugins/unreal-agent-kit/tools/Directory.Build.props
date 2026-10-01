@@ -1,0 +1,23 @@
+<Project>
+	<!-- Shared by every UnrealAgentKit project. Build with the engine's bundled SDK:
+	     <Engine>/Binaries/ThirdParty/DotNet/<version>/<platform>/dotnet build tools/UnrealAgentKit.sln -->
+	<PropertyGroup>
+		<TargetFramework>net10.0</TargetFramework>
+		<LangVersion>latest</LangVersion>
+		<Nullable>enable</Nullable>
+		<ImplicitUsings>enable</ImplicitUsings>
+		<TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+		<AnalysisLevel>latest</AnalysisLevel>
+		<Deterministic>true</Deterministic>
+		<InvariantGlobalization>true</InvariantGlobalization>
+		<!-- The kit's version: keep it equal to .claude-plugin/plugin.json. `uak help` shows it, and the publish folder is named after it. -->
+		<Version>0.1.0</Version>
+		<IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
+		<!-- Keep build output inside the kit: never write into an engine directory. -->
+		<UakRoot>$(MSBuildThisFileDirectory)</UakRoot>
+		<BaseOutputPath>$(UakRoot)bin\$(MSBuildProjectName)\</BaseOutputPath>
+		<BaseIntermediateOutputPath>$(UakRoot)obj\$(MSBuildProjectName)\</BaseIntermediateOutputPath>
+	</PropertyGroup>
+	<!-- How the engine's EpicGames.* assemblies are referenced (UakEngineDir) lives here; owned by the core workstream. -->
+	<Import Project="$(MSBuildThisFileDirectory)build\EpicGames.props" Condition="Exists('$(MSBuildThisFileDirectory)build\EpicGames.props')" />
+</Project>

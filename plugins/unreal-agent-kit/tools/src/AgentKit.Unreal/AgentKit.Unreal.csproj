@@ -1,0 +1,9 @@
+<Project Sdk="Microsoft.NET.Sdk">
+	<PropertyGroup>
+		<RootNamespace>AgentKit.Unreal</RootNamespace>
+	</PropertyGroup>
+	<ItemGroup>
+		<ProjectReference Include="..\AgentKit.Core\AgentKit.Core.csproj" />
+		<ProjectReference Include="..\AgentKit.Locking\AgentKit.Locking.csproj" />
+	</ItemGroup>
+</Project>

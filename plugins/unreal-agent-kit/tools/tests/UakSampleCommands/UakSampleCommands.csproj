@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+	<!--
+		A stand-in for a project's own uak commands (<Project>/.uak/commands, or a UAK_COMMAND_PATHS folder). AgentKit.Core.Tests
+		copies its output into a temporary project and checks that the host finds the command. Its name does not start with
+		"AgentKit.", so it is never mistaken for one of the kit's own assemblies.
+	-->
+	<PropertyGroup>
+		<RootNamespace>UakSampleCommands</RootNamespace>
+		<IsPackable>false</IsPackable>
+	</PropertyGroup>
+	<ItemGroup>
+		<!-- The host supplies AgentKit.Core; a command folder need not ship a copy (and a copy is ignored). -->
+		<ProjectReference Include="..\..\src\AgentKit.Core\AgentKit.Core.csproj" Private="false" />
+	</ItemGroup>
+</Project>

@@ -1,0 +1,241 @@
+# UnrealAgentKit: design
+
+UnrealAgentKit is a Claude Code plugin with two parts:
+- a multi-agent workflow for Unreal Engine projects: tiered agents, a read-only reviewer, workstream briefs, and delegation;
+- the tools that workflow needs, gathered in one CLI, `uak`:
+  - a queued lock around editor and build runs;
+  - detached runs that are tracked;
+  - a single-file compile check;
+  - build and test wrappers;
+  - a version-control abstraction.
+
+It must not depend on any particular engine, project, platform or version-control system. Apart from Claude Code, it uses only what building Unreal Engine already requires: the engine's bundled .NET SDK, the engine's `EpicGames.*` C# libraries, and NuGet.
+
+The owner decided on 2026-10-01:
+- the name is UnrealAgentKit, living in the `ue-claude-plugins` marketplace;
+- UE 5.8 first (5.7 later);
+- Windows now, but keep everything platform-neutral (no Windows-only code without a Linux/Mac path or a clear TODO);
+- NuGet packages are fine.
+
+## Layout
+
+```
+plugins/unreal-agent-kit/
+  .claude-plugin/plugin.json
+  agents/            tiered workers and the reviewer (generic ground rules)
+  skills/            the workflow skill (briefs, delegation, reviews, doc sync) and templates
+  docs/              install, settings, CLAUDE.md snippet
+  tools/
+    UnrealAgentKit.sln, Directory.Build.props, global.json, build/EpicGames.props
+    src/AgentKit.Core      context resolution, process running, JSON, logging, IUakCommand
+    src/AgentKit.Locking   the queued lock
+    src/AgentKit.Runs      detached runs and their registry
+    src/AgentKit.Vcs       IVersionControl: Git, Perforce, None
+    src/AgentKit.Unreal    compile (UBT -SingleFile), build, automation tests
+    src/uak                the CLI host
+    tests/AgentKit.*.Tests MSTest (MSTest.Sdk), one project per library
+```
+
+## Build
+
+`<Engine>/Binaries/ThirdParty/DotNet/<version>/<platform>/dotnet build tools/UnrealAgentKit.sln`, using the engine's bundled SDK. For UE 5.8 that is 10.0.203, so the target is `net10.0`.
+
+- Output goes under `tools/bin` and `tools/obj`. Never write into an engine directory: installed engines sit under Program Files. (The bundled SDK may update its own metadata folder under the engine's DotNet directory; the kit's build writes nothing else there.)
+- Tests: from `tools/`, `dotnet test --solution UnrealAgentKit.sln` (Microsoft.Testing.Platform, set in `tools/global.json`, which is only found from `tools/`).
+- Set `DOTNET_CLI_TELEMETRY_OPTOUT=1`, `DOTNET_NOLOGO=1` and `DOTNET_GENERATE_ASPNET_CERTIFICATE=false` for kit builds.
+- Warnings are errors.
+
+### Installing `uak` (lead's decision, 2026-10-01)
+
+- **How:** a self-contained publish of `tools/src/uak` for the host's runtime identifier, so it runs with no system-wide dotnet.
+- **Where:** `$UAK_HOME` (default `~/.unreal-agent-kit`) plus `/<kit version>/`. That is outside the plugin folder, because Claude Code replaces plugin folders on update, and versioned, so an update never overwrites a running binary.
+- **Fallback:** if self-contained doesn't work cleanly, `<engine dotnet> uak.dll`.
+- **Project commands:** the host also loads `IUakCommand` assemblies from the folders in `UAK_COMMAND_PATHS`, and from `<Project>/.uak/commands/` only when `UAK_PROJECT_COMMANDS=1` (or `true`) or that folder is listed in `UAK_COMMAND_PATHS` (a cloned repository's code never runs by default). Folders outside the kit load lazily: only for a command the kit lacks, or for `uak help -all`. Entries in `UAK_COMMAND_PATHS` must be absolute; a relative entry is skipped with a warning, because it would depend on the current folder. That way a project adds its own tools without changing the kit.
+
+## Engine libraries
+
+`build/EpicGames.props` is owned by Core.
+- **Engine directory.** It finds the engine from the `UakEngineDir` property, else from the `UAK_ENGINE` environment variable, else from the engine whose bundled dotnet runs the build. It resolves `UakEngineRoot` (the root, with a trailing slash) and `UakEpicGamesDir` (`<root>Engine/Binaries/DotNET/UnrealBuildTool/`).
+- **References.** It references the prebuilt `EpicGames.*.dll` that the engine ships (for example under `Engine/Binaries/DotNET/AutomationTool` and `.../UnrealBuildTool`), with `Private=true` so they are copied next to `uak`.
+- **EpicGames.Perforce.** UE 5.8 ships it prebuilt at `Engine/Binaries/DotNET/AutomationTool/AutomationUtils/<tfm>/EpicGames.Perforce.dll`. AgentKit.Vcs references that DLL itself, based on `$(UakEngineRoot)`: the resolved engine root, with a trailing slash. `UakEngineDir` is only the optional input. It is not in `build/EpicGames.props` (K3's decision, 2026-10-01).
+  - Its runtime needs the OpenTelemetry.Api NuGet package.
+  - We use our own `P4ProcessConnection`, an `IPerforceConnection` that runs `p4 -G` (found on PATH only) with a per-command timeout (`UAK_P4_TIMEOUT`, 15 s by default), so no native library is needed.
+  - The TFM folder is probed, not hard-coded, because 5.7 is probably on net8.0.
+  - `src/AgentKit.Vcs/EpicGames.Perforce.props` holds the reference. It prefers `AutomationUtils/$(TargetFramework)/`, else probes `AutomationUtils/*/`, and `-p:UakPerforceDll=<path>` overrides both. The build fails with a clear message if the DLL is missing or ambiguous.
+  - We don't use `PerforceConnection` itself: it starts a bare `p4.exe` (which Windows looks up in the current directory first) and has no time limit.
+  - The API we use, to check for 5.7: `PerforceSettings(IPerforceEnvironment)`, `IPerforceConnection`, `IPerforceOutput`, `PerforceRecord.FromFields`, `TryGetInfoAsync`, `TryGetChangesAsync`, `TryFStatAsync`, `TryAddAsync`, `AddOptions.IncludeWildcards` and `InfoOptions`.
+- **Use what exists.** Where an EpicGames library already does the job, use it. Examples:
+  - `EpicGames.Core`: `SingleInstanceMutex`, `ManagedProcess`, `FileReference` and `DirectoryReference`, `CommandLineArguments`, JSON helpers;
+  - `EpicGames.Build`: `GlobalSingleInstanceMutex.GetUniqueMutexForPath`;
+  - `EpicGames.Perforce`: its `-G` record parsing and settings, behind our `P4ProcessConnection`.
+- **Version skew.** Keep the surface we use small, because 5.7 support will follow.
+
+## Command line
+
+`uak [-project=<path>] [-engine=<path>] <command...> [arguments]`, in UE style (`-Key=Value`, case-insensitive). `uak help [command]` gives help.
+
+Global options (`-project=`, `-engine=`, `-vcs=`, `-verbose`, `-help`) are parsed only before the command path. Everything after the command path reaches `RunAsync` verbatim, including a literal `--` and all that follows it. `uak <command> -help` shows that command's help. A partial path (`uak lock`) lists its subcommands and exits 2.
+
+- **Commands** implement `AgentKit.Core.IUakCommand`, and parse their own arguments with `UakArguments`. The host (`UakHost`, in Core) finds implementations by reflection, so adding a command never edits the host. It searches:
+  - every AgentKit.*.dll next to `uak`;
+  - the folders in `UAK_COMMAND_PATHS`;
+  - `<Project>/.uak/commands/`, only when opted in (see "Installing `uak`"), and lazily.
+
+  Only assemblies that reference AgentKit.Core are loaded. A duplicate name is a warning.
+- **`uak env` sections** come from the `IUakEnvReporter` implementations in the kit's own assemblies. Kit commands, `uak env`, `uak help` and `uak help <kit command>` never load other folders (`uak help <a name the kit lacks>` and `uak help -all` load the opted-in ones); when the project folder exists but isn't opted in, `help` and `env` say so in one line on stderr.
+- **Exit codes:** 0 for success, 1 for failure (including a cancel), and 2 for a usage or setup error. The first Ctrl+C cancels the command; a second one kills `uak`.
+- **`UAK_HOME`** (default `~/.unreal-agent-kit`) holds both the versioned installs and the fallback `State/` folder.
+- **Version:** `Directory.Build.props`'s `<Version>` must equal `.claude-plugin/plugin.json`'s version.
+
+## Resolving the engine and project
+
+Core's `UakContextResolver` builds a `UakContext`.
+
+The project comes from:
+1. `-project=`;
+2. the `UAK_PROJECT` environment variable;
+3. otherwise, the nearest `*.uproject` found by walking up from the current directory. A directory holding more than one `.uproject` is an error that names them.
+
+The engine comes from:
+1. `-engine=`;
+2. the `UAK_ENGINE` environment variable;
+3. otherwise, the engine root that contains the project (a source build with the project inside it);
+4. otherwise, the `.uproject`'s `EngineAssociation`:
+   - a path-like value is used as a path;
+   - on Windows, other values are looked up in `HKCU\Software\Epic Games\Unreal Engine\Builds`, then in the launcher's installs (`HKLM\SOFTWARE\EpicGames\Unreal Engine\<version>` InstalledDirectory, then `LauncherInstalled.dat`);
+   - on Linux and Mac, they are looked up in UE's application settings folder (`~/.config/Epic` on Linux, `~/Library/Application Support/Epic` on Mac): `UnrealEngine/Install.ini` [Installations], then `UnrealEngineLauncher/LauncherInstalled.dat`.
+
+   GUIDs match with or without braces. `-project=` also accepts a directory that holds exactly one `.uproject`.
+
+The engine root is the directory that contains `Engine/Build/Build.version`. Paths may be given as the root or as its `Engine` folder.
+
+- **State directory:** `<Project>/Saved/AgentKit`, else `<EngineRoot>/Engine/Saved/AgentKit/Projects/<project key>` if that is writable, else `$UAK_HOME/State/<project key>`, where `$UAK_HOME` defaults to `~/.unreal-agent-kit`. Without a project, the fallbacks are `<EngineRoot>/Engine/Saved/AgentKit` and `$UAK_HOME/State/<engine key>`. A key is a hash of the normalised folder, so two projects never share a fallback folder, and neither do two engines. It also keeps state apart from the versioned `<version>/` install folders. Resolving it creates nothing; commands that write create it.
+- **`uak env`** prints every resolved path, the bundled dotnet, the version-control system found, and how each was found.
+
+## The queued lock (Locking)
+
+`uak lock run [-name=] [-priority=High|Normal] -- <command...>` holds the lock around a command. `uak lock status` shows the holder and the queue. The library API is `await using var hold = await EditorLock.AcquireAsync(context, name, priority, ct)`.
+
+- **The mutex itself** is an OS named mutex through `EpicGames.Core.SingleInstanceMutex`, named with `GlobalSingleInstanceMutex.GetUniqueMutexForPath("UnrealAgentKit_EditorLock", <scope key>)`, where the scope key is the scope folder's identity (see Scope), else its canonical path. The kernel releases it when its holder dies, so no dead-holder checks are needed. It is named `Global\…`, so it covers every session on the machine.
+- **The queue** gives fair order and status, which the mutex lacks.
+  - Waiters write tickets in `<State>/Lock/Queue/`, ordered by priority and then by arrival.
+  - Only the head of the queue waits on the mutex.
+  - A ticket whose process has died is removed. Liveness is checked by PID plus process start time, through `System.Diagnostics.Process`.
+  - The holder writes `<State>/Lock/holder.json` for status only.
+  - All files are JSON, UTF-8 without a BOM, with ISO 8601 UTC times.
+- **Scope:** the mutex and the state directory derive from the canonical project directory (else the engine root), with junctions, links and subst drives resolved (Core's `CanonicalPath`). The mutex is keyed on the scope folder's identity (volume serial plus file ID; on Unix, device plus inode), so any path to the same folder, including a loopback UNC path or a mapped drive, gets the same lock. `uak lock run` refuses without a project unless `-engine-scope` is given (and refuses `-engine-scope` when a project was found). The holder logs the scope it locked, and `holder.json` records it.
+- **Nesting:** while it holds, a holder sets `UAK_LOCK_HELD=<mutex>:<HoldId>` in its own environment, so its children (UBT, the editor, scripts) inherit it. A request for the same lock whose HoldId `holder.json` still records, with a live holder, joins that hold without waiting. Any other marker fails at once (lead's decision: a hold on one lock may not take another). Detached runs drop the marker.
+- **Command lifetime:** `lock run`'s command runs in a kill-on-close job on Windows (a process group on Unix; TODO(unix) PDEATHSIG). Cancelling, uak dying or the command exiting stops its whole tree before release, except breakaway or detached runs. `lock run`'s job is named after the HoldId, and `holder.json` records `CommandPid`, `CommandProcessStart` and `CommandJob`. `uak build` and `uak test` record their child's PID the same way. A new holder that takes the mutex from a dead holder of the same scope waits up to 30 s, while that command lives or its job still has processes, then warns. A record of another scope (for example another project's, in a shared folder) is never waited for.
+- **Versions:** the mutex name depends on the kit version's scope rule, so all agents on one machine should use the same `uak` version.
+- **Tickets:** the sequence is wall-clock ticks raised above every queued ticket and this process's last, so it only grows. Another machine's tickets and holder are reported, never waited for or deleted.
+- **Priority** takes effect within one poll (1 s): a High waiter takes the front from a Normal waiter already waiting there, which cancels its mutex wait and goes back in line.
+- **Defaults:** an explicit priority beats `UAK_LOCK_PRIORITY`; callers pass null to inherit it. Inside a run, a lock's name shows as `<UAK_LOCK_NAME>/<name>`. `holder.json` carries a HoldId, so a holder only deletes its own record.
+- **Abandonment is normal.** `SingleInstanceMutex.Dispose` doesn't wait for its own release, so every handoff looks like an abandoned mutex. Its waiters, and UBT's, treat that as success. We keep Epic's class (lead's decision, 2026-10-01). A non-kit waiter on our mutex name would see `AbandonedMutexException`.
+- **One machine:** the queue is per machine, because the mutex is. The state directory must be local. Tickets and `holder.json` record `Machine`.
+- **Platform check:** on Linux and Mac, .NET named mutexes work between processes of the same user. This needs testing on those platforms later. Unix doesn't delete tickets on a crash, so dead-ticket cleanup covers it there.
+- **Tests:** real separate processes, checking:
+  - first-in, first-out order;
+  - priority;
+  - a dead waiter;
+  - a dead holder (the mutex is abandoned);
+  - no overlap, checked through an enter/leave log;
+  - cancellation.
+
+## Detached runs (Runs)
+
+- `uak runs start -name= -owner= [-priority=] [-result-file=] [-output=] [-force] -- <command...>` starts a run. It waits up to 30 s for the wrapper to record itself, and exits 1 if the wrapper exits first.
+  - The run survives the end of the caller's shell and a restart of the agent session.
+  - It is recorded in `<State>/Runs/<name>.json`, with output in `<name>.log`.
+  - The run takes the lock only if the command itself does.
+  - `-priority` passes `UAK_LOCK_PRIORITY` to the child, and the lock's name defaults to `UAK_LOCK_NAME`.
+- `uak runs list [-all] [-name=<pattern>]` and `uak runs adopt -pid= -name= -owner= [-output=] [-result-file=]`.
+- **Starting safely:** a run's name is claimed with `<Name>.claim` (create-new, delete-on-close) around the name check and the first record write, so concurrent starts of one name start one run. The output is emptied on every start. Bare program names resolve on PATH only; a missing one fails the start, and the failure is recorded.
+- **Detaching:**
+  - Windows: `CreateProcess` with `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB`, falling back without breakaway when the job refuses it.
+  - Unix: a new session, using `setsid` through P/Invoke, or an equivalent.
+- **Recording the end:** a hidden wrapper mode (`uak runs _wrap`) records the end time, exit code and last line.
+  - The wrapper gets no inherited handles. It opens the log itself and hands it to the command, so no shell pipe is held and the output survives the wrapper.
+  - Its own log lines start with `UakRun '`, and last-line reading skips them.
+  - The wrapper retries the end record, and falls back to a log line if it still can't write it.
+  - A running wrapper keeps its `uak` install's files open. That's harmless for versioned installs, but a dev build of uak can't be rebuilt while a run is going.
+- **Record fields:** Name, Owner, Pid, ProcessStart, Command, Arguments, CommandLine, OutputFile, ResultFile, Priority, Adopted, Started, Ended, ExitCode and LastLine, plus the optional `WorkingDirectory` and `Detach` (`breakaway`, `job` or `session`).
+
+## Version control (Vcs)
+
+`IVersionControl : IDisposable` covers:
+- `Kind` (Git, Perforce or None) and `RootDirectory`;
+- `GetCurrentRevisionAsync` (git: commit hash; p4: the newest submitted change the workspace has);
+- `GetChangedFilesAsync` (git: modified, staged and untracked files; p4: files opened in the client only, so files edited offline are not found), with an optional path filter;
+- `GetFileStatusAsync(paths)`, which returns one entry per path, in the order given. The states (`VcsFileState`) are Unknown, Unmodified, Modified, Added, Deleted, Renamed, Copied, TypeChanged, Conflicted, Untracked and Ignored. Perforce never reports Conflicted, because fstat has no "unresolved" tag;
+- `IsIgnoredAsync(path)` (git: `check-ignore`; p4: `add -n`);
+- `DescribeAsync()` (a one-line summary for `uak env`).
+
+Writes stay out of scope for now: no commit, submit, checkout or edit.
+
+- **Detection,** in this order:
+  1. `-vcs=`, or the `UAK_VCS` environment variable. Values: `git`, `perforce` (or `p4`), `none`. `-vcs=` is a global option that Core resolves into `UakContext.RequestedVersionControl`, and the vcs commands also accept it locally;
+  2. a `.git` directory, or `.git` file, above the project;
+  3. a Perforce workspace: a `P4CONFIG` file at or above the start directory. A global P4PORT or P4CLIENT alone is not used and p4 is not run; `-vcs=p4` uses them;
+  4. otherwise None.
+
+  It starts from the project directory, then the engine root, then the working directory. The API is `VersionControlDetector.DetectAsync(context)`, which returns the implementation and its provenance. `uak env` reports it through `VcsEnvReporter : IUakEnvReporter`.
+- **Implementations** (git and p4 are found on PATH only, never in the current or application directory):
+  - Git, through the `git` command line (`-C <root>`, `GIT_TERMINAL_PROMPT=0`, `GIT_OPTIONAL_LOCKS=0`).
+  - Perforce, through `EpicGames.Perforce` (see "Engine libraries").
+- **git time limit:** every git command has a time limit (`UAK_GIT_TIMEOUT`, 30 s); git is stopped and the command fails with a `VcsException` that names the variable.
+- **Perforce safety:** every p4 command has a time limit (`UAK_P4_TIMEOUT`, 15 s). When detection couldn't reach the server, `uak env` reports that instead of asking again. File arguments are escaped (`@`→%40, `#`→%23, `%`→%25, `*`→%2A), a path containing `...` is rejected, and `add -n` takes the raw name with `-f`.
+- **Commands:** `uak vcs status [paths...]`, `uak vcs changed [-path=]` and `uak vcs revision`, each with `-json`. Data goes to stdout and errors to the logger, so `-json` output is safe to parse.
+
+## Unreal operations (Unreal)
+
+- **`uak compile <file>... [-dependents] [-target=] [-config=] [-platform=] [-MaxParallelActions=] [-maxerrors=] [-resultfile=]`** checks files through UBT's `-SingleFile=<file>` for the project's editor target (`<Project>Editor`, else the `Editor` target in `Source/*.Target.cs`, else `UnrealEditor`), with the platform's real compiler. Nothing is linked, and objects go to a separate `SingleFile/` folder, so it is safe while an editor runs.
+  - UBT compiles a header on its own, through a generated `<Name>.h.cpp`, so headers must be self-contained (lead's decision, 2026-10-01: keep this strict default). `-dependents` adds `-SingleFileBuildDependents`.
+  - UBT silently drops a file that isn't in the target, or a header marked HEADER_UNIT_SKIP, and skips a file whose `SingleFile` object is newer. So uak first deletes the requested files' old `SingleFile` objects (only under the project folder), then checks that a compile action ran for each file. A file that didn't compile is NOT COMPILED, exit code 2.
+  - It passes `-WaitMutex`, and does not take the editor lock. UBT's own mutex already makes compile checks run one at a time.
+  - It prints errors as `file(line): error: CODE: message`. A header error repeated across translation units is reported once, with a count.
+- **`uak build [-target=] [-config=Development] [-platform=host] [-MaxParallelActions=] [-maxerrors=] [-resultfile=]`** runs under the editor lock. On an installed engine it runs UBT directly on the bundled dotnet; on a source build it runs the platform's Build script, which rebuilds UBT when needed. It always adds `-WaitMutex` and `-NoHotReloadFromIDE`.
+- **`uak test -filter=<prefix> [-gpu] [-name=] [-resultfile=]`** runs the editor with `-ExecCmds="Automation RunTests <filter>;Quit"` (`-nullrhi` unless `-gpu`) under the lock.
+  - The log is `<Project>/Saved/Logs/<name>.log`, deleted before the run. The report goes to `<State>/TestReports/<name>`.
+  - A run passes only when all of these hold: tests were found; the found count equals the completed count; none failed; at least one passed (all skipped is NOTHING RAN); the queue finished; and the editor exited 0. A non-zero editor exit fails the run even when every test passed (lead's decision: keep it strict, and print the editor's exit code next to the test counts).
+- **Logs:** compile and build write UBT's output to `<State>/Logs/<command>-<UTC time>-<pid>.log`. UBT and Build-script output is decoded with `ProcessRunner.ConsoleEncoding` (the OEM code page on Windows).
+- **`-filter`** rejects `,` `;` `|` quotes, backticks and white space, which would break the `-ExecCmds` list.
+- **Headers under `-dependents`:** the header counts as compiled only through its own `<Name>.h.cpp` (or `.h.obj`) action. The other compiled units are reported on their own lines and never stand in for it.
+- **Other rules:**
+  - Paths to UBT, the editor and scripts come from the engine directory and the host platform. Never hard-code `.exe` or `Win64`; use a helper in Core.
+  - Parallelism is capped by `-MaxParallelActions` when given, else by `UAK_MAX_PARALLEL_ACTIONS`.
+
+## Plugin content
+
+- **Agents:**
+  - `ue-low`, running on Sonnet;
+  - `ue-medium`, `ue-high` and `ue-xhigh`;
+  - `ue-review`, read-only.
+- **Their ground rules:**
+  - never spawn agents (`disallowedTools: Agent`);
+  - never kill processes or commit unless told;
+  - take the lock for editor and build runs;
+  - start long runs detached through `uak runs start`;
+  - ask the lead with SendMessage to "main";
+  - ask for a low worker for long, low-judgment work;
+  - follow workstream briefs;
+  - no new batch or shell scripts: tools go in `uak`.
+- **The workflow skill:** briefs (a README plus W#.md per milestone), caps, effort tiers, reviews, spec-doc sync, and an opt-in usage-limit watchdog (only if the project's owner allows auto-resume).
+- **Docs:**
+  - the install steps;
+  - recommended settings: `CLAUDE_CODE_DISABLE_BG_SHELL_PRESSURE_REAP=1`, the auto-compact window;
+  - a CLAUDE.md snippet;
+  - how to build `uak` on first use.
+
+## Workstreams and file ownership
+
+| Workstream | Owns |
+| --- | --- |
+| K1 Core and host | `Directory.Build.props`, `global.json`, `build/`, `src/AgentKit.Core`, `src/uak`, `tests/AgentKit.Core.Tests`, `UnrealAgentKit.sln` |
+| K2 Locking and Runs | `src/AgentKit.Locking`, `src/AgentKit.Runs` and their test projects |
+| K3 Version control | `src/AgentKit.Vcs` and its tests |
+| K4 Unreal operations | `src/AgentKit.Unreal` and its tests |
+| K5 Plugin and docs | `.claude-plugin/`, `agents/`, `skills/`, `docs/`, `README.md`, and this plugin's entry in the marketplace `README.md` and `marketplace.json` |
+
+- **The shared contracts** are `IUakCommand` and `UakContext` (in Core). The other workstreams build against them.
+- **Changing them:** if a workstream needs something added to Core, it asks K1 through the lead, or adds it itself only if the addition is purely additive, and tells the lead.
+- **This file** belongs to the lead. Suggest changes to the lead instead of editing it.

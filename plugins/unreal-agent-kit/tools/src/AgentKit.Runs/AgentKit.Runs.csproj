@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+	<PropertyGroup>
+		<RootNamespace>AgentKit.Runs</RootNamespace>
+	</PropertyGroup>
+	<ItemGroup>
+		<ProjectReference Include="..\AgentKit.Core\AgentKit.Core.csproj" />
+		<ProjectReference Include="..\AgentKit.Locking\AgentKit.Locking.csproj" />
+	</ItemGroup>
+	<ItemGroup>
+		<InternalsVisibleTo Include="AgentKit.Runs.Tests" />
+		<InternalsVisibleTo Include="AgentKit.TestChild" />
+	</ItemGroup>
+</Project>

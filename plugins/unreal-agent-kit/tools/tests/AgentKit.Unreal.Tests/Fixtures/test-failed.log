@@ -1,0 +1,20 @@
+[2026.09.28-03.48.20:775][614]LogAutomationCommandLine: Display: Found 15 automation tests based on 'Project.Gameplay'
+[2026.09.28-03.49.02:270][644]LogAutomationController: Display: Test Started. Name={SpawnAtOrigin} Path={Project.Gameplay.SpawnAtOrigin}
+[2026.09.28-03.49.02:280][644]LogMyPlugin: Spawned MyActor at (0, 0, 0) in 2.8 ms.
+[2026.09.28-03.49.07:945][644]LogAutomationController: Ignoring very large delta of 5.67 seconds in calls to FAutomationControllerManager::Tick() and not penalizing unresponsive tests
+[2026.09.28-03.49.07:973][646]LogAutomationController: Error: Test Completed. Result={Fail} Name={SpawnAtOrigin} Path={Project.Gameplay.SpawnAtOrigin}
+[2026.09.28-03.49.07:973][646]LogAutomationController: BeginEvents: Project.Gameplay.SpawnAtOrigin
+[2026.09.28-03.49.07:973][646]LogAutomationController: Error: Expected 'MyActor spawns at the origin' to be true. [C:\Work\MyGame\Plugins\MyPlugin\Source\MyPluginTests\Private\MyActorTests.cpp(436)]
+[2026.09.28-03.49.07:973][646]LogAutomationController: Spawn location: (0.0, 0.0, 100.0)
+[2026.09.28-03.49.07:973][646]LogAutomationController: EndEvents: Project.Gameplay.SpawnAtOrigin
+[2026.09.28-03.49.07:979][646]LogAutomationController: Display: Test Started. Name={DamageReducesHealth} Path={Project.Gameplay.DamageReducesHealth}
+[2026.09.28-03.49.07:993][647]LogMyPlugin: Spawned MyActor at (0, 0, 0) in 7.0 ms.
+[2026.09.28-03.49.08:164][649]LogAutomationController: Error: Test Completed. Result={Fail} Name={DamageReducesHealth} Path={Project.Gameplay.DamageReducesHealth}
+[2026.09.28-03.49.08:165][649]LogAutomationController: BeginEvents: Project.Gameplay.DamageReducesHealth
+[2026.09.28-03.49.08:165][649]LogAutomationController: Error: Expected 'Health after 10 damage is 90' to be true. [C:\Work\MyGame\Plugins\MyPlugin\Source\MyPluginTests\Private\MyActorTests.cpp(484)]
+[2026.09.28-03.49.08:165][649]LogAutomationController: Error: Expected 'With armour: health after 10 damage is 95' to be true. [C:\Work\MyGame\Plugins\MyPlugin\Source\MyPluginTests\Private\MyActorTests.cpp(491)]
+[2026.09.28-03.49.08:165][649]LogAutomationController: Error: Expected 'With armour: MyActor is dead' to be false. [C:\Work\MyGame\Plugins\MyPlugin\Source\MyPluginTests\Private\MyActorTests.cpp(492)]
+[2026.09.28-03.49.08:431][653]LogAutomationController: Exported report to 'C:\Work\MyGame\Saved\AgentKit\TestReports\uak-test' in 0.01 Seconds
+[2026.09.28-03.49.08:442][654]LogAutomationCommandLine: Display: Setting GIsCriticalError due to test failures (will cause non-zero exit code).
+[2026.09.28-03.49.08:442][654]LogAutomationCommandLine: Shutting down. GIsCriticalError=1
+[2026.09.28-03.49.08:442][654]LogAutomationCommandLine: Display: **** TEST COMPLETE. EXIT CODE: -1 ****

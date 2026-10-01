@@ -1,0 +1,25 @@
+Using bundled DotNet SDK version: 10.0 win-x64
+Running UnrealBuildTool: dotnet "..\..\Engine\Binaries\DotNET\UnrealBuildTool\UnrealBuildTool.dll" MyGameEditor Win64 Development -Project=C:\Work\MyGame\MyGame.uproject -WaitMutex -NoHotReloadFromIDE -MaxParallelActions=3
+Executing up to 3 actions based on MaxProcessorCount override
+Using Unreal Build Accelerator local executor to run 30 action(s)
+[1/30] Compile [x64] MyActor.cpp
+C:\Work\MyGame\Plugins\MyPlugin\Source\MyPlugin\Private\MyActor.cpp(254,42): warning C4996: 'UMyComponent::GetLegacyValue': Use GetValue() instead - Please update your code to the new API before upgrading to the next release, otherwise your project will no longer compile.
+		const double Value = MyComponent->GetLegacyValue() * 2.0;
+		                                  ^
+[2/30] Compile [x64] MyComponent.cpp
+[17/30] Compile [x64] MySubsystem.cpp
+[18/30] Link [x64] UnrealEditor-MyPlugin.lib
+[19/30] Link [x64] UnrealEditor-MyPlugin.dll
+[20/30] Compile [x64] MyActorTests.cpp
+[27/30] Compile [x64] MyComponentTests.cpp
+C:\Program Files\Epic Games\UE_5.8\Engine\Source\Runtime\Engine\Classes\VT\RuntimeVirtualTexture.h(208,26): warning C4996: 'UObject::GetAssetRegistryTags': Implement the version that takes FAssetRegistryTagsContext instead. - Please update your code to the new API before upgrading to the next release, otherwise your project will no longer compile.
+	ENGINE_API virtual void GetAssetRegistryTags(TArray<FAssetRegistryTag>& OutTags) const override;
+	                        ^
+[28/30] Link [x64] UnrealEditor-MyPluginTests.lib
+[29/30] Link [x64] UnrealEditor-MyPluginTests.dll
+[30/30] WriteMetadata MyGameEditor.target [NoUba]
+
+Total time in Unreal Build Accelerator local executor: 67.76 seconds
+
+Result: Succeeded
+Total execution time: 72.59 seconds

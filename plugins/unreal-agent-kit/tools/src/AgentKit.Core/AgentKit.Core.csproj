@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+	<PropertyGroup>
+		<RootNamespace>AgentKit.Core</RootNamespace>
+		<!-- Core is the shared contract: every public member needs an XML doc comment (CS1591 is an error here). -->
+		<GenerateDocumentationFile>true</GenerateDocumentationFile>
+	</PropertyGroup>
+	<ItemGroup>
+		<PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.6" />
+	</ItemGroup>
+	<ItemGroup>
+		<InternalsVisibleTo Include="AgentKit.Core.Tests" />
+	</ItemGroup>
+</Project>

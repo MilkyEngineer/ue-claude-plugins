@@ -1,0 +1,13 @@
+Using bundled DotNet SDK version: 10.0 win-x64
+Running UnrealBuildTool: dotnet "..\..\Engine\Binaries\DotNET\UnrealBuildTool\UnrealBuildTool.dll" MyGameEditor Win64 Development -Project=C:\Work\MyGame\MyGame.uproject -WaitMutex -NoHotReloadFromIDE -MaxParallelActions=3
+Executing up to 3 actions based on MaxProcessorCount override
+Using Unreal Build Accelerator local executor to run 2 action(s)
+[1/2] Link [x64] UnrealEditor-MyPluginTests.dll
+MyActorTests.cpp.obj : error LNK2019: unresolved external symbol "public: class FString __cdecl FMyInventory::ToString(void)const " (?ToString@FMyInventory@@QEBA?AVFString@@XZ) referenced in function "protected: virtual bool __cdecl FMyActorTest::RunTest(class FString const &)" (?RunTest@FMyActorTest@@MEAA_NAEBVFString@@@Z)
+MyActorTests.cpp.obj : error LNK2019: unresolved external symbol "public: bool __cdecl FMyInventory::FromString(class FString const &,class FString &)" (?FromString@FMyInventory@@QEAA_NAEBVFString@@AEAV2@@Z) referenced in function "protected: virtual bool __cdecl FMyActorTest::RunTest(class FString const &)" (?RunTest@FMyActorTest@@MEAA_NAEBVFString@@@Z)
+MyActorTests.cpp.obj : error LNK2019: unresolved external symbol "public: class FString __cdecl FMyStats::ToDisplayString(void)const " (?ToDisplayString@FMyStats@@QEBA?AVFString@@XZ) referenced in function "protected: virtual bool __cdecl FMyActorTest::RunTest(class FString const &)" (?RunTest@FMyActorTest@@MEAA_NAEBVFString@@@Z)
+C:\Work\MyGame\Plugins\MyPlugin\Binaries\Win64\UnrealEditor-MyPluginTests.dll : fatal error LNK1120: 3 unresolved externals
+Total time in Unreal Build Accelerator local executor: 1.56 seconds
+
+Result: Failed (OtherCompilationError)
+Total execution time: 2.75 seconds

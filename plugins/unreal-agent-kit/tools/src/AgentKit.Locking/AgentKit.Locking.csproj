@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+	<PropertyGroup>
+		<RootNamespace>AgentKit.Locking</RootNamespace>
+	</PropertyGroup>
+	<ItemGroup>
+		<ProjectReference Include="..\AgentKit.Core\AgentKit.Core.csproj" />
+	</ItemGroup>
+	<ItemGroup>
+		<!-- CommandOptions and CommandProcess are shared with Runs until Core has equivalents. -->
+		<InternalsVisibleTo Include="AgentKit.Runs" />
+		<InternalsVisibleTo Include="AgentKit.Locking.Tests" />
+		<InternalsVisibleTo Include="AgentKit.Runs.Tests" />
+		<InternalsVisibleTo Include="AgentKit.TestChild" />
+	</ItemGroup>
+</Project>

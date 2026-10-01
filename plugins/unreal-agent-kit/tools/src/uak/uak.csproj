@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk">
+	<PropertyGroup>
+		<OutputType>Exe</OutputType>
+		<RootNamespace>UnrealAgentKit.Cli</RootNamespace>
+		<AssemblyName>uak</AssemblyName>
+	</PropertyGroup>
+
+	<!--
+		`dotnet publish` makes a self-contained uak, which runs without any installed .NET (the engine's bundled dotnet is not on
+		PATH or DOTNET_ROOT). By default it is for this machine's runtime identifier, and it goes to a folder outside the
+		plugin, which Claude Code replaces on update: $(UAK_HOME), else ~/.unreal-agent-kit, then /<kit version>/. A new
+		version gets a new folder, so publishing never overwrites a running uak. -r, -o and -p:SelfContained=false override.
+		Not a single file: the host finds commands by scanning its folder for AgentKit.*.dll.
+	-->
+	<PropertyGroup Condition="'$(_IsPublishing)' == 'true'">
+		<RuntimeIdentifier Condition="'$(RuntimeIdentifier)' == ''">$(NETCoreSdkRuntimeIdentifier)</RuntimeIdentifier>
+		<SelfContained Condition="'$(SelfContained)' == ''">true</SelfContained>
+		<UakHome Condition="'$(UAK_HOME)' != ''">$([MSBuild]::EnsureTrailingSlash('$(UAK_HOME)'))</UakHome>
+		<UakHome Condition="'$(UakHome)' == ''">$([MSBuild]::EnsureTrailingSlash('$([System.Environment]::GetFolderPath(SpecialFolder.UserProfile))')).unreal-agent-kit/</UakHome>
+		<PublishDir>$(UakHome)$(Version)/</PublishDir>
+	</PropertyGroup>
+
+	<ItemGroup>
+		<ProjectReference Include="..\AgentKit.Core\AgentKit.Core.csproj" />
+		<ProjectReference Include="..\AgentKit.Locking\AgentKit.Locking.csproj" />
+		<ProjectReference Include="..\AgentKit.Runs\AgentKit.Runs.csproj" />
+		<ProjectReference Include="..\AgentKit.Vcs\AgentKit.Vcs.csproj" />
+		<ProjectReference Include="..\AgentKit.Unreal\AgentKit.Unreal.csproj" />
+	</ItemGroup>
+</Project>

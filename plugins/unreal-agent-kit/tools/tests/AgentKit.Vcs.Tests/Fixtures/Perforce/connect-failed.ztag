@@ -1,0 +1,7 @@
+... code error
+... data Perforce client error:
+	Connect to server failed; check $P4PORT.
+	TCP connect to perforce.example.com:1666 failed.
+	No such host is known.
+... severity 4
+... generic 38

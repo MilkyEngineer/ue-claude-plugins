@@ -1,0 +1,14 @@
+<Project Sdk="MSTest.Sdk/4.0.2">
+	<PropertyGroup>
+		<RootNamespace>AgentKit.Vcs.Tests</RootNamespace>
+		<IsPackable>false</IsPackable>
+	</PropertyGroup>
+	<!-- The tests build fake Perforce connections, so they compile against EpicGames.Perforce too. -->
+	<Import Project="..\..\src\AgentKit.Vcs\EpicGames.Perforce.props" />
+	<ItemGroup>
+		<ProjectReference Include="..\..\src\AgentKit.Vcs\AgentKit.Vcs.csproj" />
+	</ItemGroup>
+	<ItemGroup>
+		<None Include="Fixtures\**\*" CopyToOutputDirectory="PreserveNewest" />
+	</ItemGroup>
+</Project>

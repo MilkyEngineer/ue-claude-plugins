@@ -1,0 +1,39 @@
+Running UnrealBuildTool: dotnet "..\..\Engine\Binaries\DotNET\UnrealBuildTool\UnrealBuildTool.dll" MyGameEditor Win64 Development -Project=C:\Work\MyGame\MyGame.uproject -WaitMutex -NoHotReloadFromIDE -MaxParallelActions=3
+Executing up to 3 actions based on MaxProcessorCount override
+Building MyGameEditor...
+Using Unreal Build Accelerator local executor to run 9 action(s)
+[1/9] Compile [x64] MyActorTests.cpp
+[2/9] Compile [x64] MyActor.cpp
+C:\Program Files\Epic Games\UE_5.8\Engine\Source\Runtime\Engine\Classes\Components\HierarchicalInstancedStaticMeshComponent.h(353,26): warning C4996: 'UInstancedStaticMeshComponent::BuildComponentInstanceData': Please use BuildComponentInstanceData with EShaderPlatform argument and not ERHIFeatureLevel::Type - Please update your code to the new API before upgrading to the next release, otherwise your project will no longer compile.
+	ENGINE_API virtual void BuildComponentInstanceData(ERHIFeatureLevel::Type FeatureLevel, FInstanceUpdateComponentDesc& OutData) override;
+	                        ^
+C:\Work\MyGame\Plugins\MyPlugin\Source\MyPluginTests\Private\MyActor.cpp(221,10): warning C4996: 'UMyComponent::SetLegacyMode': Deprecated. Use SetMode instead. - Please update your code to the new API before upgrading to the next release, otherwise your project will no longer compile.
+		Component->SetLegacyMode(true);
+		           ^
+C:\Work\MyGame\Plugins\MyPlugin\Source\MyPluginTests\Private\MyActor.cpp(337,63): error C2440: 'initializing': cannot convert from 'initializer list' to 'const TTuple<UMyComponent *,TTuple<KeyType,ValueType>>'
+        with
+        [
+            KeyType=int32,
+            ValueType=int32
+        ]
+			const TPair<UMyComponent*, TPair<int32, int32>> Slots[] = { { &First, { Width0, Height0 } }, { &Second, { Width1, Height1 } } };
+			                                                          ^
+C:\Work\MyGame\Plugins\MyPlugin\Source\MyPluginTests\Private\MyActor.cpp(337,63): note: 'TTuple<UMyComponent *,TTuple<KeyType,ValueType>>::TTuple': function does not take 2 arguments
+        with
+[3/9] Compile [x64] MyComponent.cpp
+[4/9] Link [x64] UnrealEditor-MyPlugin.lib
+[5/9] Compile [x64] MyComponentTests.cpp
+C:\Program Files\Epic Games\UE_5.8\Engine\Source\Runtime\Engine\Classes\VT\RuntimeVirtualTexture.h(208,26): warning C4996: 'UObject::GetAssetRegistryTags': Implement the version that takes FAssetRegistryTagsContext instead. - Please update your code to the new API before upgrading to the next release, otherwise your project will no longer compile.
+	ENGINE_API virtual void GetAssetRegistryTags(TArray<FAssetRegistryTag>& OutTags) const override;
+	                        ^
+C:\Work\MyGame\Plugins\MyPlugin\Source\MyPluginTests\Private\MyComponentTests.cpp(1720,28): error C4456: declaration of 'Item' hides previous local declaration
+		FMyItem& Item = Inventory.Items.AddDefaulted_GetRef();
+		         ^
+C:\Work\MyGame\Plugins\MyPlugin\Source\MyPluginTests\Private\MyComponentTests.cpp(1647,33): note: see declaration of 'Item'
+	const FMyItem* Item = Saved.Items.FindByPredicate([](const FMyItem& Each) { return Each.bIsEquipped; });
+	               ^
+[6/9] Link [x64] UnrealEditor-MyPlugin.dll
+Total time in Unreal Build Accelerator local executor: 7.63 seconds
+
+Result: Failed (OtherCompilationError)
+Total execution time: 11.45 seconds

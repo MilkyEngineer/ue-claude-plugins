@@ -1,0 +1,6 @@
+[2026.09.28-14.15.09:707][  0]Cmd: Automation RunTests Project.Missing;Quit
+[2026.09.28-14.15.09:708][  0]Automation: RunTests='Project.Missing' Queued.
+[2026.09.28-14.15.15:346][301]LogAutomationCommandLine: Error: No automation tests matched 'Project.Missing'
+[2026.09.28-14.15.15:347][301]LogAutomationCommandLine: Display: Setting GIsCriticalError due to test failures (will cause non-zero exit code).
+[2026.09.28-14.15.15:347][301]LogAutomationCommandLine: Shutting down. GIsCriticalError=1
+[2026.09.28-14.15.15:347][301]LogAutomationCommandLine: Display: **** TEST COMPLETE. EXIT CODE: -1 ****

@@ -1,0 +1,73 @@
+<Project>
+	<!--
+		Copyright Alex Stevens (@MilkyEngineer). All Rights Reserved.
+
+		References the engine's prebuilt EpicGames.* assemblies (DESIGN.md, "Engine libraries"). Imported by Directory.Build.props,
+		so every project in the kit gets them.
+
+		The engine comes from, in order:
+		  1. the UakEngineDir property (dotnet build -p:UakEngineDir=<path>);
+		  2. the UAK_ENGINE environment variable;
+		  3. the engine whose bundled .NET SDK runs this build (<Root>/Engine/Binaries/ThirdParty/DotNet/<version>/<platform>/dotnet).
+		Each may be the engine root (the directory holding Engine/Build/Build.version) or its Engine folder.
+
+		The EpicGames.* assemblies are file references into the engine, copied to the output (Private=true). Their third-party
+		dependencies come from NuGet, at the versions the engine's UnrealBuildTool.deps.json lists (UE 5.8 below), because
+		Blake3 carries native runtime assets that a plain file reference would not copy. A newer package than the engine was built
+		against is fine: .NET binds a reference to any equal or higher assembly version.
+		Nothing is ever written into the engine directory.
+	-->
+	<PropertyGroup>
+		<_UakEngineCandidate>$(UakEngineDir)</_UakEngineCandidate>
+		<_UakEngineSource Condition="'$(_UakEngineCandidate)' != ''">UakEngineDir property</_UakEngineSource>
+		<_UakEngineCandidate Condition="'$(_UakEngineCandidate)' == ''">$(UAK_ENGINE)</_UakEngineCandidate>
+		<_UakEngineSource Condition="'$(_UakEngineSource)' == '' and '$(_UakEngineCandidate)' != ''">UAK_ENGINE environment variable</_UakEngineSource>
+		<!--
+			MSBuildBinPath is the running SDK's folder, <dotnet>/sdk/<sdk version>/, and a bundled dotnet sits in
+			<Root>/Engine/Binaries/ThirdParty/DotNet/<version>/<platform>/, so seven levels up is <Root>/Engine.
+			NetCoreRoot is not defined yet when Directory.Build.props is imported.
+		-->
+		<_UakSdkEngineDir>$([System.IO.Path]::GetFullPath($([System.IO.Path]::Combine('$(MSBuildBinPath)', '..', '..', '..', '..', '..', '..', '..'))))</_UakSdkEngineDir>
+		<_UakEngineCandidate Condition="'$(_UakEngineCandidate)' == '' and Exists('$(_UakSdkEngineDir)/Build/Build.version')">$(_UakSdkEngineDir)</_UakEngineCandidate>
+		<_UakEngineSource Condition="'$(_UakEngineSource)' == '' and '$(_UakEngineCandidate)' != ''">the engine that bundles the running .NET SDK</_UakEngineSource>
+
+		<!-- Accept either the root or its Engine folder. -->
+		<UakEngineRoot Condition="'$(_UakEngineCandidate)' != '' and Exists('$(_UakEngineCandidate)/Engine/Build/Build.version')">$([System.IO.Path]::GetFullPath('$(_UakEngineCandidate)'))</UakEngineRoot>
+		<UakEngineRoot Condition="'$(UakEngineRoot)' == '' and '$(_UakEngineCandidate)' != '' and Exists('$(_UakEngineCandidate)/Build/Build.version')">$([System.IO.Path]::GetFullPath($([System.IO.Path]::Combine('$(_UakEngineCandidate)', '..'))))</UakEngineRoot>
+		<UakEngineRoot Condition="'$(UakEngineRoot)' != ''">$([MSBuild]::EnsureTrailingSlash('$(UakEngineRoot)'))</UakEngineRoot>
+
+		<!-- UnrealBuildTool's folder ships EpicGames.Core and EpicGames.Build in 5.8; AutomationTool's is the fallback. -->
+		<UakEpicGamesDir Condition="'$(UakEngineRoot)' != '' and Exists('$(UakEngineRoot)Engine/Binaries/DotNET/UnrealBuildTool/EpicGames.Build.dll')">$(UakEngineRoot)Engine/Binaries/DotNET/UnrealBuildTool/</UakEpicGamesDir>
+		<UakEpicGamesDir Condition="'$(UakEpicGamesDir)' == '' and '$(UakEngineRoot)' != '' and Exists('$(UakEngineRoot)Engine/Binaries/DotNET/AutomationTool/EpicGames.Build.dll')">$(UakEngineRoot)Engine/Binaries/DotNET/AutomationTool/</UakEpicGamesDir>
+	</PropertyGroup>
+
+	<ItemGroup Condition="'$(UakEpicGamesDir)' != ''">
+		<!-- EpicGames.Build needs EpicGames.IoHash and EpicGames.MsBuild at run time. -->
+		<Reference Include="EpicGames.Core" HintPath="$(UakEpicGamesDir)EpicGames.Core.dll" Private="true" />
+		<Reference Include="EpicGames.Build" HintPath="$(UakEpicGamesDir)EpicGames.Build.dll" Private="true" />
+		<Reference Include="EpicGames.IoHash" HintPath="$(UakEpicGamesDir)EpicGames.IoHash.dll" Private="true" />
+		<Reference Include="EpicGames.MsBuild" HintPath="$(UakEpicGamesDir)EpicGames.MsBuild.dll" Private="true" />
+	</ItemGroup>
+
+	<ItemGroup Condition="'$(UakEpicGamesDir)' != ''">
+		<!-- The dependency closure of EpicGames.Core and EpicGames.Build (UE 5.8 UnrealBuildTool.deps.json). -->
+		<PackageReference Include="JetBrains.Annotations" Version="2024.3.0" />
+		<PackageReference Include="Microsoft.Extensions.Configuration" Version="10.0.6" />
+		<PackageReference Include="Microsoft.Extensions.Http.Polly" Version="10.0.6" />
+		<PackageReference Include="Microsoft.Extensions.Logging.Console" Version="10.0.6" />
+		<PackageReference Include="Microsoft.Extensions.ObjectPool" Version="10.0.6" />
+		<PackageReference Include="OpenTracing" Version="0.12.1" />
+		<PackageReference Include="Microsoft.Extensions.FileSystemGlobbing" Version="10.0.6" />
+		<PackageReference Include="Blake3" Version="2.2.1" />
+		<PackageReference Include="Microsoft.Build.Locator" Version="1.11.2" />
+	</ItemGroup>
+
+	<Target Name="UakCheckEngine" BeforeTargets="ResolveAssemblyReferences;CollectPackageReferences">
+		<Error Condition="'$(_UakEngineCandidate)' == ''"
+			Text="UnrealAgentKit needs an Unreal Engine to reference its EpicGames.* assemblies. Build with the engine's bundled dotnet (&lt;Engine&gt;/Binaries/ThirdParty/DotNet/&lt;version&gt;/&lt;platform&gt;/dotnet), or pass -p:UakEngineDir=&lt;engine root&gt;, or set UAK_ENGINE." />
+		<Error Condition="'$(_UakEngineCandidate)' != '' and '$(UakEngineRoot)' == ''"
+			Text="UnrealAgentKit: '$(_UakEngineCandidate)' (from the $(_UakEngineSource)) is not an engine: no Engine/Build/Build.version under it." />
+		<Error Condition="'$(UakEngineRoot)' != '' and '$(UakEpicGamesDir)' == ''"
+			Text="UnrealAgentKit: no prebuilt EpicGames.Build.dll in '$(UakEngineRoot)Engine/Binaries/DotNET/UnrealBuildTool' or '.../AutomationTool'. Build UnrealBuildTool for that engine first." />
+	</Target>
+</Project>

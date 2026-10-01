@@ -1,0 +1,11 @@
+<Project Sdk="MSTest.Sdk/4.0.2">
+	<PropertyGroup>
+		<RootNamespace>AgentKit.Locking.Tests</RootNamespace>
+		<IsPackable>false</IsPackable>
+	</PropertyGroup>
+	<ItemGroup>
+		<ProjectReference Include="..\..\src\AgentKit.Locking\AgentKit.Locking.csproj" />
+		<!-- The waiters are real processes: the test child, copied next to the tests. -->
+		<ProjectReference Include="..\AgentKit.TestChild\AgentKit.TestChild.csproj" />
+	</ItemGroup>
+</Project>

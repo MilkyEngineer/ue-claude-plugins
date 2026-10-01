@@ -1,0 +1,12 @@
+{
+  "name": "unreal-agent-kit",
+  "version": "0.1.0",
+  "description": "Multi-agent workflow for Unreal Engine projects (tiered workers, a read-only reviewer, workstream briefs, delegation) plus uak, a CLI for a queued editor lock, detached runs, single-file compile checks, and build and test wrappers",
+  "author": {
+    "name": "Alex Stevens",
+    "url": "https://github.com/MilkyEngineer"
+  },
+  "repository": "https://github.com/MilkyEngineer/ue-claude-plugins",
+  "license": "MIT",
+  "keywords": ["unreal", "unreal-engine", "ue5", "agents", "multi-agent", "workflow", "build", "automation-tests"]
+}

@@ -1,0 +1,32 @@
+Using bundled DotNet SDK version: 10.0 win-x64
+Running UnrealBuildTool: dotnet "..\..\Engine\Binaries\DotNET\UnrealBuildTool\UnrealBuildTool.dll" MyGameEditor Win64 Development -Project=C:\Work\MyGame\MyGame.uproject -WaitMutex -NoHotReloadFromIDE -MaxParallelActions=3
+Executing up to 3 actions based on MaxProcessorCount override
+[1/16] Compile [x64] MyActor.cpp
+C:\Program Files\Epic Games\UE_5.8\Engine\Source\Runtime\Core\Public\Templates\MemoryOps.h(121,45): error C2280: 'TUniquePtr<FMyActorState,TDefaultDelete<T>>::TUniquePtr(const TUniquePtr<T,TDefaultDelete<T>> &)': attempting to reference a deleted function
+        with
+        [
+            T=FMyActorState
+        ]
+		::new ((void*)Dest) DestinationElementType(*Source);
+		                                          ^
+C:\Program Files\Epic Games\UE_5.8\Engine\Source\Runtime\Core\Public\Templates\UniquePtr.h(108,2): note: see declaration of 'TUniquePtr<FMyActorState,TDefaultDelete<T>>::TUniquePtr'
+        with
+        [
+            T=FMyActorState
+        ]
+	TUniquePtr(const TUniquePtr&) = delete;
+	^
+C:\Program Files\Epic Games\UE_5.8\Engine\Source\Runtime\Core\Public\Templates\MemoryOps.h(121,45): note: the template instantiation context (the oldest one first) is
+		::new ((void*)Dest) DestinationElementType(*Source);
+		                                          ^
+C:\Work\MyGame\Plugins\MyPlugin\Source\MyPlugin\Public\MyActor.h(248,34): note: see reference to class template instantiation 'TArray<TUniquePtr<FMyActorState,TDefaultDelete<T>>,FDefaultAllocator>' being compiled
+        with
+        [
+            T=FMyActorState
+        ]
+	TArray<TUniquePtr<FMyActorState>> States;
+	                                  ^
+[2/16] Compile [x64] MyComponent.cpp
+C:\Program Files\Epic Games\UE_5.8\Engine\Source\Runtime\Core\Public\Templates\MemoryOps.h(121,45): error C2280: 'TUniquePtr<FMyActorState,TDefaultDelete<T>>::TUniquePtr(const TUniquePtr<T,TDefaultDelete<T>> &)': attempting to reference a deleted function
+Result: Failed (OtherCompilationError)
+Total execution time: 10.87 seconds

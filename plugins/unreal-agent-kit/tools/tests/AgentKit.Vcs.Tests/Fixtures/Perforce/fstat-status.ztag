@@ -1,0 +1,37 @@
+... code stat
+... depotFile //Game/main/Source/Game/Game.cpp
+... clientFile {root}/Source/Game/Game.cpp
+... isMapped 
+... headAction edit
+... headType text
+... headTime 1727740800
+... headRev 7
+... headChange 12340
+... headModTime 1727740000
+... haveRev 7
+... action edit
+... change default
+... type text
+... actionOwner user
+
+... code stat
+... depotFile //Game/main/Source/Game/Game.h
+... clientFile {root}/Source/Game/Game.h
+... isMapped 
+... headAction edit
+... headType text
+... headTime 1727740800
+... headRev 4
+... headChange 12340
+... headModTime 1727740000
+... haveRev 4
+
+... code error
+... data {root}/Source/Game/Scratch.txt - no such file(s).
+... severity 2
+... generic 17
+
+... code error
+... data {root}/Saved/Logs/Game.log - no such file(s).
+... severity 2
+... generic 17

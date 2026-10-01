@@ -10,6 +10,11 @@
       "name": "ue-source-index",
       "source": "./plugins/ue-source-index",
       "description": "Greppable per-version index of Unreal Engine C++ source (types, UFUNCTIONs, UPROPERTYs, CVars, log categories, config keys, deprecations, module deps) plus anchored notes, so agents stop grepping the whole engine"
+    },
+    {
+      "name": "unreal-agent-kit",
+      "source": "./plugins/unreal-agent-kit",
+      "description": "Multi-agent workflow for Unreal Engine projects (tiered workers, a read-only reviewer, workstream briefs, delegation) plus uak, a CLI for a queued editor lock, detached runs, single-file compile checks, and build and test wrappers"
     }
   ]
 }

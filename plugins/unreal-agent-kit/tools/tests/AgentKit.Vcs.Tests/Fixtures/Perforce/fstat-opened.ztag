@@ -1,0 +1,68 @@
+... code stat
+... depotFile //Game/main/Source/Game/Game.cpp
+... clientFile {root}/Source/Game/Game.cpp
+... isMapped 
+... headAction edit
+... headType text
+... headTime 1727740800
+... headRev 7
+... headChange 12340
+... headModTime 1727740000
+... haveRev 7
+... action edit
+... change default
+... type text
+... actionOwner user
+
+... code stat
+... depotFile //Game/main/Source/Game/New.cpp
+... clientFile {root}/Source/Game/New.cpp
+... isMapped 
+... action add
+... change 12346
+... type text
+... actionOwner user
+
+... code stat
+... depotFile //Game/main/Content/Maps/Moved.umap
+... clientFile {root}/Content/Maps/Moved.umap
+... movedFile //Game/main/Content/Maps/Old.umap
+... isMapped 
+... action move/add
+... change default
+... type binary+l
+... actionOwner user
+... movedRev 3
+
+... code stat
+... depotFile //Game/main/Content/Maps/Old.umap
+... clientFile {root}/Content/Maps/Old.umap
+... movedFile //Game/main/Content/Maps/Moved.umap
+... isMapped 
+... headAction add
+... headType binary+l
+... headTime 1727700000
+... headRev 3
+... headChange 12300
+... headModTime 1727690000
+... haveRev 3
+... action move/delete
+... change default
+... type binary+l
+... actionOwner user
+
+... code stat
+... depotFile //Game/main/Config/Removed.ini
+... clientFile {root}/Config/Removed.ini
+... isMapped 
+... headAction edit
+... headType text
+... headTime 1727600000
+... headRev 2
+... headChange 12200
+... headModTime 1727600000
+... haveRev 2
+... action delete
+... change 12346
+... type text
+... actionOwner user

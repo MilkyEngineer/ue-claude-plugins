@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+	<PropertyGroup>
+		<RootNamespace>AgentKit.Vcs</RootNamespace>
+		<GenerateDocumentationFile>true</GenerateDocumentationFile>
+	</PropertyGroup>
+	<Import Project="EpicGames.Perforce.props" />
+	<ItemGroup>
+		<ProjectReference Include="..\AgentKit.Core\AgentKit.Core.csproj" />
+	</ItemGroup>
+	<ItemGroup>
+		<InternalsVisibleTo Include="AgentKit.Vcs.Tests" />
+	</ItemGroup>
+</Project>

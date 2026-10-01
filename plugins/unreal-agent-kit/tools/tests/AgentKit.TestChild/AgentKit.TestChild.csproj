@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+	<!-- A small program the Locking and Runs tests start as real, separate processes: lock waiters, run starters, run wrappers and commands. -->
+	<PropertyGroup>
+		<OutputType>Exe</OutputType>
+		<RootNamespace>AgentKit.TestChild</RootNamespace>
+		<IsPackable>false</IsPackable>
+	</PropertyGroup>
+	<ItemGroup>
+		<ProjectReference Include="..\..\src\AgentKit.Locking\AgentKit.Locking.csproj" />
+		<ProjectReference Include="..\..\src\AgentKit.Runs\AgentKit.Runs.csproj" />
+	</ItemGroup>
+</Project>

@@ -1,0 +1,36 @@
+... code stat
+... depotFile //Game/main/Content/UI/Foo%402x.png
+... clientFile {root}/Content/UI/Foo%402x.png
+... isMapped
+... action add
+... change default
+... type binary
+... actionOwner user
+
+... code stat
+... depotFile //Game/main/%23notes.txt
+... clientFile {root}/%23notes.txt
+... isMapped
+... headAction edit
+... headType text
+... headTime 1727740800
+... headRev 2
+... headChange 12340
+... headModTime 1727740000
+... haveRev 2
+... action edit
+... change default
+... type text
+... actionOwner user
+
+... code stat
+... depotFile //Game/main/Docs/100%25.txt
+... clientFile {root}/Docs/100%25.txt
+... isMapped
+... headAction add
+... headType text
+... headTime 1727740800
+... headRev 1
+... headChange 12340
+... headModTime 1727740000
+... haveRev 1

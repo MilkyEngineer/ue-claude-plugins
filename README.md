@@ -7,9 +7,10 @@ Claude Code plugins for Unreal Engine development.
 ```
 /plugin marketplace add MilkyEngineer/ue-claude-plugins
 /plugin install ue-source-index@ue-claude-plugins
+/plugin install unreal-agent-kit@ue-claude-plugins
 ```
 
-Or from a shell: `claude plugin marketplace add MilkyEngineer/ue-claude-plugins`, then `claude plugin install ue-source-index@ue-claude-plugins`.
+Or from a shell: `claude plugin marketplace add MilkyEngineer/ue-claude-plugins`, then `claude plugin install <plugin>@ue-claude-plugins`.
 
 ## Plugins
 
@@ -28,6 +29,16 @@ Engine source is ~120k files, and grepping it directly is slow and burns context
 **Requirements:** Python 3.8+. The Python bundled with every UE5 install (`Engine/Binaries/ThirdParty/Python3`) is found automatically; `UE_INDEX_PYTHON` overrides it. The hook runs through `sh`, which on Windows means Git Bash (Claude Code's default hook shell there).
 
 **Build time:** roughly 1–6 minutes per engine, depending on disk speed. A no-change rebuild of a source build takes ~10 seconds.
+
+### unreal-agent-kit
+
+A multi-agent workflow for Unreal Engine projects, and `uak`, the CLI it runs on. One lead plans a milestone, splits it into workstreams and delegates each to a worker at the right effort. Workers share one editor, so builds and editor runs queue on a lock.
+
+- **Agents:** `ue-low` (Sonnet), `ue-medium`, `ue-high` and `ue-xhigh` workers, none of which can spawn agents, and `ue-review`, a read-only adversarial reviewer.
+- **Workflow skill:** effort tiers and caps, milestone plans with workstream briefs (templates included), delegation, reviews, spec-doc sync, and an opt-in usage-limit and restart watchdog.
+- **`uak`:** a queued editor lock that is released when its holder dies; detached runs that survive shells and restarts; single-file compile checks through UBT; build and automation-test wrappers with count checks; Git and Perforce status.
+
+**Requirements:** an Unreal Engine install (UE 5.8). `uak` is published once, as a self-contained program, with the engine's bundled .NET SDK: see [INSTALL.md](plugins/unreal-agent-kit/docs/INSTALL.md). Windows is tested; the Linux and Mac code is untested.
 
 ## License
 

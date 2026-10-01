@@ -1,0 +1,44 @@
+<Project>
+	<!--
+		Copyright Alex Stevens (@MilkyEngineer). All Rights Reserved.
+
+		References the engine's prebuilt EpicGames.Perforce.dll (DESIGN.md, "Engine libraries"). Imported by AgentKit.Vcs and
+		its tests only; build/EpicGames.props (Core) resolves the engine into UakEngineRoot first.
+
+		Installed engines ship EpicGames.Perforce with AutomationTool, in AutomationTool/AutomationUtils/<tfm>/ (net10.0 in 5.8).
+		The folder matching our TargetFramework is preferred; otherwise the only <tfm> folder that has the DLL is used, so an
+		engine built for another .NET version (5.7: net8.0) still resolves. -p:UakPerforceDll=<path> overrides both.
+		Only PerforceConnection (which runs `p4 -G`) is used, so EpicGames.Perforce.Native is not needed.
+		OpenTelemetry.Api is its one NuGet dependency (UE 5.8: 1.15.3).
+		The build fails when the DLL cannot be found: we never build silently without Perforce support.
+	-->
+	<PropertyGroup>
+		<_UakAutomationUtilsDir Condition="'$(UakEngineRoot)' != ''">$(UakEngineRoot)Engine/Binaries/DotNET/AutomationTool/AutomationUtils/</_UakAutomationUtilsDir>
+		<UakPerforceDll Condition="'$(UakPerforceDll)' == '' and '$(_UakAutomationUtilsDir)' != '' and Exists('$(_UakAutomationUtilsDir)$(TargetFramework)/EpicGames.Perforce.dll')">$(_UakAutomationUtilsDir)$(TargetFramework)/EpicGames.Perforce.dll</UakPerforceDll>
+	</PropertyGroup>
+
+	<ItemGroup Condition="'$(UakPerforceDll)' != ''">
+		<Reference Include="EpicGames.Perforce" HintPath="$(UakPerforceDll)" Private="true" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<PackageReference Include="OpenTelemetry.Api" Version="1.15.3" />
+	</ItemGroup>
+
+	<!-- No folder for our TargetFramework: fall back to the only <tfm> folder that has the DLL. -->
+	<Target Name="UakResolvePerforce" BeforeTargets="ResolveAssemblyReferences" Condition="'$(UakPerforceDll)' == '' and '$(UakEngineRoot)' != ''">
+		<ItemGroup>
+			<_UakPerforceCandidate Include="$(_UakAutomationUtilsDir)*/EpicGames.Perforce.dll" />
+		</ItemGroup>
+		<PropertyGroup>
+			<_UakPerforceCandidates>@(_UakPerforceCandidate->'%(FullPath)')</_UakPerforceCandidates>
+		</PropertyGroup>
+		<Error Condition="'$(_UakPerforceCandidates)' == ''"
+			Text="UnrealAgentKit: no prebuilt EpicGames.Perforce.dll under '$(_UakAutomationUtilsDir)&lt;tfm&gt;/'. Build AutomationTool for that engine first, or pass -p:UakPerforceDll=&lt;path&gt;." />
+		<Error Condition="$(_UakPerforceCandidates.Contains(';'))"
+			Text="UnrealAgentKit: several EpicGames.Perforce.dll found and none for $(TargetFramework): $(_UakPerforceCandidates). Pass -p:UakPerforceDll=&lt;path&gt;." />
+		<ItemGroup>
+			<Reference Include="EpicGames.Perforce" HintPath="$(_UakPerforceCandidates)" Private="true" />
+		</ItemGroup>
+	</Target>
+</Project>

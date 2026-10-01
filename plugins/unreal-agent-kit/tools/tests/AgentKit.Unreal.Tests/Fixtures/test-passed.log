@@ -1,0 +1,21 @@
+[2026.09.30-21.10.06:377][  0]Cmd: Automation RunTests Project.Math;Quit
+[2026.09.30-21.10.06:380][  0]Automation: RunTests='Project.Math' Queued.
+[2026.09.30-21.10.12:432][298]LogAutomationCommandLine: Display: Found 17 automation tests based on 'Project.Math'
+[2026.09.30-21.10.12:462][300]LogAutomationController: Display: Test Completed. Result={Success} Name={VectorAdd} Path={Project.Math.VectorAdd}
+[2026.09.30-21.10.12:494][302]LogAutomationController: Display: Test Completed. Result={Success} Name={VectorCross} Path={Project.Math.VectorCross}
+[2026.09.30-21.10.12:527][304]LogAutomationController: Display: Test Completed. Result={Success} Name={VectorDot} Path={Project.Math.VectorDot}
+[2026.09.30-21.10.12:561][306]LogAutomationController: Display: Test Completed. Result={Success} Name={Normalize} Path={Project.Math.Vector.Normalize}
+[2026.09.30-21.10.12:620][309]LogAutomationController: Display: Test Completed. Result={Success} Name={RoundTrip} Path={Project.Math.Vector.RoundTrip}
+[2026.09.30-21.10.12:688][312]LogAutomationController: Display: Test Completed. Result={Success} Name={RoundTrip} Path={Project.Math.Matrix.RoundTrip}
+[2026.09.30-21.10.12:737][315]LogAutomationController: Display: Test Completed. Result={Success} Name={Inverse} Path={Project.Math.Matrix.Inverse}
+[2026.09.30-21.10.13:015][318]LogAutomationController: Display: Test Completed. Result={Success} Name={Multiply} Path={Project.Math.Matrix.Multiply}
+[2026.09.30-21.10.13:051][320]LogAutomationController: Display: Test Completed. Result={Success} Name={Transpose} Path={Project.Math.Matrix.Transpose}
+[2026.09.30-21.10.13:100][323]LogAutomationController: Display: Test Completed. Result={Success} Name={Normalize} Path={Project.Math.Quat.Normalize}
+[2026.09.30-21.10.13:174][326]LogAutomationController: Display: Test Completed. Result={Success} Name={RoundTrip} Path={Project.Math.Quat.RoundTrip}
+[2026.09.30-21.10.13:546][328]LogAutomationController: Display: Test Completed. Result={Success} Name={Slerp} Path={Project.Math.Quat.Slerp}
+[2026.09.30-21.10.13:601][331]LogAutomationController: Display: Test Completed. Result={Success} Name={Clamp} Path={Project.Math.Clamp}
+[2026.09.30-21.10.13:706][334]LogAutomationController: Display: Test Completed. Result={Success} Name={Lerp} Path={Project.Math.Lerp}
+[2026.09.30-21.10.13:748][336]LogAutomationController: Display: Test Completed. Result={Success} Name={SqrtSpeed} Path={Project.Math.SqrtSpeed}
+[2026.09.30-21.10.13:797][339]LogAutomationController: Display: Test Completed. Result={Success} Name={Wrap} Path={Project.Math.Wrap}
+[2026.09.30-21.10.13:831][341]LogAutomationController: Display: Test Completed. Result={Success} Name={Remap} Path={Project.Math.Remap}
+[2026.09.30-21.10.13:848][342]LogAutomationCommandLine: Display: **** TEST COMPLETE. EXIT CODE: 0 ****

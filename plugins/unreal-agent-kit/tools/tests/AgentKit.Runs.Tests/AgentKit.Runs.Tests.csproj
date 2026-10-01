@@ -1,0 +1,14 @@
+<Project Sdk="MSTest.Sdk/4.0.2">
+	<PropertyGroup>
+		<RootNamespace>AgentKit.Runs.Tests</RootNamespace>
+		<IsPackable>false</IsPackable>
+	</PropertyGroup>
+	<ItemGroup>
+		<ProjectReference Include="..\..\src\AgentKit.Runs\AgentKit.Runs.csproj" />
+		<!-- Runs, their wrappers and their commands are real processes: the test child, copied next to the tests. -->
+		<ProjectReference Include="..\AgentKit.TestChild\AgentKit.TestChild.csproj" />
+	</ItemGroup>
+	<ItemGroup>
+		<Compile Include="..\AgentKit.Locking.Tests\TestSupport.cs" Link="TestSupport.cs" />
+	</ItemGroup>
+</Project>

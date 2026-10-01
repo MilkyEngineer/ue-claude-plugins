@@ -1,0 +1,13 @@
+<Project Sdk="MSTest.Sdk/4.0.2">
+	<PropertyGroup>
+		<RootNamespace>AgentKit.Unreal.Tests</RootNamespace>
+		<IsPackable>false</IsPackable>
+	</PropertyGroup>
+	<ItemGroup>
+		<ProjectReference Include="..\..\src\AgentKit.Unreal\AgentKit.Unreal.csproj" />
+	</ItemGroup>
+	<ItemGroup>
+		<!-- Real UBT and editor log excerpts (trimmed), read by the parser tests. -->
+		<None Include="Fixtures\**\*.log" CopyToOutputDirectory="PreserveNewest" />
+	</ItemGroup>
+</Project>
