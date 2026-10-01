@@ -8,9 +8,11 @@ One lead agent plans a milestone, splits it into epics and delegates each to a w
 
 - **Agents** (`agents/`):
   - `ue-low` (Sonnet), `ue-medium`, `ue-high` and `ue-xhigh`: workers at rising effort. None can spawn agents.
+  - `ue-runner` (Sonnet, cannot edit): runs a given list of builds, tests and verifications and reports with evidence, so a verification never changes what it verifies.
+  - `ue-research` (read-only): engine and codebase investigations, answered with `file:line` evidence, alongside workers that are building.
   - `ue-review`: a read-only adversarial reviewer. It cannot edit files, so it reports findings instead of hiding them in fixes.
   - They share ground rules: take the lock for editor and build runs, detach long runs, ask the lead rather than spawn, keep epic briefs current, never kill processes or commit unless told, and surface permission denials.
-- **The `unreal-agent-workflow` skill** (`skills/`): how the lead runs it all. It covers effort tiers and caps, milestone plans with epic briefs (templates included), delegation, adversarial reviews, keeping a spec doc in sync, recovery after restarts, an opt-in usage-limit watchdog, and an optional "pass, then commit, then continue" loop.
+- **The `unreal-agent-workflow` skill** (`skills/`): how the lead runs it all. It covers effort tiers and caps, milestone plans with epic briefs (templates included), delegation, when to resume an agent and when to respawn it from its brief, adversarial reviews, keeping a spec doc in sync, recovery after restarts, an opt-in usage-limit watchdog, and an optional "pass, then commit, then continue" loop.
 - **`uak`** (`tools/`): one CLI, built from C# with the engine's own .NET SDK and `EpicGames.*` libraries.
   - `uak lock run|status`: a fair, queued editor lock that is released when its holder dies.
   - `uak runs start|list|adopt`: detached, tracked runs that outlive shells and restarts.

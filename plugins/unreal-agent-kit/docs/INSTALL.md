@@ -15,7 +15,7 @@ In Claude Code:
 
 Or from a shell: `claude plugin marketplace add MilkyEngineer/ue-claude-plugins`, then `claude plugin install unreal-agent-kit@ue-claude-plugins`.
 
-This adds the agents (`ue-low`, `ue-medium`, `ue-high`, `ue-xhigh`, `ue-review`) and the `unreal-agent-workflow` skill. Restart Claude Code, or run `/agents`, to see them.
+This adds the agents (`ue-runner`, `ue-low`, `ue-medium`, `ue-high`, `ue-xhigh`, `ue-research`, `ue-review`) and the `unreal-agent-workflow` skill. Restart Claude Code, or run `/agents`, to see them.
 
 ## 2. Get the source for `uak`
 

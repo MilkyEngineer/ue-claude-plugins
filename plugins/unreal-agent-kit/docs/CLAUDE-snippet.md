@@ -5,7 +5,7 @@ Paste the block below into your project's CLAUDE.md, then replace each `<...>`. 
 ````markdown
 # Multi-agent workflow (UnrealAgentKit)
 
-- **Agents:** use the `unreal-agent-workflow` skill to plan and run work with the `ue-low`, `ue-medium`, `ue-high`, `ue-xhigh` and `ue-review` agents. Caps on agents at once: <4> low, <2> medium, <2> high, <1> xhigh, <1> review.
+- **Agents:** use the `unreal-agent-workflow` skill to plan and run work with the `ue-runner`, `ue-low`, `ue-medium`, `ue-high`, `ue-xhigh`, `ue-research` and `ue-review` agents. Caps on agents at once: <4> runner, <4> low, <2> medium, <2> high, <1> xhigh, <2> research, <1> review.
 - **Where things are:**
   - code: <Source/..., Plugins/...>;
   - spec: <Documentation/Spec>, mirrored in <a separate doc, or "not mirrored">;

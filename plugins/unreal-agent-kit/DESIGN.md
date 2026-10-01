@@ -214,6 +214,8 @@ Writes stay out of scope for now: no commit, submit, checkout or edit.
 - **Agents:**
   - `ue-low`, running on Sonnet;
   - `ue-medium`, `ue-high` and `ue-xhigh`;
+  - `ue-runner`, on Sonnet at low effort, which cannot edit: it runs a given list and reports, so a verification never changes what it verifies;
+  - `ue-research`, read-only at high effort, for engine investigations answered with `file:line` evidence; read-only, it runs beside workers that are building;
   - `ue-review`, read-only.
 - **Their ground rules:**
   - never spawn agents (`disallowedTools: Agent`);
@@ -222,7 +224,7 @@ Writes stay out of scope for now: no commit, submit, checkout or edit.
   - start long runs detached through `uak runs start`;
   - ask the lead with SendMessage to "main";
   - ask for a low worker for long, low-judgment work;
-  - follow epic briefs;
+  - follow epic briefs, and rewrite their Current state and Next step at every hand-back, so the lead can respawn a fresh agent from the brief instead of resuming a large context;
   - no new batch or shell scripts: tools go in `uak`.
 - **The workflow skill:** briefs (a README plus E#.md per milestone), caps, effort tiers, reviews, spec-doc sync, and an opt-in usage-limit watchdog (only if the project's owner allows auto-resume).
 - **Docs:**
