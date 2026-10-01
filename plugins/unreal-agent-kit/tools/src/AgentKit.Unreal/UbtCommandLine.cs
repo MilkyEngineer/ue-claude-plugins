@@ -60,6 +60,48 @@ public static class UbtCommandLine
 	}
 
 	/// <summary>
+	/// The UBT arguments that compile the files listed in <paramref name="fileList"/> (written by <see cref="WriteFileList"/>)
+	/// on their own: -FileList=, and -SingleFileBuildDependents with <paramref name="dependents"/>. UBT's TargetDescriptor reads
+	/// each line of the list into the same list -SingleFile= fills (SpecificFilesToCompile), before -SingleFileBuildDependents
+	/// expands it, so the build is the one a -SingleFile= per file would make. Unlike those, the command line stays the same
+	/// length for any number of files: Build.bat runs through cmd.exe, whose command line stops at 8191 characters (any
+	/// program's at 32767). UBT reads no @response file, so its own list file is the way. A listed path also never passes
+	/// through cmd's parsing (% and ! expansion).
+	/// </summary>
+	/// <param name="fileList">The list file.</param>
+	/// <param name="dependents">Also compile every file of the target that includes a listed header.</param>
+	public static IReadOnlyList<string> SingleFileArguments(string fileList, bool dependents)
+	{
+		List<string> Arguments = ["-FileList=" + Path.GetFullPath(fileList)];
+		if (dependents)
+		{
+			Arguments.Add("-SingleFileBuildDependents");
+		}
+		return Arguments;
+	}
+
+	/// <summary>
+	/// Writes a list file for UBT's -FileList= (<see cref="SingleFileArguments"/>): one full path per line, in UTF-8 without a
+	/// byte order mark. UBT skips blank lines and keeps a rooted path as it is (FileReference.Combine from the engine root).
+	/// </summary>
+	/// <param name="path">The list file to write. Its folder must exist.</param>
+	/// <param name="files">The files, as full paths.</param>
+	/// <exception cref="UakSetupException">A path is not rooted, or holds a line break (UBT would read it as two files).</exception>
+	public static void WriteFileList(string path, IEnumerable<string> files)
+	{
+		List<string> Lines = [];
+		foreach (string Entry in files)
+		{
+			if (!Path.IsPathRooted(Entry) || Entry.Contains('\n', StringComparison.Ordinal) || Entry.Contains('\r', StringComparison.Ordinal))
+			{
+				throw new UakSetupException($"can't give '{Entry}' to UBT in a file list: it needs a full path without line breaks");
+			}
+			Lines.Add(Entry);
+		}
+		File.WriteAllLines(path, Lines, new System.Text.UTF8Encoding(false));
+	}
+
+	/// <summary>
 	/// UBT options uak sets itself, or that would break what uak promises, so a pass-through after "--" may not give them:
 	/// -Project= and -Target=/-TargetList= (what is built: use -project= and -target=), -Mode= (it would no longer be a build),
 	/// -WaitMutex and -NoMutex (UBT's one-instance mutex: uak always waits on it), -NoHotReloadFromIDE, -ForceHotReload and

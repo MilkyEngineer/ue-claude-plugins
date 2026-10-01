@@ -208,6 +208,73 @@ public sealed class CommandLineTests
 		Assert.ThrowsExactly<UakUsageException>(() => UbtCommandLine.CheckPassThrough(["-SingleFileBuildDependents"], "SingleFile", "SingleFileBuildDependents"));
 	}
 
+	/// <summary>cmd.exe's command line limit. Build.bat runs through cmd.exe.</summary>
+	const int CmdLineLimit = 8191;
+
+	/// <summary>400 project files with long paths: far more than one cmd.exe line holds as -SingleFile= options.</summary>
+	static string[] ManyFiles(Sandbox box) => Enumerable.Range(0, 400)
+		.Select(Index => Path.Combine(box.ProjectDirectory, "Source", "Game", "Private", "Gameplay Systems", $"SomeQuiteLongGameplayComponentName{Index:D3}.cpp"))
+		.ToArray();
+
+	[TestMethod]
+	public void ManyFilesDoNotFitAsSingleFileOptions()
+	{
+		// The bug, from a real run: about 150 -SingleFile= options made Build.bat fail with "The command line is too long".
+		using Sandbox Box = new(UnrealPlatform.Win64, installed: false);
+		ProcessInvocation Old = UbtCommandLine.Build(Box.Layout, new UbtTarget("GameEditor", UnrealPlatform.Win64, "Development", Box.ProjectFile, null),
+			ManyFiles(Box).Select(File => "-SingleFile=" + File));
+
+		Assert.IsGreaterThan(CmdLineLimit, ProcessRunner.GetWindowsCommand(Old).CommandLine.Length);
+	}
+
+	[TestMethod]
+	[DataRow(true)]
+	[DataRow(false)]
+	public void ManyFilesGoToUbtInAListFileAndTheCommandLineStaysShort(bool dependents)
+	{
+		using Sandbox Box = new(UnrealPlatform.Win64, installed: false);
+		string[] Files = ManyFiles(Box);
+		string ListFile = Path.Combine(Box.StateDirectory, "Logs", "compile-20261002-010203-42.files.txt");
+		Directory.CreateDirectory(Path.GetDirectoryName(ListFile)!);
+
+		UbtCommandLine.WriteFileList(ListFile, Files);
+		ProcessInvocation Invocation = UbtCommandLine.Build(Box.Layout, new UbtTarget("GameEditor", UnrealPlatform.Win64, "Development", Box.ProjectFile, null),
+			[.. UbtCommandLine.SingleFileArguments(ListFile, dependents), "-DisableAdaptiveUnity"]);
+
+		// Build.bat, through cmd.exe: the line names the list, not the files, so it is as short for 400 files as for one.
+		Assert.AreEqual(Box.Layout.BuildScript, Invocation.FileName);
+		string CommandLine = ProcessRunner.GetWindowsCommand(Invocation).CommandLine;
+		Assert.IsLessThan(1024, CommandLine.Length, CommandLine);
+		string[] Expected = dependents
+			? ["-FileList=" + ListFile, "-SingleFileBuildDependents", "-DisableAdaptiveUnity"]
+			: ["-FileList=" + ListFile, "-DisableAdaptiveUnity"];
+		CollectionAssert.AreEqual(Expected, Invocation.Arguments.Skip(Invocation.Arguments.Count - Expected.Length).ToArray());
+		Assert.IsFalse(Invocation.Arguments.Any(Argument => Argument.StartsWith("-SingleFile=", StringComparison.OrdinalIgnoreCase)));
+
+		// What UBT's TargetDescriptor reads: each non-blank line is one file, a rooted path kept as it is.
+		CollectionAssert.AreEqual(Files, File.ReadAllLines(ListFile));
+		byte[] Bytes = File.ReadAllBytes(ListFile);
+		Assert.IsFalse(Bytes.Length >= 3 && Bytes[0] == 0xEF && Bytes[1] == 0xBB && Bytes[2] == 0xBF, "no byte order mark");
+	}
+
+	[TestMethod]
+	public void TheListFileArgumentIsAFullPath()
+	{
+		Assert.AreEqual("-FileList=" + Path.GetFullPath("compile.files.txt"), UbtCommandLine.SingleFileArguments("compile.files.txt", dependents: false).Single());
+	}
+
+	[TestMethod]
+	[DataRow("Foo.cpp")]
+	[DataRow("Source/Game/Foo.cpp")]
+	[DataRow("C:/Game/Foo.cpp\nC:/Game/Bar.cpp")]
+	[DataRow("/Game/Foo.cpp\r")]
+	public void TheListFileTakesOnlyFullPathsOnOneLine(string file)
+	{
+		using Sandbox Box = new();
+		string ListFile = Path.Combine(Box.Root, "files.txt");
+		Assert.ThrowsExactly<UakSetupException>(() => UbtCommandLine.WriteFileList(ListFile, [Box.SourceFile, file]));
+	}
+
 	[TestMethod]
 	[DataRow("Game;Quit")]
 	[DataRow("Game Area")]

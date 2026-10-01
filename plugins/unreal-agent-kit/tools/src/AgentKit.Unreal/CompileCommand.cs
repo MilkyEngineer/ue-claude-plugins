@@ -7,9 +7,11 @@ using Microsoft.Extensions.Logging;
 namespace AgentKit.Unreal;
 
 /// <summary>
-/// `uak compile &lt;file&gt;...`: compiles single files through UBT's -SingleFile= for the project's editor target, with the
-/// platform's real compiler and the module's real compile environment. Nothing is linked and no binary changes, so it needs
-/// no editor lock and runs while an editor is open. UBT allows one instance per engine; -WaitMutex queues behind any other.
+/// `uak compile &lt;file&gt;...`: compiles single files through UBT's single-file mode for the project's editor target, with the
+/// platform's real compiler and the module's real compile environment. The files go to UBT in a list file (-FileList=, the
+/// same as one -SingleFile= each), so any number of them fits on the command line. Nothing is linked and no binary changes,
+/// so it needs no editor lock and runs while an editor is open. UBT allows one instance per engine; -WaitMutex queues behind
+/// any other.
 /// </summary>
 public sealed class CompileCommand : IUakCommand
 {
@@ -48,7 +50,8 @@ public sealed class CompileCommand : IUakCommand
 		  -maxerrors=<n>            Errors to print (default 10).
 		  -resultfile=<path>        Also write the result as JSON.
 		  -- <UBT option>...        More UBT options, passed as given. Rejected as for uak build (see uak help build),
-		                            and -SingleFile and -SingleFileBuildDependents, which uak sets.
+		                            and -SingleFile, -File, -Files, -FileList and -SingleFileBuildDependents,
+		                            which uak sets (the files go to UBT in a list beside the log).
 		Exit code: 0 clean, 1 errors, 2 usage or setup error (including a file UBT did not compile).
 		""";
 
@@ -73,7 +76,8 @@ public sealed class CompileCommand : IUakCommand
 		{
 			throw new UakUsageException("give at least one file: uak compile <file>...");
 		}
-		IReadOnlyList<string> PassThrough = UbtCommandLine.CheckPassThrough(Arguments.Rest, "SingleFile", "SingleFileBuildDependents");
+		// UBT reads -File=, -Files= and -FileList= into the same list as -SingleFile=: more files uak would not report on.
+		IReadOnlyList<string> PassThrough = UbtCommandLine.CheckPassThrough(Arguments.Rest, "SingleFile", "SingleFileBuildDependents", "File", "Files", "FileList");
 
 		string Project = UnrealServices.RequireProject(context);
 		string ProjectDirectory = Path.GetDirectoryName(Project)!;
@@ -98,16 +102,13 @@ public sealed class CompileCommand : IUakCommand
 			SourceFiles.DeleteSingleFileOutputs(File, ProjectDirectory);
 		}
 
-		UbtTarget UbtTarget = new(Target, Platform, Configuration, Project, MaxParallel);
-		List<string> Extra = Files.Select(File => "-SingleFile=" + File.Path).ToList();
-		if (Dependents)
-		{
-			Extra.Add("-SingleFileBuildDependents");
-		}
-		Extra.AddRange(PassThrough);
-		ProcessInvocation Invocation = UbtCommandLine.Build(Paths, UbtTarget, Extra);
-
 		string LogFile = Services.NewLogFile(context, "compile");
+		// The files go to UBT in a list file kept beside the log (-FileList=), so any number of them fits on Build.bat's command line.
+		string FileList = Path.ChangeExtension(LogFile, ".files.txt");
+		UbtTarget UbtTarget = new(Target, Platform, Configuration, Project, MaxParallel);
+		ProcessInvocation Invocation = UbtCommandLine.Build(Paths, UbtTarget, [.. UbtCommandLine.SingleFileArguments(FileList, Dependents), .. PassThrough]);
+		UbtCommandLine.WriteFileList(FileList, Files.Select(File => File.Path));
+
 		// Named first, and written as it goes, so a long compile can be followed in its log while it runs.
 		context.Logger.LogInformation("Log: {Log}", LogFile);
 		context.Logger.LogInformation("Compiling {Count} file(s) for {Target} {Platform} {Configuration} (UBT -SingleFile)...", Files.Count, Target, Platform.Name, Configuration);

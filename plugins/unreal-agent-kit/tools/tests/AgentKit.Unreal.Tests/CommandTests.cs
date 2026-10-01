@@ -58,12 +58,15 @@ public sealed class CommandTests
 		Assert.AreEqual(0, Exit, Box.Logger.Text);
 		Assert.IsEmpty(Lock.Names);
 		ProcessInvocation Invocation = Runner.Invocations.Single();
-		CollectionAssert.IsSubsetOf(new[] { "GameEditor", "Win64", "Development", "-Project=" + Box.ProjectFile, "-WaitMutex", "-MaxParallelActions=3", "-SingleFile=" + Box.SourceFile },
+		using JsonDocument Result = JsonDocument.Parse(File.ReadAllText(ResultFile));
+		// The files go to UBT in a list file kept beside the log.
+		string ListFile = Path.ChangeExtension(Result.RootElement.GetProperty("LogFile").GetString()!, ".files.txt");
+		CollectionAssert.IsSubsetOf(new[] { "GameEditor", "Win64", "Development", "-Project=" + Box.ProjectFile, "-WaitMutex", "-MaxParallelActions=3", "-FileList=" + ListFile },
 			Invocation.Arguments.ToArray());
+		CollectionAssert.AreEqual(new[] { Box.SourceFile }, File.ReadAllLines(ListFile));
 		Assert.DoesNotContain("-SingleFileBuildDependents", Invocation.Arguments);
 		Assert.Contains("compile: PASSED (1 of 1 clean)", Box.Logger.Text);
 
-		using JsonDocument Result = JsonDocument.Parse(File.ReadAllText(ResultFile));
 		Assert.AreEqual("passed", Result.RootElement.GetProperty("Outcome").GetString());
 		Assert.AreEqual("ok", Result.RootElement.GetProperty("Files")[0].GetProperty("Status").GetString());
 		// The UBT output is kept in the state directory.
@@ -289,11 +292,73 @@ public sealed class CommandTests
 
 		Assert.AreEqual(0, Exit, Box.Logger.Text);
 		Assert.AreEqual("-DisableAdaptiveUnity", Runner.Invocations[0].Arguments[^1]);
-		Assert.Contains("-SingleFile=" + Box.SourceFile, Runner.Invocations[0].Arguments);
+		Assert.StartsWith("-FileList=", Runner.Invocations[0].Arguments[^2]);
 
-		Assert.AreEqual(2, await new CompileCommand(Services(Runner)).RunAsync(Box.Context(), [Box.SourceFile, "--", "-SingleFile=Other.cpp"], CancellationToken.None));
-		Assert.AreEqual(2, await new CompileCommand(Services(Runner)).RunAsync(Box.Context(), [Box.SourceFile, "--", "-WaitMutex"], CancellationToken.None));
+		// UBT reads -File=, -Files= and -FileList= into the same list as -SingleFile=: files uak would not report on.
+		foreach (string Other in new[] { "-SingleFile=Other.cpp", "-File=Other.cpp", "-files=Other.cpp;Another.cpp", "-FileList=other.txt", "-WaitMutex" })
+		{
+			Assert.AreEqual(2, await new CompileCommand(Services(Runner)).RunAsync(Box.Context(), [Box.SourceFile, "--", Other], CancellationToken.None), Other);
+		}
 		Assert.HasCount(1, Runner.Invocations);
+	}
+
+	[TestMethod]
+	[DataRow(false)]
+	[DataRow(true)]
+	public async Task CompileGivesManyFilesToUbtInOneRunThroughAListFile(bool dependents)
+	{
+		// The bug, from a real run: about 150 files as -SingleFile= options made Build.bat fail with "The command line is too long".
+		using Sandbox Box = new(UnrealPlatform.Win64, installed: false);
+		string Folder = Path.Combine(Box.ProjectDirectory, "Source", "Game", "Private", "Gameplay Systems");
+		string[] Files = Enumerable.Range(0, 150).Select(Index => Sandbox.Write(Path.Combine(Folder, $"SomeQuiteLongGameplayComponentName{Index:D3}.cpp"), "")).ToArray();
+		string BadFile = Files[77];
+		string[] ListedDuringTheRun = [];
+		FakeProcessRunner Runner = new()
+		{
+			Behaviour = (Invocation, OnLine) =>
+			{
+				string ListFile = Invocation.Arguments.Single(Argument => Argument.StartsWith("-FileList=", StringComparison.Ordinal))["-FileList=".Length..];
+				ListedDuringTheRun = File.ReadAllLines(ListFile);
+				for (int Index = 0; Index < ListedDuringTheRun.Length; Index++)
+				{
+					OnLine($"[{Index + 1}/{ListedDuringTheRun.Length}] Compile [x64] {Path.GetFileName(ListedDuringTheRun[Index])}");
+					if (ListedDuringTheRun[Index] == BadFile)
+					{
+						OnLine(BadFile + "(3,5): error C2065: 'X': undeclared identifier");
+					}
+				}
+				OnLine("Result: Failed (OtherCompilationError)");
+				return 6;
+			},
+		};
+		string ResultFile = Path.Combine(Box.Root, "result.json");
+		List<string> Arguments = [.. Files, "-resultfile=" + ResultFile];
+		if (dependents)
+		{
+			Arguments.Add("-dependents");
+		}
+
+		int Exit = await new CompileCommand(Services(Runner)).RunAsync(Box.Context(), Arguments, CancellationToken.None);
+
+		// One UBT run, through Build.bat and cmd.exe, on a short line; every file reported as by a -SingleFile= each.
+		ProcessInvocation Invocation = Runner.Invocations.Single();
+		Assert.AreEqual(Box.Layout.BuildScript, Invocation.FileName);
+		Assert.IsLessThan(1024, ProcessRunner.GetWindowsCommand(Invocation).CommandLine.Length);
+		Assert.IsFalse(Invocation.Arguments.Any(Argument => Argument.StartsWith("-SingleFile=", StringComparison.OrdinalIgnoreCase)));
+		Assert.AreEqual(dependents, Invocation.Arguments.Contains("-SingleFileBuildDependents"));
+		CollectionAssert.AreEqual(Files, ListedDuringTheRun);
+		Assert.AreEqual(1, Exit, Box.Logger.Text);
+		Assert.Contains("compile: FAILED (149 of 150 clean)", Box.Logger.Text);
+		Assert.Contains("FAILED       " + BadFile + " [Game]", Box.Logger.Text);
+		Assert.DoesNotContain("(dependent)", Box.Logger.Text);
+
+		using JsonDocument Result = JsonDocument.Parse(File.ReadAllText(ResultFile));
+		JsonElement Reported = Result.RootElement.GetProperty("Files");
+		Assert.AreEqual(150, Reported.GetArrayLength());
+		CollectionAssert.AreEqual(Files, Reported.EnumerateArray().Select(Item => Item.GetProperty("Path").GetString()).ToArray());
+		Assert.AreEqual(149, Reported.EnumerateArray().Count(Item => Item.GetProperty("Status").GetString() == "ok"));
+		Assert.AreEqual(6, Result.RootElement.GetProperty("UbtExitCode").GetInt32());
+		Assert.AreEqual(0, Result.RootElement.GetProperty("Dependents").GetArrayLength());
 	}
 
 	[TestMethod]
