@@ -35,7 +35,7 @@ public sealed class CompileCommand : IUakCommand
 	/// <inheritdoc/>
 	public string Usage =>
 		"""
-		uak compile <file>... [options]
+		uak compile <file>... [options] [-- <UBT option>...]
 		  <file>                    A path, or a bare file name found under the project's Source or Plugins.
 		                            A header is compiled on its own through a generated file (it must be self-contained).
 		  -dependents               Also compile every source file of the target that includes a given header
@@ -47,6 +47,8 @@ public sealed class CompileCommand : IUakCommand
 		  -MaxParallelActions=<n>   Default UAK_MAX_PARALLEL_ACTIONS, else UBT's own.
 		  -maxerrors=<n>            Errors to print (default 10).
 		  -resultfile=<path>        Also write the result as JSON.
+		  -- <UBT option>...        More UBT options, passed as given. Rejected as for uak build (see uak help build),
+		                            and -SingleFile and -SingleFileBuildDependents, which uak sets.
 		Exit code: 0 clean, 1 errors, 2 usage or setup error (including a file UBT did not compile).
 		""";
 
@@ -71,6 +73,7 @@ public sealed class CompileCommand : IUakCommand
 		{
 			throw new UakUsageException("give at least one file: uak compile <file>...");
 		}
+		IReadOnlyList<string> PassThrough = UbtCommandLine.CheckPassThrough(Arguments.Rest, "SingleFile", "SingleFileBuildDependents");
 
 		string Project = UnrealServices.RequireProject(context);
 		string ProjectDirectory = Path.GetDirectoryName(Project)!;
@@ -101,6 +104,7 @@ public sealed class CompileCommand : IUakCommand
 		{
 			Extra.Add("-SingleFileBuildDependents");
 		}
+		Extra.AddRange(PassThrough);
 		ProcessInvocation Invocation = UbtCommandLine.Build(Paths, UbtTarget, Extra);
 
 		string LogFile = Services.NewLogFile(context, "compile");

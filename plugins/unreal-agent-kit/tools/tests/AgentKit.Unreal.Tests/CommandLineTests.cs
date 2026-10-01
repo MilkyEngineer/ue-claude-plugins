@@ -112,6 +112,100 @@ public sealed class CommandLineTests
 
 		ProcessInvocation Invocation = EditorTestCommandLine.Build(Box.Layout, Box.ProjectFile, "Game.", gpu: false, "x.log", "r");
 		Assert.AreEqual(Cmd, Invocation.FileName);
+
+		// A windowed run takes the receipt's Launch, the editor itself.
+		ProcessInvocation Windowed = EditorTestCommandLine.Build(EditorLocator.Locate(Box.Layout, Box.ProjectFile), Box.ProjectFile, "Game.", EditorRendering.Windowed, "x.log", "r");
+		Assert.AreEqual(Path.Combine(Binaries, "GameEditor.exe"), Windowed.FileName);
+	}
+
+	[TestMethod]
+	public void WindowedTestRunUsesTheEditorItselfInAWindow()
+	{
+		using Sandbox Box = new(UnrealPlatform.Win64);
+		string Log = Path.Combine(Box.Root, "Logs", "t.log");
+		string Report = Path.Combine(Box.Root, "Report");
+		EditorLocation Editor = EditorLocator.Locate(Box.Layout, Box.ProjectFile);
+		ProcessInvocation Invocation = EditorTestCommandLine.Build(Editor, Box.ProjectFile, "Game.", EditorRendering.Windowed, Log, Report, ["-SCCProvider=None", "-Custom"], 1280, 720);
+
+		Assert.AreEqual(Box.Layout.EditorExecutable, Invocation.FileName);
+		Assert.EndsWith("UnrealEditor.exe", Invocation.FileName);
+		CollectionAssert.AreEqual(new[]
+		{
+			Box.ProjectFile, "-ExecCmds=Automation RunTests Game.;Quit", "-unattended", "-windowed", "-ResX=1280", "-ResY=720", "-nosplash", "-nopause",
+			"-NoSound", "-abslog=" + Log, "-ReportExportPath=" + Report, "-testexit=Automation Test Queue Empty", "-SCCProvider=None", "-Custom",
+		}, Invocation.Arguments.ToArray());
+
+		ProcessInvocation Default = EditorTestCommandLine.Build(Editor, Box.ProjectFile, "Game.", EditorRendering.Windowed, Log, Report);
+		CollectionAssert.IsSubsetOf(new[] { "-windowed", "-ResX=1600", "-ResY=900" }, Default.Arguments.ToArray());
+		ProcessInvocation Headless = EditorTestCommandLine.Build(Editor, Box.ProjectFile, "Game.", EditorRendering.NullRhi, Log, Report, ["-SCCProvider=None"]);
+		Assert.AreEqual(Box.Layout.EditorCommandExecutable, Headless.FileName);
+		Assert.AreEqual("-SCCProvider=None", Headless.Arguments[^1]);
+		Assert.DoesNotContain("-windowed", Headless.Arguments);
+	}
+
+	[TestMethod]
+	[DataRow("-ExecCmds=Quit")]
+	[DataRow("-testexit=Something")]
+	[DataRow("-ABSLOG=C:/x.log")]
+	[DataRow("--ReportExportPath=C:/r")]
+	[DataRow("/abslog=C:/x.log")]
+	[DataRow("-nullrhi")]
+	[DataRow("-RenderOffscreen")]
+	[DataRow("-windowed")]
+	[DataRow("-ResX=800")]
+	[DataRow("-resy=600")]
+	public void EditorPassThroughRejectsWhatUakSets(string argument)
+	{
+		Assert.ThrowsExactly<UakUsageException>(() => EditorTestCommandLine.CheckPassThrough(["-SCCProvider=None", argument]));
+	}
+
+	[TestMethod]
+	public void EditorPassThroughKeepsEverythingElseAsGiven()
+	{
+		string[] Arguments = ["-SCCProvider=None", "-GLIPPCGSandbox", "/Game/Maps/Test", "-log", "-ini:Engine:[Core.Log]:LogTemp=Verbose", "-ExecCmdsLater"];
+		CollectionAssert.AreEqual(Arguments, EditorTestCommandLine.CheckPassThrough(Arguments).ToArray());
+	}
+
+	[TestMethod]
+	public void UbtPassThroughGoesLastAndAsGiven()
+	{
+		using Sandbox Box = new(UnrealPlatform.Win64);
+		IReadOnlyList<string> PassThrough = UbtCommandLine.CheckPassThrough(["-DisableAdaptiveUnity", "-Module=Foo", "-Module=Bar"]);
+		ProcessInvocation Invocation = UbtCommandLine.Build(Box.Layout, new UbtTarget("Game", UnrealPlatform.Win64, "Development", Box.ProjectFile, null), PassThrough);
+
+		CollectionAssert.AreEqual(new[]
+		{
+			Box.Layout.UnrealBuildToolAssembly, "Game", "Win64", "Development", "-Project=" + Box.ProjectFile, "-WaitMutex", "-NoHotReloadFromIDE",
+			"-DisableAdaptiveUnity", "-Module=Foo", "-Module=Bar",
+		}, Invocation.Arguments.ToArray());
+	}
+
+	[TestMethod]
+	[DataRow("-WaitMutex")]
+	[DataRow("-NoMutex")]
+	[DataRow("-project=C:/Other/Other.uproject")]
+	[DataRow("--Target=Other Win64 Development")]
+	[DataRow("-TargetList=targets.txt")]
+	[DataRow("-Mode=JsonExport")]
+	[DataRow("-NoHotReloadFromIDE")]
+	[DataRow("-ForceHotReload")]
+	[DataRow("-LiveCoding")]
+	[DataRow("-MaxParallelActions=32")]
+	[DataRow("OtherEditor")]
+	[DataRow("Shipping")]
+	[DataRow("@arguments.txt")]
+	[DataRow("-")]
+	public void UbtPassThroughRejectsWhatUakSetsAndBareWords(string argument)
+	{
+		Assert.ThrowsExactly<UakUsageException>(() => UbtCommandLine.CheckPassThrough(["-DisableAdaptiveUnity", argument]));
+	}
+
+	[TestMethod]
+	public void UbtPassThroughRejectsWhatTheCommandAlsoSets()
+	{
+		CollectionAssert.AreEqual(new[] { "-SingleFile=Foo.cpp" }, UbtCommandLine.CheckPassThrough(["-SingleFile=Foo.cpp"]).ToArray());
+		Assert.ThrowsExactly<UakUsageException>(() => UbtCommandLine.CheckPassThrough(["-singlefile=Foo.cpp"], "SingleFile", "SingleFileBuildDependents"));
+		Assert.ThrowsExactly<UakUsageException>(() => UbtCommandLine.CheckPassThrough(["-SingleFileBuildDependents"], "SingleFile", "SingleFileBuildDependents"));
 	}
 
 	[TestMethod]

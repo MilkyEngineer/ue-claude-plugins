@@ -249,6 +249,54 @@ public sealed class CommandTests
 	}
 
 	[TestMethod]
+	public async Task BuildPassesUbtOptionsAfterTheSeparator()
+	{
+		using Sandbox Box = new();
+		FakeLock Lock = new();
+		FakeProcessRunner Runner = new() { Behaviour = FakeProcessRunner.Prints(0, Fixtures.Lines("build-succeeded.log")) };
+
+		int Exit = await new BuildCommand(Services(Runner, Lock)).RunAsync(Box.Context(), ["-target=Game", "--", "-DisableAdaptiveUnity", "-Module=Foo", "-Module=Bar"], CancellationToken.None);
+
+		Assert.AreEqual(0, Exit, Box.Logger.Text);
+		CollectionAssert.AreEqual(new[] { "uak build Game" }, Lock.Names);
+		CollectionAssert.AreEqual(new[] { Box.Layout.UnrealBuildToolAssembly, "Game", "Win64", "Development", "-Project=" + Box.ProjectFile, "-WaitMutex", "-NoHotReloadFromIDE", "-DisableAdaptiveUnity", "-Module=Foo", "-Module=Bar" },
+			Runner.Invocations[0].Arguments.ToArray());
+	}
+
+	[TestMethod]
+	[DataRow("-NoMutex")]
+	[DataRow("-MaxParallelActions=64")]
+	[DataRow("OtherEditor")]
+	public async Task BuildRejectsAPassThroughThatBreaksItsGuarantees(string argument)
+	{
+		using Sandbox Box = new();
+		FakeLock Lock = new();
+		FakeProcessRunner Runner = new();
+
+		Assert.AreEqual(2, await new BuildCommand(Services(Runner, Lock)).RunAsync(Box.Context(), ["--", argument], CancellationToken.None));
+		Assert.IsEmpty(Runner.Invocations);
+		Assert.IsEmpty(Lock.Names, "A usage error never waits for the lock.");
+		Assert.Contains(argument, Box.Logger.Text);
+	}
+
+	[TestMethod]
+	public async Task CompilePassesUbtOptionsAfterTheSeparator()
+	{
+		using Sandbox Box = new();
+		FakeProcessRunner Runner = new() { Behaviour = FakeProcessRunner.Prints(0, "[1/1] Compile [x64] Foo.cpp", "Result: Succeeded") };
+
+		int Exit = await new CompileCommand(Services(Runner)).RunAsync(Box.Context(), [Box.SourceFile, "--", "-DisableAdaptiveUnity"], CancellationToken.None);
+
+		Assert.AreEqual(0, Exit, Box.Logger.Text);
+		Assert.AreEqual("-DisableAdaptiveUnity", Runner.Invocations[0].Arguments[^1]);
+		Assert.Contains("-SingleFile=" + Box.SourceFile, Runner.Invocations[0].Arguments);
+
+		Assert.AreEqual(2, await new CompileCommand(Services(Runner)).RunAsync(Box.Context(), [Box.SourceFile, "--", "-SingleFile=Other.cpp"], CancellationToken.None));
+		Assert.AreEqual(2, await new CompileCommand(Services(Runner)).RunAsync(Box.Context(), [Box.SourceFile, "--", "-WaitMutex"], CancellationToken.None));
+		Assert.HasCount(1, Runner.Invocations);
+	}
+
+	[TestMethod]
 	public async Task BuildRejectsAnUnknownPlatform()
 	{
 		using Sandbox Box = new();
@@ -298,6 +346,54 @@ public sealed class CommandTests
 		Assert.Contains("Project.Gameplay.SpawnAtOrigin", Box.Logger.Text);
 		Assert.Contains("Expected 'With armour: health after 10 damage is 95' to be true.", Box.Logger.Text);
 		Assert.Contains("the editor exited with code 255", Box.Logger.Text);
+	}
+
+	[TestMethod]
+	public async Task WindowedTestRunsTheEditorItselfWithThePassThrough()
+	{
+		using Sandbox Box = new();
+		Sandbox.Write(Box.Layout.EditorExecutable, "");
+		FakeLock Lock = new();
+		FakeProcessRunner Runner = new() { Behaviour = WritesLog("test-passed.log", 0) };
+
+		int Exit = await new TestCommand(Services(Runner, Lock)).RunAsync(Box.Context(),
+			["-filter=Project.Math", "-windowed", "-resx=1280", "-resy=720", "-name=Windowed", "--", "-SCCProvider=None", "-GameSandbox"], CancellationToken.None);
+
+		Assert.AreEqual(0, Exit, Box.Logger.Text);
+		CollectionAssert.AreEqual(new[] { "uak test Project.Math" }, Lock.Names);
+		ProcessInvocation Invocation = Runner.Invocations.Single();
+		Assert.AreEqual(Box.Layout.EditorExecutable, Invocation.FileName);
+		CollectionAssert.IsSubsetOf(new[] { "-windowed", "-ResX=1280", "-ResY=720", "-testexit=Automation Test Queue Empty" }, Invocation.Arguments.ToArray());
+		Assert.DoesNotContain("-nullrhi", Invocation.Arguments);
+		CollectionAssert.AreEqual(new[] { "-SCCProvider=None", "-GameSandbox" }, Invocation.Arguments.TakeLast(2).ToArray());
+		Assert.Contains("(windowed 1280x720)", Box.Logger.Text);
+		Assert.Contains("test: PASSED: 17 of 17 passed", Box.Logger.Text);
+	}
+
+	[TestMethod]
+	public async Task TestPassesEditorArgumentsToAHeadlessRunToo()
+	{
+		using Sandbox Box = new();
+		FakeProcessRunner Runner = new() { Behaviour = WritesLog("test-passed.log", 0) };
+
+		int Exit = await new TestCommand(Services(Runner)).RunAsync(Box.Context(), ["-filter=Project.Math", "--", "-SCCProvider=None"], CancellationToken.None);
+
+		Assert.AreEqual(0, Exit, Box.Logger.Text);
+		Assert.AreEqual(Box.Layout.EditorCommandExecutable, Runner.Invocations[0].FileName);
+		Assert.Contains("-nullrhi", Runner.Invocations[0].Arguments);
+		Assert.AreEqual("-SCCProvider=None", Runner.Invocations[0].Arguments[^1]);
+	}
+
+	[TestMethod]
+	public async Task AWindowedRunWithoutTheEditorBuiltIsASetupError()
+	{
+		// The sandbox has only the -Cmd editor.
+		using Sandbox Box = new();
+		FakeProcessRunner Runner = new();
+
+		Assert.AreEqual(2, await new TestCommand(Services(Runner)).RunAsync(Box.Context(), ["-filter=Project.Math", "-windowed"], CancellationToken.None));
+		Assert.Contains("editor not found: " + Box.Layout.EditorExecutable, Box.Logger.Text);
+		Assert.IsEmpty(Runner.Invocations);
 	}
 
 	[TestMethod]
@@ -421,6 +517,11 @@ public sealed class CommandTests
 		Assert.AreEqual(2, await Command.RunAsync(Box.Context(), ["-filter=A;Quit"], CancellationToken.None));
 		Assert.AreEqual(2, await Command.RunAsync(Box.Context(), ["-filter=A", "-name=a b"], CancellationToken.None));
 		Assert.AreEqual(2, await Command.RunAsync(Box.Context(withProject: false), ["-filter=A"], CancellationToken.None));
+		Assert.AreEqual(2, await Command.RunAsync(Box.Context(), ["-filter=A", "-gpu", "-windowed"], CancellationToken.None));
+		Assert.AreEqual(2, await Command.RunAsync(Box.Context(), ["-filter=A", "-resx=800"], CancellationToken.None));
+		Assert.AreEqual(2, await Command.RunAsync(Box.Context(), ["-filter=A", "-windowed", "-resy=0"], CancellationToken.None));
+		Assert.AreEqual(2, await Command.RunAsync(Box.Context(), ["-filter=A", "--", "-ExecCmds=Quit"], CancellationToken.None));
+		Assert.AreEqual(2, await Command.RunAsync(Box.Context(), ["-filter=A", "--", "-abslog=other.log"], CancellationToken.None));
 		File.Delete(Box.Layout.EditorCommandExecutable);
 		Assert.AreEqual(2, await Command.RunAsync(Box.Context(), ["-filter=A"], CancellationToken.None));
 		Assert.IsEmpty(Runner.Invocations);

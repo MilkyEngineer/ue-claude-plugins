@@ -24,6 +24,7 @@ plugins/unreal-agent-kit/
   agents/            tiered workers, the runner, the researcher and the reviewer (generic ground rules)
   skills/            the workflow skill (briefs, delegation, resume or respawn, reviews, doc sync) and templates
   hooks/             SessionStart: says when this version's uak isn't published yet
+  bin/               uak and uak.cmd: run this version's published uak, so uak is on PATH in Claude Code sessions
   docs/              install, settings, CLAUDE.md snippet
   tools/
     UnrealAgentKit.sln, Directory.Build.props, global.json, build/EpicGames.props
@@ -202,20 +203,31 @@ Writes stay out of scope for now: no commit, submit, checkout or edit.
 
 ## Unreal operations (Unreal)
 
-- **`uak compile <file>... [-dependents] [-target=] [-config=] [-platform=] [-MaxParallelActions=] [-maxerrors=] [-resultfile=]`** checks files through UBT's `-SingleFile=<file>` for the project's editor target (`<Project>Editor`, else the `Editor` target in `Source/*.Target.cs`, else `UnrealEditor`), with the platform's real compiler. A `Type = TargetType.Editor` inside a `//` or `/* */` comment doesn't count. Nothing is linked, and objects go to a separate `SingleFile/` folder, so it is safe while an editor runs.
+- **`uak compile <file>... [-dependents] [-target=] [-config=] [-platform=] [-MaxParallelActions=] [-maxerrors=] [-resultfile=] [-- <UBT option>...]`** checks files through UBT's `-SingleFile=<file>` for the project's editor target (`<Project>Editor`, else the `Editor` target in `Source/*.Target.cs`, else `UnrealEditor`), with the platform's real compiler. A `Type = TargetType.Editor` inside a `//` or `/* */` comment doesn't count. Nothing is linked, and objects go to a separate `SingleFile/` folder, so it is safe while an editor runs.
   - UBT compiles a header on its own, through a generated `<Name>.h.cpp`, so headers must be self-contained (lead's decision, 2026-10-01: keep this strict default). `-dependents` adds `-SingleFileBuildDependents`.
   - UBT silently drops a file that isn't in the target, or a header marked HEADER_UNIT_SKIP, and skips a file whose `SingleFile` object is newer. So uak first deletes the requested files' old `SingleFile` objects (only under the project folder), then checks that a compile action ran for each file. A file that didn't compile is NOT COMPILED, exit code 2.
   - It passes `-WaitMutex`, and does not take the editor lock. UBT's own mutex already makes compile checks run one at a time.
+  - UBT options after `--` are checked as for `uak build`. `-SingleFile` and `-SingleFileBuildDependents` are rejected too, because uak sets them.
   - It prints errors as `file(line): error: CODE: message`. A header error repeated across translation units is reported once, with a count.
-- **`uak build [-target=] [-config=Development] [-platform=host] [-MaxParallelActions=] [-maxerrors=] [-resultfile=]`** runs under the editor lock. On an installed engine it runs UBT directly on the bundled dotnet; on a source build it runs the platform's Build script, which rebuilds UBT when needed. It always adds `-WaitMutex` and `-NoHotReloadFromIDE`.
-- **`uak test -filter=<prefix> [-gpu] [-name=] [-resultfile=]`** runs the editor with `-ExecCmds="Automation RunTests <filter>;Quit"` (`-nullrhi` unless `-gpu`) under the lock.
+- **`uak build [-target=] [-config=Development] [-platform=host] [-MaxParallelActions=] [-maxerrors=] [-resultfile=] [-- <UBT option>...]`** runs under the editor lock. On an installed engine it runs UBT directly on the bundled dotnet; on a source build it runs the platform's Build script, which rebuilds UBT when needed. It always adds `-WaitMutex` and `-NoHotReloadFromIDE`.
+  - **UBT options after `--`** (for example `-DisableAdaptiveUnity` or `-Module=<name>`) go to UBT as given, after uak's own (`UbtCommandLine.CheckPassThrough`). Each must be an option: UBT reads a bare word as another target, platform or configuration.
+  - Options uak sets, or that would break its guarantees, are rejected: `-Project`, `-Target`, `-TargetList` and `-Mode` (what is built, and that it is a build); `-WaitMutex` and `-NoMutex` (UBT's one-instance mutex); `-NoHotReloadFromIDE`, `-ForceHotReload` and `-LiveCoding` (never patch a running editor); and `-MaxParallelActions` (use uak's option). Names match in any case, as UBT reads them. A rejected option is a usage error (exit 2), before the lock is taken.
+- **`uak test -filter=<prefix> [-gpu | -windowed [-resx=] [-resy=]] [-name=] [-resultfile=] [-- <editor argument>...]`** runs the editor with `-ExecCmds="Automation RunTests <filter>;Quit"` (`-nullrhi` unless `-gpu` or `-windowed`) under the lock.
+  - **Windowed runs** (`-windowed`, for tests that need a real viewport and Slate windows) start the editor itself, not its `-Cmd` (`EditorLocation.Executable`: the receipt's `Launch`, else the editor beside the `-Cmd` one). They pass `-windowed -ResX=1600 -ResY=900` (`-resx=` and `-resy=` change the size) instead of `-nullrhi` or `-RenderOffscreen`.
+    - A window opens on the desktop, so it needs an interactive session.
+    - Pass and fail are decided as for any run: from the log (`-abslog`), the report and the `-testexit` exit.
+    - On Windows the windowed editor is a GUI program and writes nothing to its console, so a crash before the log has no last output to show.
+    - `-gpu` and `-windowed` together, or `-resx=`/`-resy=` without `-windowed`, are usage errors.
+  - **Editor arguments after `--`** (for example `-SCCProvider=None`) go last, as given (`EditorTestCommandLine.CheckPassThrough`). Those uak sets are rejected, written `-Name`, `--Name` or `/Name`, in any case:
+    - `-ExecCmds`, `-testexit`, `-abslog` and `-ReportExportPath`: uak's checks depend on them, and the engine reads only the first of each (FParse::Value), so a second one would be ignored silently;
+    - `-nullrhi`, `-RenderOffscreen`, `-windowed`, `-ResX` and `-ResY`: these are uak's `-gpu`, `-windowed`, `-resx=` and `-resy=`.
   - **Which editor:** the project editor target's build environment decides it (`EditorLocator`, Core).
     - A shared environment, the default for a modular editor, runs the engine's `UnrealEditor-Cmd`.
     - A unique one runs `<Target>-Cmd` from the project's `Binaries/<Platform>`. UEBuildTarget.cs names the binaries after the target, and puts them under the project when the `.Target.cs` is there.
   - **Why the receipt:** the `.Target.cs` text can't tell the two apart. A base class in another file can set the environment, as can `-UniqueBuildEnvironment`, and UBT settles `UniqueIfNeeded` only by compiling the rules.
     - So uak reads the target receipt UBT writes when it builds the editor, `<Project or Engine>/Binaries/<Platform>/<Target>.target`. Its `TargetBuildEnvironment`, `Launch` and `LaunchCmd` are UBT's own answer.
     - Without a receipt, uak takes a built `<Target>-Cmd` if there is one, then a `BuildEnvironment = TargetBuildEnvironment.Unique` in the target file itself, then the shared editor.
-    - `uak env` shows the editor and how it was found.
+    - `uak env` shows both editors (cmd and windowed) and how they were found.
     - UBT's `-Mode=JsonExport` would also answer, but it compiles the rules and builds the target graph under UBT's mutex: too slow for every run.
   - The log is `<Project>/Saved/Logs/<name>.log`, deleted before the run. The report goes to `<State>/TestReports/<name>`.
   - A run passes only when all of these hold: tests were found; the found count equals the completed count; none failed; at least one passed (all skipped is NOTHING RAN); the queue finished; and the editor exited 0. A non-zero editor exit fails the run even when every test passed (lead's decision: keep it strict, and print the editor's exit code next to the test counts).
@@ -258,6 +270,12 @@ Writes stay out of scope for now: no commit, submit, checkout or edit.
   - **Old versions.** When older version folders are installed, the question offers to remove them after a successful publish, folder by folder (`rm -rf` on each listed version, never `State/`). A folder a detached run still holds open fails to delete and is left.
   - **Bash, not PowerShell.** The commands it gives are `sh` (a `VAR=value` prefix, `/c/`-style paths on Windows), so it tells Claude to run them with its Bash tool, never PowerShell or cmd.
   - A test runs it through `sh` (`HookTests`): the one on PATH, else, on Windows, Git for Windows' `bin/sh.exe` beside `git.exe` (PowerShell and cmd usually have only Git's `cmd` folder on PATH), so the hook tests run there too.
+- **`uak` on PATH** (`bin/uak`, `bin/uak.cmd`): Claude Code puts an enabled plugin's `bin/` folder on the PATH of the shell it runs commands in, after the user's own entries. Each shim runs `$UAK_HOME/<plugin version>/uak` with its arguments as given, and exits with its exit code. The version comes from the plugin's own `plugin.json`, and the home is found as the hook finds it (`USERPROFILE` on Windows). So a plugin update moves every session to the new version's `uak`, with no PATH change. With no published `uak`, a shim prints one line that points to docs/INSTALL.md and exits 2, uak's setup-error code.
+  - `bin/uak` is POSIX `sh`, for Git Bash, Linux and Mac; git keeps its executable bit. `bin/uak.cmd` is for PowerShell and cmd, which find it through PATHEXT and skip the extensionless file. `uak lock run` and `uak runs start` find `uak.cmd` the same way.
+  - `uak.cmd` passes `%*` on through cmd, which may change `%`, `^` and `!` outside quotes. For such arguments, call `uak.exe` by its full path.
+  - A `uak` the user put on PATH comes first, so after an update it must point at the new version's folder, or go.
+  - The Claude Code docs promise `bin/` for the Bash tool. claude.ai and Cowork don't install a plugin with a top-level `bin/`.
+  - `HookTests` runs both shims against a stand-in published `uak`: the test child's launcher, which the test project's build copies to `FakeUak/0.0.0-shim/uak[.exe]`.
 
 ## Shared contracts
 

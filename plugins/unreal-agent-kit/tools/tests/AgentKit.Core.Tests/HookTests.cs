@@ -270,4 +270,145 @@ public sealed class HookTests
 		// The walk up stops before the filesystem root, which Git Bash would glob as a network path for seconds.
 		Assert.IsLessThan(TimeSpan.FromSeconds(10), Timer.Elapsed);
 	}
+
+	// ---- bin/uak and bin/uak.cmd: uak on PATH in Claude Code sessions ----
+
+	/// <summary>The version the build lays out a stand-in published uak for (AgentKit.Core.Tests.csproj, CopyFakeUak).</summary>
+	const string ShimVersion = "0.0.0-shim";
+
+	/// <summary>A UAK_HOME holding <see cref="ShimVersion"/>/uak: the test child's launcher, whose echo-args mode writes its arguments and exits with a given code.</summary>
+	static string FakeUakHome => Path.Combine(AppContext.BaseDirectory, "FakeUak");
+
+	/// <summary>A plugin root for <see cref="ShimVersion"/>, with copies of this source tree's bin/uak and bin/uak.cmd.</summary>
+	static string ShimPluginRoot(TempTree tree)
+	{
+		string Root = Path.GetDirectoryName(Path.GetDirectoryName(tree.File(Path.Combine("Plugin", ".claude-plugin", "plugin.json"),
+			$$"""
+			{
+			  "name": "unreal-agent-kit",
+			  "version": "{{ShimVersion}}",
+			  "description": "test"
+			}
+			"""))!)!;
+		string Source = Path.Combine(Path.GetDirectoryName(Path.GetDirectoryName(FindHook()))!, "bin");
+		Directory.CreateDirectory(Path.Combine(Root, "bin"));
+		foreach (string Name in new[] { "uak", "uak.cmd" })
+		{
+			File.Copy(Path.Combine(Source, Name), Path.Combine(Root, "bin", Name));
+		}
+		return Root;
+	}
+
+	/// <summary>
+	/// Runs a shim: bin/uak through sh, or bin/uak.cmd directly. With <paramref name="uakHome"/> null, UAK_HOME is unset and
+	/// the user's folder (USERPROFILE and HOME) is <paramref name="userHome"/>.
+	/// </summary>
+	async Task<(int ExitCode, string Output, string Errors)> RunShimAsync(string shim, IEnumerable<string> arguments, string? uakHome, string? userHome = null)
+	{
+		bool Cmd = shim.EndsWith(".cmd", StringComparison.OrdinalIgnoreCase);
+		ProcessStartInfo Start = new(Cmd ? shim : RequireShell())
+		{
+			RedirectStandardOutput = true,
+			RedirectStandardError = true,
+			UseShellExecute = false,
+		};
+		if (!Cmd)
+		{
+			Start.ArgumentList.Add(shim);
+		}
+		foreach (string Argument in arguments)
+		{
+			Start.ArgumentList.Add(Argument);
+		}
+		Start.Environment.Remove("UAK_HOME");
+		if (uakHome is not null)
+		{
+			Start.Environment["UAK_HOME"] = uakHome;
+		}
+		if (userHome is not null)
+		{
+			Start.Environment["USERPROFILE"] = userHome;
+			Start.Environment["HOME"] = userHome;
+		}
+		using Process Shim = Process.Start(Start)!;
+		Task<string> Output = Shim.StandardOutput.ReadToEndAsync(TestContext.CancellationToken);
+		Task<string> Errors = Shim.StandardError.ReadToEndAsync(TestContext.CancellationToken);
+		using CancellationTokenSource Timeout = CancellationTokenSource.CreateLinkedTokenSource(TestContext.CancellationToken);
+		Timeout.CancelAfter(TimeSpan.FromSeconds(30));
+		await Shim.WaitForExitAsync(Timeout.Token);
+		return (Shim.ExitCode, await Output, await Errors);
+	}
+
+	static void RequireWindows()
+	{
+		if (!OperatingSystem.IsWindows())
+		{
+			Assert.Inconclusive("bin/uak.cmd is for PowerShell and cmd on Windows.");
+		}
+	}
+
+	/// <summary>The shim runs the published uak with every argument as given, and exits with its exit code.</summary>
+	async Task AssertForwards(string shim)
+	{
+		using TempTree Tree = new();
+		string Echoed = Tree.Path("args.json");
+		string[] Given = ["-filter=Game.A+Game.B", "two words", "--", "-SCCProvider=None", "C:\\My Games\\Game.uproject"];
+		(int ExitCode, string Output, string Errors) = await RunShimAsync(shim, ["echo-args", Echoed, "7", .. Given], FakeUakHome);
+
+		Assert.AreEqual(7, ExitCode, Errors);
+		StringAssert.Contains(Output, $"echo-args: {Given.Length} arguments");
+		StringAssert.Contains(Errors, "echo-args: to standard error");
+		CollectionAssert.AreEqual(Given, JsonSerializer.Deserialize<string[]>(File.ReadAllText(Echoed)));
+	}
+
+	/// <summary>Without the published uak, the shim says where it looked and how to publish, and exits 2 (uak's setup error).</summary>
+	async Task AssertMissing(string shim, TempTree tree)
+	{
+		(int ExitCode, string Output, string Errors) = await RunShimAsync(shim, ["env"], tree.Dir("EmptyHome"));
+		Assert.AreEqual(2, ExitCode, Output);
+		StringAssert.Contains(Errors, $"uak {ShimVersion} is not published in");
+		StringAssert.Contains(Errors, "EmptyHome");
+		StringAssert.Contains(Errors, "INSTALL.md");
+
+		// No UAK_HOME: the user's own .unreal-agent-kit, from USERPROFILE on Windows, as uak finds it.
+		(ExitCode, _, Errors) = await RunShimAsync(shim, ["env"], null, tree.Dir("User"));
+		Assert.AreEqual(2, ExitCode, Errors);
+		StringAssert.Matches(Errors, new System.Text.RegularExpressions.Regex(@"User[/\\]\.unreal-agent-kit[/\\]" + System.Text.RegularExpressions.Regex.Escape(ShimVersion)));
+	}
+
+	[TestMethod]
+	public async Task ShShim_RunsThePublishedUak_WithItsArgumentsAndExitCode()
+	{
+		using TempTree Tree = new();
+		await AssertForwards(Path.Combine(ShimPluginRoot(Tree), "bin", "uak"));
+		if (!OperatingSystem.IsWindows())
+		{
+			// Claude Code runs it by name, so git must keep its executable bit.
+			string Source = Path.Combine(Path.GetDirectoryName(Path.GetDirectoryName(FindHook()))!, "bin", "uak");
+			Assert.IsTrue(File.GetUnixFileMode(Source).HasFlag(UnixFileMode.UserExecute), "bin/uak must be executable.");
+		}
+	}
+
+	[TestMethod]
+	public async Task ShShim_WithoutThePublishedUak_PointsToInstallAndExits2()
+	{
+		using TempTree Tree = new();
+		await AssertMissing(Path.Combine(ShimPluginRoot(Tree), "bin", "uak"), Tree);
+	}
+
+	[TestMethod]
+	public async Task CmdShim_RunsThePublishedUak_WithItsArgumentsAndExitCode()
+	{
+		RequireWindows();
+		using TempTree Tree = new();
+		await AssertForwards(Path.Combine(ShimPluginRoot(Tree), "bin", "uak.cmd"));
+	}
+
+	[TestMethod]
+	public async Task CmdShim_WithoutThePublishedUak_PointsToInstallAndExits2()
+	{
+		RequireWindows();
+		using TempTree Tree = new();
+		await AssertMissing(Path.Combine(ShimPluginRoot(Tree), "bin", "uak.cmd"), Tree);
+	}
 }

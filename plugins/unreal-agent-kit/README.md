@@ -17,11 +17,12 @@ One lead agent plans a milestone, splits it into epics and delegates each to a w
   - `uak lock run|status`: a fair, queued editor lock that is released when its holder dies.
   - `uak runs start|list|wait|adopt`: detached, tracked runs that outlive shells and restarts, and a wait that ends when a run does.
   - `uak compile`: single-file compile checks through UBT `-SingleFile`, without the lock.
-  - `uak build` and `uak test`: builds and automation tests that take the lock themselves, with pass, fail and count checks.
+  - `uak build` and `uak test`: builds and automation tests that take the lock themselves, with pass, fail and count checks. Tests run headless, or in a window with `-windowed`. More UBT or editor arguments go after `--`.
   - `uak vcs status|changed|revision`: version control (Git, Perforce or none).
   - `uak env`: the project, engine, state folder and version control the kit resolved, and how.
   - `uak help [command]`: every command's options. A project can add its own commands in `<Project>/.uak/commands/`, loaded only when you turn them on with `UAK_PROJECT_COMMANDS=1` (they run with your rights, so only for a project you trust).
 - **A SessionStart hook** (`hooks/`): in an Unreal project, it says when this plugin version's `uak` isn't published yet, and has Claude ask, with your first message, whether to publish it now (with the exact command for the project's engine) and remove older versions. It is a POSIX `sh` script: on Windows it needs Git for Windows (Git Bash), which Claude Code on Windows uses to run hooks.
+- **`uak` on PATH** (`bin/`): in Claude Code sessions, `uak` runs this plugin version's published `uak`, from Git Bash, PowerShell or cmd.
 - **Docs** (`docs/`): [INSTALL.md](docs/INSTALL.md), [SETTINGS.md](docs/SETTINGS.md) and a [CLAUDE.md snippet](docs/CLAUDE-snippet.md).
 
 ## Install

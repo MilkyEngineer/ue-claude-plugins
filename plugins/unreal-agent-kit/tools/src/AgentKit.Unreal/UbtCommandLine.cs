@@ -24,7 +24,7 @@ public static class UbtCommandLine
 	/// </summary>
 	/// <param name="paths">The engine's tool paths.</param>
 	/// <param name="target">What to build.</param>
-	/// <param name="extraArguments">More UBT arguments, e.g. -SingleFile=.</param>
+	/// <param name="extraArguments">More UBT arguments, e.g. -SingleFile=, or a pass-through checked by <see cref="CheckPassThrough"/>.</param>
 	/// <exception cref="UakSetupException">UBT or the dotnet it needs is missing.</exception>
 	public static ProcessInvocation Build(EngineLayout paths, UbtTarget target, IEnumerable<string>? extraArguments = null)
 	{
@@ -57,5 +57,48 @@ public static class UbtCommandLine
 			throw new UakSetupException("build script not found: " + paths.BuildScript);
 		}
 		return new ProcessInvocation(paths.BuildScript, UbtArguments, EngineSource);
+	}
+
+	/// <summary>
+	/// UBT options uak sets itself, or that would break what uak promises, so a pass-through after "--" may not give them:
+	/// -Project= and -Target=/-TargetList= (what is built: use -project= and -target=), -Mode= (it would no longer be a build),
+	/// -WaitMutex and -NoMutex (UBT's one-instance mutex: uak always waits on it), -NoHotReloadFromIDE, -ForceHotReload and
+	/// -LiveCoding (never patch a running editor), and -MaxParallelActions= (use uak's option, which also reads
+	/// UAK_MAX_PARALLEL_ACTIONS). UBT reads options case-insensitively (CommandLineArguments), and so does this check.
+	/// </summary>
+	static readonly string[] ReservedOptions =
+		["Project", "Target", "TargetList", "Mode", "WaitMutex", "NoMutex", "NoHotReloadFromIDE", "ForceHotReload", "LiveCoding", "MaxParallelActions"];
+
+	/// <summary>
+	/// Checks the UBT arguments given after "--" and returns them unchanged. Each must be an option (-Name or -Name=Value):
+	/// UBT reads a bare word as another target, platform or configuration. Options uak sets itself, or that would break the
+	/// lock and mutex guarantees, are rejected (see <see cref="ReservedOptions"/>), as are <paramref name="alsoReserved"/>.
+	/// </summary>
+	/// <param name="arguments">The arguments after "--".</param>
+	/// <param name="alsoReserved">More option names the command sets itself, e.g. "SingleFile" for `uak compile`.</param>
+	/// <exception cref="UakUsageException">An argument is not an option, or is one uak sets.</exception>
+	public static IReadOnlyList<string> CheckPassThrough(IReadOnlyList<string> arguments, params string[] alsoReserved)
+	{
+		foreach (string Argument in arguments)
+		{
+			if (!Argument.StartsWith('-') || Argument.TrimStart('-').Length == 0)
+			{
+				throw new UakUsageException($"'{Argument}' after -- is not a UBT option: UBT would read it as a target, platform or configuration. Give options only (-Name or -Name=Value).");
+			}
+			string Name = OptionName(Argument);
+			if (ReservedOptions.Concat(alsoReserved).Any(Reserved => Reserved.Equals(Name, StringComparison.OrdinalIgnoreCase)))
+			{
+				throw new UakUsageException($"{Argument} can't go after --: uak sets it, or it would break the lock or UBT's mutex. Use uak's own options instead (uak help).");
+			}
+		}
+		return arguments;
+	}
+
+	/// <summary>An option's name: without its leading '-' characters and from '=' on.</summary>
+	internal static string OptionName(string argument)
+	{
+		string Body = argument.TrimStart('-', '/');
+		int Equals = Body.IndexOf('=', StringComparison.Ordinal);
+		return Equals < 0 ? Body : Body[..Equals];
 	}
 }

@@ -33,13 +33,17 @@ public sealed class BuildCommand : IUakCommand
 	/// <inheritdoc/>
 	public string Usage =>
 		"""
-		uak build [options]
+		uak build [options] [-- <UBT option>...]
 		  -target=<name>            The UBT target (default: the project's editor target).
 		  -config=<name>            Default Development.
 		  -platform=<name>          Default host.
 		  -MaxParallelActions=<n>   Default UAK_MAX_PARALLEL_ACTIONS, else UBT's own.
 		  -maxerrors=<n>            Errors to print (default 10).
 		  -resultfile=<path>        Also write the result as JSON.
+		  -- <UBT option>...        More UBT options, passed as given, e.g. -- -DisableAdaptiveUnity -Module=Foo.
+		                            Options only: UBT reads a bare word as a target. Rejected because uak sets them or
+		                            they break the lock or UBT's mutex: -Project, -Target, -TargetList, -Mode, -WaitMutex,
+		                            -NoMutex, -NoHotReloadFromIDE, -ForceHotReload, -LiveCoding, -MaxParallelActions.
 		Exit code: 0 built, 1 failed, 2 usage or setup error.
 		""";
 
@@ -63,6 +67,7 @@ public sealed class BuildCommand : IUakCommand
 		{
 			throw new UakUsageException("uak build takes no positional arguments: " + string.Join(' ', Arguments.Positional));
 		}
+		IReadOnlyList<string> PassThrough = UbtCommandLine.CheckPassThrough(Arguments.Rest);
 
 		string? Project = context.ProjectFile?.FullName;
 		if (Target is null)
@@ -70,7 +75,7 @@ public sealed class BuildCommand : IUakCommand
 			Target = TargetResolver.ResolveEditorTarget(Project ?? throw new UakSetupException("no project found: give -project= or -target="));
 		}
 		EngineLayout Paths = Services.Paths(context);
-		ProcessInvocation Invocation = UbtCommandLine.Build(Paths, new UbtTarget(Target, Platform, Configuration, Project, MaxParallel));
+		ProcessInvocation Invocation = UbtCommandLine.Build(Paths, new UbtTarget(Target, Platform, Configuration, Project, MaxParallel), PassThrough);
 		string LogFile = Services.NewLogFile(context, "build");
 		// Named first, and written as it goes, so a long build can be followed in its log while it runs.
 		context.Logger.LogInformation("Log: {Log}", LogFile);

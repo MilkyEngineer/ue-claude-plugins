@@ -1,0 +1,49 @@
+#!/bin/sh
+# Copyright Alex Stevens (@MilkyEngineer). All Rights Reserved.
+#
+# `uak` on PATH: Claude Code puts an enabled plugin's bin/ folder on the PATH of the shell it runs commands in. This runs
+# the uak published for this plugin's version, $UAK_HOME/<version>/uak (UAK_HOME defaults to ~/.unreal-agent-kit; see
+# docs/INSTALL.md), with every argument as given, and exits with its exit code. When that uak isn't published, it says so
+# and exits 2, uak's setup-error code. bin/uak.cmd does the same for PowerShell and cmd on Windows.
+#
+# POSIX sh, for Git Bash on Windows, Linux and Mac.
+
+root=$(dirname "$0")/..
+
+# On Windows (Git Bash, MSYS or Cygwin), UAK_HOME and USERPROFILE come in Windows form (C:\...).
+windows=
+case "$(uname -s 2>/dev/null)" in
+	MINGW*|MSYS*|CYGWIN*) windows=1 ;;
+esac
+posix_path() {
+	if [ -n "$windows" ] && command -v cygpath >/dev/null 2>&1; then
+		cygpath -u "$1" 2>/dev/null || printf '%s\n' "$1"
+	else
+		printf '%s\n' "$1"
+	fi
+}
+
+version=$(sed -n 's/^.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$root/.claude-plugin/plugin.json" 2>/dev/null | head -n 1)
+if [ -z "$version" ]; then
+	echo "uak: no version in $root/.claude-plugin/plugin.json, so the uak to run is unknown." >&2
+	exit 2
+fi
+
+# The user's folder as uak itself finds it: on Windows that is USERPROFILE, which Git Bash's HOME need not match.
+user_home="$HOME"
+if [ -n "$windows" ] && [ -n "$USERPROFILE" ]; then
+	user_home=$(posix_path "$USERPROFILE")
+fi
+if [ -n "$UAK_HOME" ]; then
+	home=$(posix_path "$UAK_HOME")
+else
+	home="$user_home/.unreal-agent-kit"
+fi
+
+for uak in "$home/$version/uak" "$home/$version/uak.exe"; do
+	if [ -f "$uak" ]; then
+		exec "$uak" "$@"
+	fi
+done
+echo "uak: uak $version is not published in $home/$version. Publish it as docs/INSTALL.md says (in $(cd "$root" 2>/dev/null && pwd || printf '%s' "$root"))." >&2
+exit 2

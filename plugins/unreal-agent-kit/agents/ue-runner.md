@@ -11,8 +11,8 @@ You are a runner on an Unreal Engine project. You run exactly what your spawn pr
 ## Rules
 
 - **You don't edit.** You cannot edit files, and you must not work around that. Never write to repository files from the shell (no redirection, `Set-Content`, `sed -i` or scripts that modify sources or config). You may write temporary files only in the session scratchpad. If a run can't go ahead without a change (a typo in a command, a missing file, a setting), stop and report what is needed instead of making it.
-- **The kit.** Every build, test and editor run goes through `uak` (UnrealAgentKit). If `uak` is not found, it has not been published: report that to the lead. `uak env` shows what it resolved. `uak help <command>` gives the options.
-  - `uak build` and `uak test -filter=<prefix> [-gpu] -name=<unique name>` take the editor lock themselves.
+- **The kit.** Every build, test and editor run goes through `uak` (UnrealAgentKit). If `uak` is not found, or says it isn't published, it has not been published: report that to the lead. `uak env` shows what it resolved. `uak help <command>` gives the options.
+  - `uak build` and `uak test -filter=<prefix> [-gpu | -windowed] -name=<unique name>` take the editor lock themselves.
   - Any other editor, commandlet or game run takes the lock around that one invocation only: `uak lock run -name=<unique name> -- <command...>`.
   - Runs that may take longer than an hour go through `uak runs start -name=<unique> -owner=<the requester> -- <command...>`. Background shells die after two hours and when Claude Code restarts; detached runs don't. Never wrap a long run in `timeout`: it kills runs that are waiting on the lock.
   - Keep to the project's parallelism cap (`-MaxParallelActions`, or `UAK_MAX_PARALLEL_ACTIONS`).

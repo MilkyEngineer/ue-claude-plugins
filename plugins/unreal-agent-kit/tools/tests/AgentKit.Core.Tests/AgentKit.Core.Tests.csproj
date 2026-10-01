@@ -9,11 +9,32 @@
 		<ProjectReference Include="..\..\src\AgentKit.Core\AgentKit.Core.csproj" />
 		<!-- Built first, but not referenced: its DLL is copied to SampleCommands/ and loaded as a project command assembly. -->
 		<ProjectReference Include="..\UakSampleCommands\UakSampleCommands.csproj" ReferenceOutputAssembly="false" Private="false" />
+		<!-- Built first, but not referenced: a copy of it stands in for a published uak in the bin/ shim tests (HookTests). -->
+		<ProjectReference Include="..\AgentKit.TestChild\AgentKit.TestChild.csproj" ReferenceOutputAssembly="false" Private="false" />
 	</ItemGroup>
 	<Target Name="CopySampleCommands" AfterTargets="Build">
 		<MSBuild Projects="..\UakSampleCommands\UakSampleCommands.csproj" Targets="GetTargetPath">
 			<Output TaskParameter="TargetOutputs" ItemName="_UakSampleCommandsAssembly" />
 		</MSBuild>
 		<Copy SourceFiles="@(_UakSampleCommandsAssembly)" DestinationFolder="$(OutDir)SampleCommands" SkipUnchangedFiles="true" />
+	</Target>
+	<!--
+		FakeUak/0.0.0-shim/ is laid out as $UAK_HOME/<version>/ is after a publish: the test child's whole output, with its
+		launcher also copied as uak (uak.exe on Windows), which still loads AgentKit.TestChild.dll beside it.
+	-->
+	<Target Name="CopyFakeUak" AfterTargets="Build">
+		<MSBuild Projects="..\AgentKit.TestChild\AgentKit.TestChild.csproj" Targets="GetTargetPath">
+			<Output TaskParameter="TargetOutputs" ItemName="_TestChildAssembly" />
+		</MSBuild>
+		<PropertyGroup>
+			<_TestChildDirectory>@(_TestChildAssembly->'%(RootDir)%(Directory)')</_TestChildDirectory>
+			<_FakeUakDirectory>$(OutDir)FakeUak\0.0.0-shim\</_FakeUakDirectory>
+			<_LauncherExtension Condition="$([MSBuild]::IsOSPlatform('Windows'))">.exe</_LauncherExtension>
+		</PropertyGroup>
+		<ItemGroup>
+			<_TestChildFiles Include="$(_TestChildDirectory)*" />
+		</ItemGroup>
+		<Copy SourceFiles="@(_TestChildFiles)" DestinationFolder="$(_FakeUakDirectory)" SkipUnchangedFiles="true" />
+		<Copy SourceFiles="$(_TestChildDirectory)AgentKit.TestChild$(_LauncherExtension)" DestinationFiles="$(_FakeUakDirectory)uak$(_LauncherExtension)" SkipUnchangedFiles="true" />
 	</Target>
 </Project>

@@ -7,8 +7,8 @@ using Microsoft.Extensions.Logging;
 namespace AgentKit.Unreal;
 
 /// <summary>
-/// `uak test -filter=&lt;prefix&gt;`: runs the project's automation tests in a headless editor under the editor lock, and
-/// reports passed, failed and total tests from the editor's log.
+/// `uak test -filter=&lt;prefix&gt;`: runs the project's automation tests in an editor (headless, unless -windowed) under the
+/// editor lock, and reports passed, failed and total tests from the editor's log.
 /// </summary>
 public sealed class TestCommand : IUakCommand
 {
@@ -29,16 +29,22 @@ public sealed class TestCommand : IUakCommand
 	public string Name => "test";
 
 	/// <inheritdoc/>
-	public string Summary => "Run automation tests in a headless editor, under the editor lock.";
+	public string Summary => "Run automation tests in an editor (headless by default), under the editor lock.";
 
 	/// <inheritdoc/>
 	public string Usage =>
 		"""
-		uak test -filter=<prefix> [options]
+		uak test -filter=<prefix> [options] [-- <editor argument>...]
 		  -filter=<prefix>      The tests to run: a test path prefix, several joined with '+'.
 		  -gpu                  Render with a real RHI off screen (-RenderOffscreen) instead of -nullrhi.
+		  -windowed             Run the editor itself (not -Cmd) in a window (-windowed -ResX= -ResY=), for tests that
+		                        need a real viewport and Slate windows. A window opens on this desktop. Not with -gpu.
+		  -resx=<n> -resy=<n>   The window size with -windowed (default 1600 x 900).
 		  -name=<name>          Names the editor log, <Project>/Saved/Logs/<name>.log (default uak-test).
 		  -resultfile=<path>    Also write the result as JSON.
+		  -- <editor argument>  More editor arguments, passed as given, e.g. -- -SCCProvider=None. Rejected because uak
+		                        sets them: -ExecCmds, -testexit, -abslog, -ReportExportPath, -nullrhi, -RenderOffscreen,
+		                        -windowed, -ResX, -ResY.
 		The run passes only when the editor found tests, every found test completed ("Found N automation tests"),
 		at least one passed (all skipped is NOTHING RAN), none failed, the queue finished, and the editor exited with 0.
 		Exit code: 0 passed, 1 failed, 2 usage or setup error.
@@ -55,6 +61,9 @@ public sealed class TestCommand : IUakCommand
 		UakArguments Arguments = new(arguments);
 		string Filter = Arguments.GetString("filter") ?? throw new UakUsageException("give -filter=<test path prefix>");
 		bool Gpu = Arguments.GetFlag("gpu");
+		bool Windowed = Arguments.GetFlag("windowed");
+		int? ResX = Arguments.GetInt("resx", 1, 16384);
+		int? ResY = Arguments.GetInt("resy", 1, 16384);
 		string Name = Arguments.GetString("name", "uak-test")!;
 		string? ResultFile = Arguments.GetString("resultfile");
 		Arguments.ThrowIfUnknown();
@@ -62,6 +71,16 @@ public sealed class TestCommand : IUakCommand
 		{
 			throw new UakUsageException("uak test takes no positional arguments: " + string.Join(' ', Arguments.Positional));
 		}
+		if (Gpu && Windowed)
+		{
+			throw new UakUsageException("give -gpu or -windowed, not both: -windowed renders with a real RHI too");
+		}
+		if (!Windowed && (ResX is not null || ResY is not null))
+		{
+			throw new UakUsageException("-resx= and -resy= size the window of a -windowed run");
+		}
+		IReadOnlyList<string> PassThrough = EditorTestCommandLine.CheckPassThrough(Arguments.Rest);
+		EditorRendering Rendering = Windowed ? EditorRendering.Windowed : Gpu ? EditorRendering.Offscreen : EditorRendering.NullRhi;
 		if (Name.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0 || Name.Contains(' ', StringComparison.Ordinal))
 		{
 			throw new UakUsageException($"-name={Name} must be a plain file name without spaces");
@@ -73,7 +92,8 @@ public sealed class TestCommand : IUakCommand
 		string LogFile = Path.Combine(ProjectDirectory, "Saved", "Logs", Name + ".log");
 		string ReportDirectory = Path.Combine(context.StateDirectory.FullName, "TestReports", Name);
 		EditorLocation Editor = EditorLocator.Locate(Paths, Project);
-		ProcessInvocation Invocation = EditorTestCommandLine.Build(Editor.CommandExecutable, Project, Filter, Gpu, LogFile, ReportDirectory);
+		ProcessInvocation Invocation = EditorTestCommandLine.Build(Editor, Project, Filter, Rendering, LogFile, ReportDirectory, PassThrough,
+			ResX ?? EditorTestCommandLine.DefaultResX, ResY ?? EditorTestCommandLine.DefaultResY);
 		if (!File.Exists(Invocation.FileName))
 		{
 			throw new UakSetupException($"editor not found: {Invocation.FileName} (from {Editor.How})");
@@ -88,7 +108,13 @@ public sealed class TestCommand : IUakCommand
 			// A log left by an earlier run must never be read as this run's.
 			Directory.CreateDirectory(Path.GetDirectoryName(LogFile)!);
 			File.Delete(LogFile);
-			context.Logger.LogInformation("Running automation tests '{Filter}' ({Rhi})...", Filter, Gpu ? "GPU" : "nullrhi");
+			string Rhi = Rendering switch
+			{
+				EditorRendering.Windowed => $"windowed {ResX ?? EditorTestCommandLine.DefaultResX}x{ResY ?? EditorTestCommandLine.DefaultResY}",
+				EditorRendering.Offscreen => "GPU",
+				_ => "nullrhi",
+			};
+			context.Logger.LogInformation("Running automation tests '{Filter}' ({Rhi})...", Filter, Rhi);
 			Timer = Stopwatch.StartNew();
 			ExitCode = await Services.RunEditorAsync(Invocation, Line =>
 			{
@@ -106,7 +132,8 @@ public sealed class TestCommand : IUakCommand
 
 		if (Parsed is not AutomationLogSummary Summary)
 		{
-			context.Logger.LogError("The editor wrote no log (exit code {Code}). Its last output:", ExitCode);
+			// The windowed editor is a GUI program on Windows, which writes nothing to its console output.
+			context.Logger.LogError("The editor wrote no log (exit code {Code}). Its last output{None}:", ExitCode, LastLines.Count == 0 ? " (none)" : "");
 			foreach (string Line in LastLines)
 			{
 				context.Logger.LogError("    {Line}", Line);

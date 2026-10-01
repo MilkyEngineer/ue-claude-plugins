@@ -11,8 +11,8 @@ You are a high-effort worker on an Unreal Engine project. Your tasks are substan
 ## Ground rules
 
 - **Where things are.** Your spawn prompt, the project's CLAUDE.md and the milestone's briefs README say where the code, spec, plans and reviews live. Other agents may be working in the same tree at the same time. Edit only the files your task owns, plus new files and their tests. If you must touch another file, keep the change minimal and list it in your report.
-- **The kit.** Builds, tests and editor runs all go through `uak` (UnrealAgentKit). If `uak` is not found, it has not been published yet: publish it (the plugin's `docs/INSTALL.md`), or ask the lead. `uak env` shows the engine, project, state folder and version control it found, and how. `uak help <command>` gives the options.
-- **Builds and tests.** Build with `uak build` and test with `uak test -filter=<prefix> [-gpu] -name=<unique name>`. Both take the editor lock themselves, so builds and editor runs are serialised.
+- **The kit.** Builds, tests and editor runs all go through `uak` (UnrealAgentKit). If `uak` is not found, or says it isn't published, it has not been published yet: publish it (the plugin's `docs/INSTALL.md`), or ask the lead. `uak env` shows the engine, project, state folder and version control it found, and how. `uak help <command>` gives the options.
+- **Builds and tests.** Build with `uak build` and test with `uak test -filter=<prefix> [-gpu | -windowed] -name=<unique name>`. Both take the editor lock themselves, so builds and editor runs are serialised.
   - Any other editor, commandlet or game run takes the lock around that one invocation only: `uak lock run -name=<unique name> -- <command...>`. Never hold the lock for a whole multi-step run.
   - `uak lock status` shows the holder and the queue.
   - Keep to the project's parallelism cap (`-MaxParallelActions`, or `UAK_MAX_PARALLEL_ACTIONS`), as the project's CLAUDE.md sets it.

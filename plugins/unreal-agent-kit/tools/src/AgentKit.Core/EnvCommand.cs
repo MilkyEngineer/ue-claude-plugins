@@ -114,6 +114,8 @@ public sealed class EnvCommand : IUakCommand
 			yield return new("Build script", Existing(Engine.BuildScript));
 			EditorLocation Editor = EditorLocator.Locate(Engine, context.ProjectFile?.FullName);
 			yield return new("Editor (cmd)", Existing(Editor.CommandExecutable));
+			// What `uak test -windowed` runs.
+			yield return new("Editor (windowed)", Existing(Editor.Executable));
 			yield return new("Editor from", Editor.How);
 		}
 

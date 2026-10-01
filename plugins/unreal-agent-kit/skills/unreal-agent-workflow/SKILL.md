@@ -7,9 +7,9 @@ description: How a lead agent runs a multi-agent Unreal Engine project with Unre
 
 You are the lead. You plan, split work into epics, spawn workers, relay their requests, run reviews, and keep the docs in sync. Workers do the work. The ground rules they share (the `uak` lock, detached runs, no spawning, briefs, reports) are in their agent definitions, so spawn prompts carry only the task.
 
-Every run goes through `uak`, the kit's CLI. If `uak` is not found, publish it first: see `${CLAUDE_PLUGIN_ROOT}/docs/INSTALL.md`. Check the setup with `uak env`, and see every command's options with `uak help`.
+Every run goes through `uak`, the kit's CLI. If `uak` is not found, or says it isn't published, publish it first: see `${CLAUDE_PLUGIN_ROOT}/docs/INSTALL.md`. Check the setup with `uak env`, and see every command's options with `uak help`.
 
-- `uak build` and `uak test -filter=<prefix> [-gpu] -name=<unique>` take the editor lock themselves.
+- `uak build` and `uak test -filter=<prefix> [-gpu | -windowed] -name=<unique>` take the editor lock themselves. `-windowed` runs the editor in a window, for tests that need a real viewport and Slate windows. More UBT or editor arguments go after `--`.
 - `uak lock run -name=<unique> -- <command...>` holds the lock around any other editor run; `uak lock status` shows the holder and the queue.
 - `uak runs start -name=<unique> -owner=<E# or lead> -- <command...>` starts a run that may take over an hour, detached; `uak runs list [-all]` lists runs, `uak runs wait -name=<name> -timeout=<seconds>` waits for one to end, and `uak runs adopt -pid=<PID> -name= -owner=` records one started some other way.
 - A `.ps1` command given to `uak lock run` or `uak runs start` runs with `-ExecutionPolicy Bypass`, so pass only scripts the project trusts.
