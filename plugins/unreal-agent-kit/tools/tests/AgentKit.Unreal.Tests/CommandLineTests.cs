@@ -101,6 +101,20 @@ public sealed class CommandLineTests
 	}
 
 	[TestMethod]
+	public void EditorTestRunUsesAUniqueEditorFromItsReceipt()
+	{
+		// A unique build environment: UBT names the editor after its target and puts it in the project's Binaries.
+		using Sandbox Box = new(UnrealPlatform.Win64);
+		string Binaries = Path.Combine(Box.ProjectDirectory, "Binaries", "Win64");
+		string Cmd = Sandbox.Write(Path.Combine(Binaries, "GameEditor-Cmd.exe"), "");
+		Sandbox.Write(Path.Combine(Binaries, "GameEditor.target"),
+			"""{ "TargetName": "GameEditor", "TargetType": "Editor", "TargetBuildEnvironment": "Unique", "Launch": "$(ProjectDir)/Binaries/Win64/GameEditor.exe", "LaunchCmd": "$(ProjectDir)/Binaries/Win64/GameEditor-Cmd.exe" }""");
+
+		ProcessInvocation Invocation = EditorTestCommandLine.Build(Box.Layout, Box.ProjectFile, "Game.", gpu: false, "x.log", "r");
+		Assert.AreEqual(Cmd, Invocation.FileName);
+	}
+
+	[TestMethod]
 	[DataRow("Game;Quit")]
 	[DataRow("Game Area")]
 	[DataRow("Game\"")]

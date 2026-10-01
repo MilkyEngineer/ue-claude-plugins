@@ -83,14 +83,30 @@ public sealed class EngineLayout
 	/// Engine/Binaries/Win64/UnrealEditor-Cmd.exe on Windows. Linux and Mac have no -Cmd build; there it is the editor itself
 	/// (run it with -stdout), inside the app bundle on Mac. TODO(Linux, Mac): check on those platforms.
 	/// </summary>
-	public string EditorCommandExecutable => Platform.IsWindows
-		? Path.Combine(BinariesDirectory, Platform.ExecutableName("UnrealEditor-Cmd"))
-		: EditorExecutable;
+	/// <remarks>
+	/// This is the engine's shared editor. A project whose editor target has a unique build environment runs its own:
+	/// use <see cref="EditorLocator.Locate"/> for a project.
+	/// </remarks>
+	public string EditorCommandExecutable => CommandExecutableIn(BinariesDirectory, "UnrealEditor");
 
 	/// <summary>The editor: UnrealEditor.exe, UnrealEditor, or UnrealEditor.app/Contents/MacOS/UnrealEditor on Mac.</summary>
-	public string EditorExecutable => ReferenceEquals(Platform, UnrealPlatform.Mac)
-		? Path.Combine(BinariesDirectory, "UnrealEditor.app", "Contents", "MacOS", "UnrealEditor")
-		: Path.Combine(BinariesDirectory, Platform.ExecutableName("UnrealEditor"));
+	public string EditorExecutable => ExecutableIn(BinariesDirectory, "UnrealEditor");
+
+	/// <summary>
+	/// An application's executable in a binaries folder, named as UBT names it on this platform: &lt;App&gt;.exe, &lt;App&gt;,
+	/// or &lt;App&gt;.app/Contents/MacOS/&lt;App&gt; on Mac.
+	/// </summary>
+	public string ExecutableIn(string binariesDirectory, string appName) => ReferenceEquals(Platform, UnrealPlatform.Mac)
+		? Path.Combine(binariesDirectory, appName + ".app", "Contents", "MacOS", appName)
+		: Path.Combine(binariesDirectory, Platform.ExecutableName(appName));
+
+	/// <summary>
+	/// An application's command-line executable in a binaries folder: &lt;App&gt;-Cmd.exe on Windows; elsewhere there is no
+	/// -Cmd build, so it is <see cref="ExecutableIn"/>.
+	/// </summary>
+	public string CommandExecutableIn(string binariesDirectory, string appName) => Platform.IsWindows
+		? Path.Combine(binariesDirectory, Platform.ExecutableName(appName + "-Cmd"))
+		: ExecutableIn(binariesDirectory, appName);
 
 	/// <summary>Engine/Binaries/ThirdParty/DotNet: one folder per SDK version, each with one folder per <see cref="UnrealPlatform.DotNetRid"/>.</summary>
 	public string DotNetRootDirectory => Path.Combine(EngineDirectory, "Binaries", "ThirdParty", "DotNet");

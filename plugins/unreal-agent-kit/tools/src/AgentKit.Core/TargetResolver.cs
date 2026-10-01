@@ -1,11 +1,13 @@
 // Copyright Alex Stevens (@MilkyEngineer). All Rights Reserved.
 
 using System.Text.RegularExpressions;
-using AgentKit.Core;
 
-namespace AgentKit.Unreal;
+namespace AgentKit.Core;
 
-/// <summary>Finds a project's UBT targets from its Source/*.Target.cs files.</summary>
+/// <summary>
+/// Finds a project's UBT targets from its Source/*.Target.cs files. It reads the files as text, so it sees only what a
+/// constructor sets in plain sight: <see cref="EditorLocator"/> trusts UBT's receipt over it.
+/// </summary>
 public static partial class TargetResolver
 {
 	/// <summary>

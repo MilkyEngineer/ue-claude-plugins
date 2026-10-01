@@ -72,10 +72,11 @@ public sealed class TestCommand : IUakCommand
 		string ProjectDirectory = Path.GetDirectoryName(Project)!;
 		string LogFile = Path.Combine(ProjectDirectory, "Saved", "Logs", Name + ".log");
 		string ReportDirectory = Path.Combine(context.StateDirectory.FullName, "TestReports", Name);
-		ProcessInvocation Invocation = EditorTestCommandLine.Build(Paths, Project, Filter, Gpu, LogFile, ReportDirectory);
+		EditorLocation Editor = EditorLocator.Locate(Paths, Project);
+		ProcessInvocation Invocation = EditorTestCommandLine.Build(Editor.CommandExecutable, Project, Filter, Gpu, LogFile, ReportDirectory);
 		if (!File.Exists(Invocation.FileName))
 		{
-			throw new UakSetupException("editor not found: " + Invocation.FileName);
+			throw new UakSetupException($"editor not found: {Invocation.FileName} (from {Editor.How})");
 		}
 
 		int ExitCode;

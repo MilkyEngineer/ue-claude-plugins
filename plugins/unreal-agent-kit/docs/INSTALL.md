@@ -54,7 +54,7 @@ Below, `<dotnet>` means that program. Running the engine's own `dotnet` is enoug
 ```
 
 - **What it makes.** A self-contained `uak` for this machine's platform. It runs with no installed .NET and no `DOTNET_ROOT`.
-- **Where it goes.** `$UAK_HOME/<kit version>/`, where `UAK_HOME` defaults to `~/.unreal-agent-kit`. The kit version is the `version` in `<kit>/.claude-plugin/plugin.json`. For kit version 0.2.0 that is `~/.unreal-agent-kit/0.2.0/uak.exe` on Windows, and `~/.unreal-agent-kit/0.2.0/uak` on Linux and Mac. The examples below use 0.2.0: use your kit's version.
+- **Where it goes.** `$UAK_HOME/<kit version>/`, where `UAK_HOME` defaults to `~/.unreal-agent-kit`. The kit version is the `version` in `<kit>/.claude-plugin/plugin.json`. For kit version 0.2.1 that is `~/.unreal-agent-kit/0.2.1/uak.exe` on Windows, and `~/.unreal-agent-kit/0.2.1/uak` on Linux and Mac. The examples below use 0.2.1: use your kit's version.
   - The folder is outside the plugin, which Claude Code replaces on every update.
   - Each kit version gets its own folder, so publishing a new version never overwrites a `uak` that is running.
   - Republishing the same version over itself can fail while a detached run is going, because the run's wrapper keeps that folder's files open. Wait until `uak runs list` shows nothing running.
@@ -84,10 +84,10 @@ engine="$HOME/UnrealEngine"   # your engine root
 
 Every Claude Code session and every detached run must find the same `uak`. Either add the publish folder to `PATH` in your user environment, or write its full path in the project's CLAUDE.md.
 
-- **Windows:** add `%USERPROFILE%\.unreal-agent-kit\0.2.0` to your user `Path` (Settings, System, About, Advanced system settings, Environment Variables), or from PowerShell:
+- **Windows:** add `%USERPROFILE%\.unreal-agent-kit\0.2.1` to your user `Path` (Settings, System, About, Advanced system settings, Environment Variables), or from PowerShell:
 
   ```powershell
-  $dir = "$env:USERPROFILE\.unreal-agent-kit\0.2.0"
+  $dir = "$env:USERPROFILE\.unreal-agent-kit\0.2.1"
   $key = Get-Item "HKCU:\Environment"
   # Read the raw value, so entries such as %USERPROFILE%\bin stay unexpanded.
   $path = $key.GetValue("Path", "", [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
@@ -101,9 +101,9 @@ Every Claude Code session and every detached run must find the same `uak`. Eithe
 
   This writes the user `Path` only, keeps its existing entries as they were (including unexpanded ones like `%USERPROFILE%\bin`), and does nothing if the folder is already there. Programs started before the change keep the old `Path`: open a new terminal, and restart Claude Code from it, to pick it up.
 
-  By full path: `& "$env:USERPROFILE\.unreal-agent-kit\0.2.0\uak.exe" env` in PowerShell, or `~/.unreal-agent-kit/0.2.0/uak.exe env` in Git Bash.
-- **Linux:** add `export PATH="$HOME/.unreal-agent-kit/0.2.0:$PATH"` to `~/.profile` (or your shell's profile). By full path: `~/.unreal-agent-kit/0.2.0/uak env`.
-- **Mac:** add the same line to `~/.zprofile`. By full path: `~/.unreal-agent-kit/0.2.0/uak env`.
+  By full path: `& "$env:USERPROFILE\.unreal-agent-kit\0.2.1\uak.exe" env` in PowerShell, or `~/.unreal-agent-kit/0.2.1/uak.exe env` in Git Bash.
+- **Linux:** add `export PATH="$HOME/.unreal-agent-kit/0.2.1:$PATH"` to `~/.profile` (or your shell's profile). By full path: `~/.unreal-agent-kit/0.2.1/uak env`.
+- **Mac:** add the same line to `~/.zprofile`. By full path: `~/.unreal-agent-kit/0.2.1/uak env`.
 
 Restart Claude Code afterwards, so it sees the new `PATH`. When you publish a new kit version, point `PATH` (or CLAUDE.md) at the new version's folder. Then check:
 

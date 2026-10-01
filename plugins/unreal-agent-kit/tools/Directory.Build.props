@@ -19,7 +19,7 @@
 		<Deterministic>true</Deterministic>
 		<InvariantGlobalization>true</InvariantGlobalization>
 		<!-- The kit's version: keep it equal to .claude-plugin/plugin.json. `uak help` shows it, and the publish folder is named after it. -->
-		<Version>0.2.0</Version>
+		<Version>0.2.1</Version>
 		<IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
 		<!--
 			EpicGames.Perforce.FromSource is not in the solution. In a solution build, MSBuild drops a reference's SetConfiguration

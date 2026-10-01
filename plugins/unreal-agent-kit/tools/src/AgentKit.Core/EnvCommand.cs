@@ -112,7 +112,9 @@ public sealed class EnvCommand : IUakCommand
 			yield return new("Bundled dotnet", Engine.DotNetExecutable ?? $"none (nothing under {Engine.DotNetRootDirectory} for {context.Platform.DotNetRid})");
 			yield return new("UnrealBuildTool", Existing(Engine.UnrealBuildToolAssembly));
 			yield return new("Build script", Existing(Engine.BuildScript));
-			yield return new("Editor (cmd)", Existing(Engine.EditorCommandExecutable));
+			EditorLocation Editor = EditorLocator.Locate(Engine, context.ProjectFile?.FullName);
+			yield return new("Editor (cmd)", Existing(Editor.CommandExecutable));
+			yield return new("Editor from", Editor.How);
 		}
 
 		yield return new("State", context.StateDirectory.FullName);

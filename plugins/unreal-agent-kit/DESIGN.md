@@ -209,6 +209,14 @@ Writes stay out of scope for now: no commit, submit, checkout or edit.
   - It prints errors as `file(line): error: CODE: message`. A header error repeated across translation units is reported once, with a count.
 - **`uak build [-target=] [-config=Development] [-platform=host] [-MaxParallelActions=] [-maxerrors=] [-resultfile=]`** runs under the editor lock. On an installed engine it runs UBT directly on the bundled dotnet; on a source build it runs the platform's Build script, which rebuilds UBT when needed. It always adds `-WaitMutex` and `-NoHotReloadFromIDE`.
 - **`uak test -filter=<prefix> [-gpu] [-name=] [-resultfile=]`** runs the editor with `-ExecCmds="Automation RunTests <filter>;Quit"` (`-nullrhi` unless `-gpu`) under the lock.
+  - **Which editor:** the project editor target's build environment decides it (`EditorLocator`, Core).
+    - A shared environment, the default for a modular editor, runs the engine's `UnrealEditor-Cmd`.
+    - A unique one runs `<Target>-Cmd` from the project's `Binaries/<Platform>`. UEBuildTarget.cs names the binaries after the target, and puts them under the project when the `.Target.cs` is there.
+  - **Why the receipt:** the `.Target.cs` text can't tell the two apart. A base class in another file can set the environment, as can `-UniqueBuildEnvironment`, and UBT settles `UniqueIfNeeded` only by compiling the rules.
+    - So uak reads the target receipt UBT writes when it builds the editor, `<Project or Engine>/Binaries/<Platform>/<Target>.target`. Its `TargetBuildEnvironment`, `Launch` and `LaunchCmd` are UBT's own answer.
+    - Without a receipt, uak takes a built `<Target>-Cmd` if there is one, then a `BuildEnvironment = TargetBuildEnvironment.Unique` in the target file itself, then the shared editor.
+    - `uak env` shows the editor and how it was found.
+    - UBT's `-Mode=JsonExport` would also answer, but it compiles the rules and builds the target graph under UBT's mutex: too slow for every run.
   - The log is `<Project>/Saved/Logs/<name>.log`, deleted before the run. The report goes to `<State>/TestReports/<name>`.
   - A run passes only when all of these hold: tests were found; the found count equals the completed count; none failed; at least one passed (all skipped is NOTHING RAN); the queue finished; and the editor exited 0. A non-zero editor exit fails the run even when every test passed (lead's decision: keep it strict, and print the editor's exit code next to the test counts).
 - **Logs:** compile and build write UBT's output to `<State>/Logs/<command>-<UTC time>-<pid>.log`. UBT and Build-script output is decoded with `ProcessRunner.ConsoleEncoding` (the OEM code page on Windows).

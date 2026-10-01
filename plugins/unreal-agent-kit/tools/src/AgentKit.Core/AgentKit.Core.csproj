@@ -7,5 +7,7 @@
 	<!-- Microsoft.Extensions.Logging.Abstractions is the engine's own copy, from build/EpicGames.props. -->
 	<ItemGroup>
 		<InternalsVisibleTo Include="AgentKit.Core.Tests" />
+		<!-- TargetResolver moved here from AgentKit.Unreal; its tests (StripComments) stayed with the Unreal tests. -->
+		<InternalsVisibleTo Include="AgentKit.Unreal.Tests" />
 	</ItemGroup>
 </Project>
