@@ -115,8 +115,16 @@ public sealed class PerforceLocalServerTests
 		StringAssert.Contains(shelvedOnly.Message, "//depot/Source/B.cpp");
 		StringAssert.Contains(server.P4(null, "describe", "-S", "-s", change.ToString(System.Globalization.CultureInfo.InvariantCulture)), "//depot/Source/B.cpp#1 edit");
 		File.WriteAllText(a, "one, changed\n");
+		CollectionAssert.AreEqual(new[] { "//depot/Source/B.cpp" }, (await p4.GetShelvedNotOpenedAsync(change, Token)).ToArray());
 		PerforceShelveResult update = await p4.ShelveAsync(change, ShelveMode.Update, cancellationToken: Token);
 		CollectionAssert.AreEqual(new[] { "//depot/Source/A.cpp" }, update.Replaced.ToArray(), "A's shelved content changed");
+		CollectionAssert.AreEqual(new[] { "//depot/Source/B.cpp" }, update.Kept.ToArray(), "p4 shelve -f keeps B, which is no longer opened");
+		Assert.HasCount(2, update.Shelf);
+
+		// When it was shelved, in the server's time zone: now, give or take the server's clock and the 1 s resolution.
+		DateTimeOffset? shelvedAt = await p4.GetShelveTimeAsync(change, Token);
+		Assert.IsNotNull(shelvedAt);
+		Assert.IsLessThan(120.0, Math.Abs((shelvedAt.Value - DateTimeOffset.Now).TotalSeconds), $"shelveUpdate read as {shelvedAt:o}");
 		PerforceShelveResult replaced = await p4.ShelveAsync(change, ShelveMode.Replace, dropUnopened: true, Token);
 		Assert.HasCount(1, replaced.Shelved);
 		CollectionAssert.AreEqual(new[] { "//depot/Source/B.cpp" }, replaced.Removed.ToArray());
@@ -124,8 +132,9 @@ public sealed class PerforceLocalServerTests
 		Assert.DoesNotContain("B.cpp", server.P4(null, "describe", "-S", "-s", change.ToString(System.Globalization.CultureInfo.InvariantCulture)));
 
 		// The description changes, the opened files stay.
-		Assert.IsEmpty(await p4.UpdateDescriptionAsync(change, "Agent work, renamed", Token));
-		Assert.IsNotNull(await p4.GetShelveTimeAsync(change, Token));
+		PerforceDescriptionUpdate described = await p4.UpdateDescriptionAsync(change, "Agent work, renamed", Token);
+		Assert.IsEmpty(described.Restored);
+		Assert.IsEmpty(described.Released);
 		PerforceChange renamed = await p4.GetOwnPendingChangeAsync(change, Token);
 		Assert.AreEqual("Agent work, renamed", renamed.Description);
 		CollectionAssert.AreEqual(new[] { "//depot/Source/A.cpp" }, renamed.Files.ToArray());

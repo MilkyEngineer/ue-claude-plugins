@@ -176,7 +176,7 @@ public sealed class HordeApi : IHordeApi
 
 	/// <inheritdoc/>
 	public async Task<IReadOnlyList<HordeJobSummary>> FindPreflightsAsync(int change, CancellationToken cancellationToken)
-		=> HordeJobSummary.ParseList(await GetJsonAsync($"api/v1/jobs?preflightChange={change.ToString(CultureInfo.InvariantCulture)}&count=50&filter=id,streamId,templateId,state,createTime,autoSubmit,parameters", cancellationToken).ConfigureAwait(false));
+		=> HordeJobSummary.ParseList(await GetJsonAsync($"api/v1/jobs?preflightChange={change.ToString(CultureInfo.InvariantCulture)}&count=50&filter=id,streamId,templateId,state,createTime,autoSubmit,parameters,additionalArguments,targets", cancellationToken).ConfigureAwait(false));
 
 	/// <inheritdoc/>
 	public async Task<HordeJob?> GetJobAsync(string jobId, string? modifiedAfter, CancellationToken cancellationToken)

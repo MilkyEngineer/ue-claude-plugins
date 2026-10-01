@@ -1,0 +1,9 @@
+... code stat
+... depotFile //Game/main/Source/Game/New.cpp
+... clientFile //user-ws/Source/Game/New.cpp
+... rev none
+... action add
+... change 12346
+... type text
+... user user
+... client user-ws

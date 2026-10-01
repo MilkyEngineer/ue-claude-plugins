@@ -222,6 +222,15 @@ public sealed record HordeJobSummary(string Id, string StreamId, string Template
 	/// <summary>The job's parameter values by Horde's ids (the template's defaults with the request's values over them), when the server sent them.</summary>
 	public IReadOnlyDictionary<string, string>? Parameters { get; init; }
 
+	/// <summary>
+	/// The request's additional command-line arguments (CreateJobRequest.AdditionalArguments), when the server sent them. uak
+	/// never sends any, so a job with some is not uak's request.
+	/// </summary>
+	public IReadOnlyList<string>? AdditionalArguments { get; init; }
+
+	/// <summary>The request's custom targets (CreateJobRequest.Targets), when it had any. uak never sends any.</summary>
+	public IReadOnlyList<string>? Targets { get; init; }
+
 	/// <summary>Whether it is still waiting or running.</summary>
 	public bool IsActive => !State.Equals("Complete", StringComparison.OrdinalIgnoreCase);
 
@@ -237,8 +246,14 @@ public sealed record HordeJobSummary(string Id, string StreamId, string Template
 				Parameters = Json.Get(job, "parameters") is JsonObject parameters
 					? parameters.Where(pair => pair.Value is JsonValue).ToDictionary(pair => pair.Key, pair => pair.Value!.ToString(), StringComparer.OrdinalIgnoreCase)
 					: null,
+				AdditionalArguments = Strings(job, "additionalArguments"),
+				Targets = Strings(job, "targets"),
 			}).ToList()
 			: [];
+
+	/// <summary>A JSON array of strings, or null when it is missing; an entry that isn't a string still counts (as its JSON text).</summary>
+	static List<string>? Strings(JsonObject job, string name)
+		=> Json.Get(job, name) is JsonArray values ? values.Select(value => value is JsonValue text ? text.ToString() : value?.ToJsonString() ?? "null").ToList() : null;
 }
 
 /// <summary>Reads stream lists.</summary>

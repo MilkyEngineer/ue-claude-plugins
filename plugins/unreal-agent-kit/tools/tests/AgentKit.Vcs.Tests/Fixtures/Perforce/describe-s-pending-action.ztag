@@ -1,0 +1,20 @@
+... code stat
+... change 12346
+... user user
+... client user-ws
+... time 1790887930
+... desc Fix the spawn order.
+... status pending
+... changeType public
+... shelved
+... depotFile0 //Game/main/Source/Game/New.cpp
+... action0 add
+... type0 text
+... rev0 1
+... fileSize0 12
+... depotFile1 //Game/main/Config/Removed.ini
+... action1 edit
+... type1 text
+... rev1 1
+... fileSize1 12
+... digest1 C193497A1A06B2C72230E6146FF47080

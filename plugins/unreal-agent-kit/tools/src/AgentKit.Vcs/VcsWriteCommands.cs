@@ -28,15 +28,22 @@ public abstract class PerforceCommandBase : IUakCommand
 	/// <summary>Where results go: standard output unless a test replaces it. Errors go to the context's logger.</summary>
 	internal TextWriter Output { get; set; } = Console.Out;
 
+	/// <summary>Where notices go under -json (such as a changelist uak created), so they are seen without breaking the JSON.</summary>
+	internal TextWriter ErrorOutput { get; set; } = Console.Error;
+
 	/// <summary>Finds the workspace; tests replace it to hand in a fake Perforce connection.</summary>
 	internal Func<UakContext, string?, CancellationToken, Task<VcsDetection>>? Detect { get; set; }
 
 	/// <summary>Whether -json was given.</summary>
 	internal bool Json { get; private set; }
 
+	/// <summary>The context of the current run.</summary>
+	internal UakContext Context { get; private set; } = null!;
+
 	/// <inheritdoc/>
 	public async Task<int> RunAsync(UakContext context, IReadOnlyList<string> arguments, CancellationToken cancellationToken)
 	{
+		Context = context;
 		UakArguments parsed = new(arguments);
 		string? kind = parsed.GetString("vcs");
 		Json = parsed.GetFlag("json");
@@ -156,18 +163,27 @@ public sealed class VcsShelveCommand : PerforceCommandBase
 		"uak vcs shelve -c=<changelist> [-replace [-drop-unopened]] [-json]\n" +
 		"uak vcs shelve <file>... [-description=<text>] [-force] [-json]\n" +
 		"  -c=           shelve every file opened in this pending changelist of this client (p4 shelve -f: files already\n" +
-		"                shelved are overwritten, other shelved files stay). Files whose shelved content changed are listed.\n" +
+		"                shelved are overwritten, other shelved files stay). Files whose shelved content or action changed\n" +
+		"                are listed, and so are shelved files kept although they are no longer opened (a submit of the shelf\n" +
+		"                would include them). Refused while an auto-submit Horde preflight of the changelist runs, when a\n" +
+		"                Horde server is configured: Horde submits the changelist's current shelf when the preflight\n" +
+		"                succeeds. When Horde can't be asked, uak warns and shelves.\n" +
 		"  -replace      p4 shelve -r instead: the shelf becomes exactly the opened files. CAREFUL: shelved files that are not\n" +
 		"                opened in the changelist are DELETED from the shelf, and a shelf may be the only copy of that work.\n" +
 		"                So uak refuses when the shelf holds such files, and lists them, unless -drop-unopened is given.\n" +
-		"                Every file the shelf loses is printed.\n" +
+		"                Every file the shelf loses is printed; a file that left the changelist while uak shelved (so p4\n" +
+		"                deleted it from the shelf unasked) fails the command (exit 1), naming it.\n" +
 		"  <file>...     files already opened in this client: creates a new changelist, moves them into it (p4 reopen), shelves\n" +
 		"                it, and prints its number, with each file's original changelist. Fails before changing anything when\n" +
 		"                a file is not opened, when a file is in a numbered changelist (it would leave that changelist; -force\n" +
-		"                moves it anyway), or when only one half of a move is named.\n" +
+		"                moves it anyway), or when only one half of a move is named. A failure after the changelist was created\n" +
+		"                names it and the files it holds; under -json \"Created change <N>.\" goes to standard error at once.\n" +
 		"  -description= the new changelist's description (default: \"" + DefaultDescription + "\").\n" +
 		"  -json         print JSON instead of text.\n" +
 		"  The files stay opened in the workspace: nothing is reverted or submitted. Perforce only.";
+
+	/// <summary>The guards checked before an existing changelist's shelf changes: every <see cref="IPerforceShelveGuard"/> the host loaded; tests replace them.</summary>
+	internal Func<IReadOnlyList<IPerforceShelveGuard>> Guards { get; set; } = () => UakCommandCatalog.Current?.CreateAll<IPerforceShelveGuard>() ?? [];
 
 	internal override Func<PerforceVersionControl, CancellationToken, Task<int>> Parse(UakArguments arguments)
 	{
@@ -229,22 +245,75 @@ public sealed class VcsShelveCommand : PerforceCommandBase
 		Dictionary<string, string?> originalChanges = opened.Values.ToDictionary(file => file.DepotFile ?? file.Path, file => file.Change, StringComparer.Ordinal);
 
 		int change = await p4.CreateChangeAsync(description, cancellationToken).ConfigureAwait(false);
-		if (!Json)
+		// At once, and on standard error under -json, so the new changelist is known whatever happens next (a failure, Ctrl+C).
+		TextWriter notices = Json ? ErrorOutput : Output;
+		await notices.WriteLineAsync($"Created change {change}.").ConfigureAwait(false);
+		await notices.FlushAsync(cancellationToken).ConfigureAwait(false);
+		try
 		{
-			await Output.WriteLineAsync($"Created change {change}.").ConfigureAwait(false);
+			IReadOnlyList<PerforceFileResult> moved = await p4.ReopenAsync(files, change, allowDirectories: false, cancellationToken).ConfigureAwait(false);
+			List<PerforceFileResult> failed = moved.Where(result => !result.Opened).ToList();
+			if (failed.Count > 0)
+			{
+				throw new VcsException("These files could not be moved into the new changelist, so nothing was shelved: " +
+					string.Join("; ", failed.Select(result => $"{result.Path}: {result.Message}")) + ".");
+			}
+			return await ShelveChangeAsync(p4, change, ShelveMode.Update, dropUnopened: false, created: true, originalChanges, cancellationToken).ConfigureAwait(false);
 		}
-		IReadOnlyList<PerforceFileResult> moved = await p4.ReopenAsync(files, change, allowDirectories: false, cancellationToken).ConfigureAwait(false);
-		List<PerforceFileResult> failed = moved.Where(result => !result.Opened).ToList();
-		if (failed.Count > 0)
+		catch (VcsException exception)
 		{
-			throw new VcsException($"Change {change} was created, but these files could not be moved into it, so nothing was shelved: " +
-				string.Join("; ", failed.Select(result => $"{result.Path}: {result.Message}")) + $". The files moved so far stay in change {change}.");
+			throw new VcsException($"{exception.Message} Change {change} was created and holds the files: {await DescribeHoldingsAsync(p4, change, cancellationToken).ConfigureAwait(false)}.", exception);
 		}
-		return await ShelveChangeAsync(p4, change, ShelveMode.Update, dropUnopened: false, created: true, originalChanges, cancellationToken).ConfigureAwait(false);
+	}
+
+	/// <summary>The files a changelist holds, for an error message; says so when they can't be read.</summary>
+	static async Task<string> DescribeHoldingsAsync(PerforceVersionControl p4, int change, CancellationToken cancellationToken)
+	{
+		try
+		{
+			PerforceChange current = await p4.GetOwnPendingChangeAsync(change, cancellationToken).ConfigureAwait(false);
+			return current.Files.Count == 0 ? "none" : string.Join(", ", current.Files);
+		}
+		catch (VcsException exception)
+		{
+			return $"unknown (uak could not read change {change}: {exception.Message})";
+		}
+	}
+
+	/// <summary>
+	/// Asks every <see cref="IPerforceShelveGuard"/> whether an existing changelist's shelf may change now. Throws when one
+	/// refuses (nothing is shelved); a guard that can't check is a warning.
+	/// </summary>
+	async Task CheckGuardsAsync(int change, CancellationToken cancellationToken)
+	{
+		foreach (IPerforceShelveGuard guard in Guards())
+		{
+			PerforceShelveGuardResult result;
+			try
+			{
+				result = await guard.CheckAsync(Context, change, cancellationToken).ConfigureAwait(false);
+			}
+			catch (Exception exception) when (exception is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
+			{
+				result = new PerforceShelveGuardResult(PerforceShelveGuardVerdict.Unknown, $"{guard.GetType().Name} could not check change {change}: {exception.Message}");
+			}
+			if (result.Verdict == PerforceShelveGuardVerdict.Refuse)
+			{
+				throw new VcsException(result.Message ?? $"{guard.GetType().Name} refused to let change {change} be shelved again. Nothing was shelved.");
+			}
+			if (result.Verdict == PerforceShelveGuardVerdict.Unknown)
+			{
+				Context.Logger.LogWarning("{Message}", result.Message);
+			}
+		}
 	}
 
 	async Task<int> ShelveChangeAsync(PerforceVersionControl p4, int change, ShelveMode mode, bool dropUnopened, bool created, IReadOnlyDictionary<string, string?>? originalChanges, CancellationToken cancellationToken)
 	{
+		if (!created)
+		{
+			await CheckGuardsAsync(change, cancellationToken).ConfigureAwait(false);
+		}
 		PerforceShelveResult result = await p4.ShelveAsync(change, mode, dropUnopened, cancellationToken).ConfigureAwait(false);
 		string? Original(string depotFile) => originalChanges is not null && originalChanges.TryGetValue(depotFile, out string? original) ? original : null;
 		if (Json)
@@ -257,6 +326,7 @@ public sealed class VcsShelveCommand : PerforceCommandBase
 				files = result.Shelved.Select(file => new { depotFile = file.DepotFile, action = file.Action, originalChange = Original(file.DepotFile) }),
 				replaced = result.Replaced,
 				removed = result.Removed,
+				kept = result.Kept,
 			}).ConfigureAwait(false);
 			return UakExitCodes.Success;
 		}
@@ -267,11 +337,15 @@ public sealed class VcsShelveCommand : PerforceCommandBase
 		}
 		foreach (string file in result.Replaced)
 		{
-			await Output.WriteLineAsync($"replaced on the shelf (its shelved content changed): {file}").ConfigureAwait(false);
+			await Output.WriteLineAsync($"replaced on the shelf (its shelved content or action changed): {file}").ConfigureAwait(false);
 		}
 		foreach (string file in result.Removed)
 		{
 			await Output.WriteLineAsync($"REMOVED from the shelf: {file}").ConfigureAwait(false);
+		}
+		foreach (string file in result.Kept)
+		{
+			await Output.WriteLineAsync($"kept on the shelf, but no longer opened in change {change} (a submit of the shelf would include it): {file}").ConfigureAwait(false);
 		}
 		string how = mode == ShelveMode.Replace ? "p4 shelve -r: the shelf is now exactly these files" : "p4 shelve -f";
 		await Output.WriteLineAsync($"Shelved {result.Shelved.Count} file(s) in change {change} ({how})" + (result.Removed.Count == 0 ? "." : $"; {result.Removed.Count} file(s) removed from the shelf.")).ConfigureAwait(false);
@@ -406,8 +480,10 @@ public sealed class VcsChangeDescribeCommand : PerforceCommandBase
 	/// <inheritdoc/>
 	public override string Usage =>
 		"uak vcs change describe -c=<changelist> -description=<text> [-json]\n" +
-		"  Only a pending changelist of this client. Its files, jobs and other fields stay as they are. A file reopened into\n" +
-		"  the changelist while this runs is moved out by p4; uak moves it back and lists it. Perforce only.";
+		"  Only a pending changelist of this client. Its files, jobs and other fields stay as they are. p4 makes the changelist\n" +
+		"  hold the files it held when uak read it: a file reopened into it while this runs is moved out to the default\n" +
+		"  changelist, and one moved from it to the default changelist comes back in. uak moves each back where it was and\n" +
+		"  lists it; when it can't tell exactly which files p4 moved, it moves none and fails, naming them. Perforce only.";
 
 	internal override Func<PerforceVersionControl, CancellationToken, Task<int>> Parse(UakArguments arguments)
 	{
@@ -416,17 +492,21 @@ public sealed class VcsChangeDescribeCommand : PerforceCommandBase
 		arguments.ThrowIfMorePositionalThan(0);
 		return async (p4, token) =>
 		{
-			IReadOnlyList<string> restored = await p4.UpdateDescriptionAsync(change, description, token).ConfigureAwait(false);
+			PerforceDescriptionUpdate update = await p4.UpdateDescriptionAsync(change, description, token).ConfigureAwait(false);
 			if (Json)
 			{
-				await WriteJsonAsync(new { change, description, restored }).ConfigureAwait(false);
+				await WriteJsonAsync(new { change, description, restored = update.Restored, released = update.Released }).ConfigureAwait(false);
 			}
 			else
 			{
 				await Output.WriteLineAsync($"Change {change}: description updated.").ConfigureAwait(false);
-				foreach (string file in restored)
+				foreach (string file in update.Restored)
 				{
-					await Output.WriteLineAsync($"  moved back into change {change} (p4 had moved it out while the description changed): {file}").ConfigureAwait(false);
+					await Output.WriteLineAsync($"  moved back into change {change} (p4 had moved it out to the default changelist while the description changed): {file}").ConfigureAwait(false);
+				}
+				foreach (string file in update.Released)
+				{
+					await Output.WriteLineAsync($"  moved back to the default changelist (p4 had pulled it into change {change} while the description changed): {file}").ConfigureAwait(false);
 				}
 			}
 			return UakExitCodes.Success;

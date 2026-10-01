@@ -43,9 +43,28 @@ public sealed record PerforceShelfFile(string DepotFile, string Action, string? 
 
 /// <summary>What a shelve did.</summary>
 /// <param name="Shelved">The files p4 shelved.</param>
-/// <param name="Replaced">Depot paths of files that were already shelved and now hold different content.</param>
+/// <param name="Replaced">
+/// Depot paths of files that were already shelved and changed on the shelf: their content (digest) or their action changed,
+/// or a digest appeared or disappeared.
+/// </param>
 /// <param name="Removed">Depot paths of files the shelf held before and no longer holds (only with <see cref="ShelveMode.Replace"/>).</param>
-public sealed record PerforceShelveResult(IReadOnlyList<PerforceShelvedFile> Shelved, IReadOnlyList<string> Replaced, IReadOnlyList<string> Removed);
+/// <param name="Kept">
+/// Depot paths of files the shelf still holds although p4 did not shelve them this time: shelved earlier and no longer opened
+/// in the changelist. <see cref="ShelveMode.Update"/> (p4 shelve -f) keeps them, so a submit of the shelf would include them.
+/// </param>
+public sealed record PerforceShelveResult(IReadOnlyList<PerforceShelvedFile> Shelved, IReadOnlyList<string> Replaced, IReadOnlyList<string> Removed, IReadOnlyList<string> Kept)
+{
+	/// <summary>The shelf after shelving, as <c>p4 describe -S -s</c> read it.</summary>
+	public IReadOnlyList<PerforceShelfFile> Shelf { get; init; } = [];
+}
+
+/// <summary>
+/// What <see cref="PerforceVersionControl.UpdateDescriptionAsync"/> put back after p4 moved files while the description was
+/// written (both empty when nothing moved).
+/// </summary>
+/// <param name="Restored">Files p4 moved out to the default changelist (reopened into the changelist meanwhile) that uak moved back in.</param>
+/// <param name="Released">Files p4 pulled in from the default changelist (moved out of the changelist meanwhile) that uak moved back out.</param>
+public sealed record PerforceDescriptionUpdate(IReadOnlyList<string> Restored, IReadOnlyList<string> Released);
 
 /// <summary>How <c>uak vcs shelve -c=</c> updates a changelist's shelf.</summary>
 public enum ShelveMode
@@ -90,15 +109,20 @@ public sealed partial class PerforceVersionControl
 	/// <summary>
 	/// Replaces a pending changelist's description. The spec goes back exactly as <c>p4 change -o</c> gave it (its files, jobs
 	/// and every other field), with only the description changed: a spec without its Files field would move its files out.
-	/// A file reopened into the changelist between the read and the write is not in that spec, so p4 moves it out to the
-	/// default changelist ("removing N file(s)"); uak finds those files (opened in the default changelist after the write but
-	/// not before), reopens them back into the changelist, and returns their depot paths. Empty when nothing was moved.
+	/// The spec's Files field is what p4 makes the changelist hold, so files that changed changelist between the read and the
+	/// write are moved: a file reopened into the changelist meanwhile goes out to the default changelist ("removing N
+	/// file(s)"), and a file moved from it to the default changelist meanwhile comes back in ("adding N file(s)"; p4 refuses
+	/// the whole spec when such a file went to another numbered changelist). uak lists the changelist's files just before the
+	/// write and after it, puts back each file p4 moved (only files that were in the changelist, or in the spec), and checks
+	/// that their number is the number p4 reported. When it isn't, uak can't tell which files p4 moved, so it moves nothing and
+	/// fails, naming what it found.
 	/// </summary>
-	public Task<IReadOnlyList<string>> UpdateDescriptionAsync(int number, string description, CancellationToken cancellationToken = default) => GuardAsync("change -i", async () =>
+	public Task<PerforceDescriptionUpdate> UpdateDescriptionAsync(int number, string description, CancellationToken cancellationToken = default) => GuardAsync("change -i", async () =>
 	{
 		CheckDescription(description);
-		HashSet<string> defaultBefore = await GetOpenedInChangeAsync(DefaultChangeName, cancellationToken).ConfigureAwait(false);
 		PerforceRawRecord spec = await GetOwnPendingChangeRecordAsync(number, cancellationToken).ConfigureAwait(false);
+		HashSet<string> inSpec = new(spec.GetList("Files"), StringComparer.Ordinal);
+		HashSet<string> before = await GetOpenedInChangeAsync(Number(number), cancellationToken).ConfigureAwait(false);
 		List<PerforceRawRecord> responses = await PerforceRawRecord.RunAsync(_connection, "change", ["-i"], null, spec.SerializeWith("Description", description), cancellationToken).ConfigureAwait(false);
 		ThrowOnErrors(responses, "change -i", warningsFail: true);
 		string? updated = responses.Where(response => response.Code == "info").Select(response => response.Message).FirstOrDefault(message => message.StartsWith("Change ", StringComparison.Ordinal));
@@ -106,28 +130,58 @@ public sealed partial class PerforceVersionControl
 		{
 			throw new VcsException($"p4 change -i did not update change {number} as expected: {updated ?? "no answer"}");
 		}
-		if (!updated.Contains("removing", StringComparison.Ordinal))
+		int removing = CountIn(updated, "removing");
+		int adding = CountIn(updated, "adding");
+		if (removing == 0 && adding == 0)
 		{
-			return (IReadOnlyList<string>)[];
+			return new PerforceDescriptionUpdate([], []);
 		}
 
-		// A concurrent reopen put files into the changelist after uak read it, and p4 moved them to the default changelist.
-		HashSet<string> defaultAfter = await GetOpenedInChangeAsync(DefaultChangeName, cancellationToken).ConfigureAwait(false);
-		List<string> dropped = defaultAfter.Where(file => !defaultBefore.Contains(file)).Order(StringComparer.Ordinal).ToList();
-		if (dropped.Count == 0)
+		// The spec moved files: out to the default changelist (reopened into this one after uak read it), or in from it (moved
+		// out after uak read it). Only files that were in the changelist just before the write, or in the spec, are candidates,
+		// so unrelated files that reached the default changelist meanwhile are never touched.
+		HashSet<string> after = await GetOpenedInChangeAsync(Number(number), cancellationToken).ConfigureAwait(false);
+		HashSet<string> inDefault = await GetOpenedInChangeAsync(DefaultChangeName, cancellationToken).ConfigureAwait(false);
+		List<string> removed = before.Where(file => !after.Contains(file) && !inSpec.Contains(file) && inDefault.Contains(file)).Order(StringComparer.Ordinal).ToList();
+		List<string> added = after.Where(file => !before.Contains(file) && inSpec.Contains(file)).Order(StringComparer.Ordinal).ToList();
+		if (removed.Count != removing || added.Count != adding)
 		{
-			throw new VcsException($"p4 moved files out of change {number} ({updated}), and uak could not tell which: look for them in the default changelist and reopen them into {number}.");
+			throw new VcsException($"p4 moved files while change {number}'s description was updated ({updated}), and uak could not tell exactly which, so it moved none of them back. " +
+				$"Files that left change {number} for the default changelist: {List(removed)}. Files that came into it from the default changelist: {List(added)}. " +
+				$"Check change {number} and the default changelist, and reopen the files where they belong.");
 		}
-		List<PerforceRawRecord> reopened = await PerforceRawRecord.RunAsync(_connection, "reopen", ["-c" + Number(number)], dropped, null, cancellationToken).ConfigureAwait(false);
+		if (removed.Count > 0)
+		{
+			await MoveBackAsync(removed, Number(number), $"p4 moved files out of change {number} while its description was updated, and these could not be reopened back into it (they are in the default changelist)", cancellationToken).ConfigureAwait(false);
+		}
+		if (added.Count > 0)
+		{
+			await MoveBackAsync(added, DefaultChangeName, $"p4 moved files from the default changelist into change {number} while its description was updated, and these could not be reopened back into the default changelist (they are in change {number})", cancellationToken).ConfigureAwait(false);
+		}
+		return new PerforceDescriptionUpdate(removed, added);
+	});
+
+	/// <summary>The count p4 reports before "file(s)" after a word ("removing 2 file(s)"); 0 when the word isn't there.</summary>
+	static int CountIn(string message, string word)
+	{
+		Match match = Regex.Match(message, "\\b" + word + " (\\d+) file", RegexOptions.CultureInvariant);
+		return match.Success && int.TryParse(match.Groups[1].Value, NumberStyles.None, CultureInfo.InvariantCulture, out int count) ? count : 0;
+	}
+
+	static string List(IReadOnlyCollection<string> files) => files.Count == 0 ? "none found" : string.Join(", ", files);
+
+	/// <summary>Reopens depot files into a changelist ("default" or a number) and checks they arrived; throws, naming those that didn't.</summary>
+	async Task MoveBackAsync(List<string> depotFiles, string change, string failure, CancellationToken cancellationToken)
+	{
+		List<PerforceRawRecord> reopened = await PerforceRawRecord.RunAsync(_connection, "reopen", ["-c" + change], depotFiles, null, cancellationToken).ConfigureAwait(false);
 		ThrowOnErrors(reopened, "reopen", warningsFail: false);
-		HashSet<string> nowInChange = await GetOpenedInChangeAsync(Number(number), cancellationToken).ConfigureAwait(false);
-		List<string> stranded = dropped.Where(file => !nowInChange.Contains(file)).ToList();
+		HashSet<string> now = await GetOpenedInChangeAsync(change, cancellationToken).ConfigureAwait(false);
+		List<string> stranded = depotFiles.Where(file => !now.Contains(file)).ToList();
 		if (stranded.Count > 0)
 		{
-			throw new VcsException($"p4 moved files out of change {number} while its description was updated, and these could not be reopened back into it (they are in the default changelist): {string.Join(", ", stranded)}");
+			throw new VcsException($"{failure}: {string.Join(", ", stranded)}");
 		}
-		return dropped;
-	});
+	}
 
 	/// <summary>The depot paths of the files this client has opened in a changelist ("default" or a number), from <c>p4 opened -c</c>.</summary>
 	async Task<HashSet<string>> GetOpenedInChangeAsync(string change, CancellationToken cancellationToken)
@@ -138,11 +192,13 @@ public sealed partial class PerforceVersionControl
 	}
 
 	/// <summary>
-	/// Shelves every file opened in a pending changelist of this client, and returns what p4 shelved, which shelved files now
-	/// hold different content, and which the shelf lost. Refuses a changelist with nothing opened (with
-	/// <see cref="ShelveMode.Replace"/> that would empty the shelf). With <see cref="ShelveMode.Replace"/>, a shelf that holds
-	/// files not opened in the changelist (shelved-only work, which -r deletes) is refused unless <paramref name="dropUnopened"/>.
-	/// Never reverts.
+	/// Shelves every file opened in a pending changelist of this client, and returns what p4 shelved, which shelved files
+	/// changed on the shelf, which the shelf lost, and which it kept although they are no longer opened. Refuses a changelist
+	/// with nothing opened (with <see cref="ShelveMode.Replace"/> that would empty the shelf). With
+	/// <see cref="ShelveMode.Replace"/>, a shelf that holds files not opened in the changelist (shelved-only work, which -r
+	/// deletes) is refused unless <paramref name="dropUnopened"/>; and when the shelf lost any other file (one that left the
+	/// changelist between uak's check and p4's shelve), the shelve has happened but this throws, naming it. When the shelf
+	/// can't be read afterwards, this throws too, naming the files -r may have deleted. Never reverts.
 	/// </summary>
 	public Task<PerforceShelveResult> ShelveAsync(int number, ShelveMode mode, bool dropUnopened = false, CancellationToken cancellationToken = default) => GuardAsync("shelve", async () =>
 	{
@@ -152,15 +208,12 @@ public sealed partial class PerforceVersionControl
 			throw new VcsException($"Change {number} has no opened files to shelve.");
 		}
 		IReadOnlyList<PerforceShelfFile> before = await GetShelfCoreAsync(number, cancellationToken).ConfigureAwait(false);
-		if (mode == ShelveMode.Replace && !dropUnopened)
+		HashSet<string> opened = new(change.Files, StringComparer.Ordinal);
+		List<string> shelvedOnly = before.Select(file => file.DepotFile).Where(file => !opened.Contains(file)).ToList();
+		if (mode == ShelveMode.Replace && !dropUnopened && shelvedOnly.Count > 0)
 		{
-			HashSet<string> opened = new(change.Files, StringComparer.Ordinal);
-			List<string> shelvedOnly = before.Select(file => file.DepotFile).Where(file => !opened.Contains(file)).ToList();
-			if (shelvedOnly.Count > 0)
-			{
-				throw new VcsException($"Change {number}'s shelf holds files that are not opened in it, and -replace (p4 shelve -r) would delete them from the shelf: " +
-					string.Join(", ", shelvedOnly) + ". Nothing was shelved. Shelve without -replace to keep them, or pass -drop-unopened to delete them from the shelf.");
-			}
+			throw new VcsException($"Change {number}'s shelf holds files that are not opened in it, and -replace (p4 shelve -r) would delete them from the shelf: " +
+				string.Join(", ", shelvedOnly) + ". Nothing was shelved. Shelve without -replace to keep them, or pass -drop-unopened to delete them from the shelf.");
 		}
 		string flag = mode == ShelveMode.Replace ? "-r" : "-f";
 		IPerforceConnection connection = _connection is P4ProcessConnection process && process.Timeout < ShelveTimeout ? process.WithTimeout(ShelveTimeout) : _connection;
@@ -172,12 +225,69 @@ public sealed partial class PerforceVersionControl
 		{
 			throw new VcsException($"p4 shelve reported no shelved files for change {number}.");
 		}
-		IReadOnlyList<PerforceShelfFile> after = await GetShelfCoreAsync(number, cancellationToken).ConfigureAwait(false);
+
+		IReadOnlyList<PerforceShelfFile> after;
+		try
+		{
+			after = await GetShelfCoreAsync(number, cancellationToken).ConfigureAwait(false);
+		}
+		catch (Exception exception) when (exception is VcsException or PerforceException or TimeoutException or System.ComponentModel.Win32Exception)
+		{
+			string deleted = mode != ShelveMode.Replace ? "" :
+				$" p4 shelve -r deletes shelved files that are not opened in the changelist; when uak checked, these were shelved and not opened: {(shelvedOnly.Count == 0 ? "none" : string.Join(", ", shelvedOnly))} (a file that left the changelist since then is deleted too).";
+			throw new VcsException($"p4 shelve {flag} shelved {shelved.Count} file(s) in change {number}, but uak could not read the shelf afterwards ({VcsPaths.OneLine(exception.Message)}), so it can't tell which shelved files changed or were removed.{deleted} Check the shelf with p4 describe -S {number}.", exception);
+		}
 		Dictionary<string, PerforceShelfFile> now = after.ToDictionary(file => file.DepotFile, StringComparer.Ordinal);
 		List<string> removed = before.Where(file => !now.ContainsKey(file.DepotFile)).Select(file => file.DepotFile).ToList();
-		List<string> replaced = before.Where(file => now.TryGetValue(file.DepotFile, out PerforceShelfFile? current) && file.Digest is not null && current.Digest is not null && !file.Digest.Equals(current.Digest, StringComparison.OrdinalIgnoreCase))
+		List<string> replaced = before.Where(file => now.TryGetValue(file.DepotFile, out PerforceShelfFile? current) && !SameShelvedFile(file, current))
 			.Select(file => file.DepotFile).ToList();
-		return new PerforceShelveResult(shelved, replaced, removed);
+		HashSet<string> shelvedNow = new(shelved.Select(file => file.DepotFile), StringComparer.Ordinal);
+		List<string> kept = after.Select(file => file.DepotFile).Where(file => !shelvedNow.Contains(file)).ToList();
+
+		// -r deletes every shelved file that isn't opened: only those uak saw and was told to drop may go. A file that left the
+		// changelist after uak read it was deleted from the shelf without anyone asking.
+		HashSet<string> allowed = mode == ShelveMode.Replace && dropUnopened ? new(shelvedOnly, StringComparer.Ordinal) : new(StringComparer.Ordinal);
+		List<string> unexpected = removed.Where(file => !allowed.Contains(file)).ToList();
+		if (unexpected.Count > 0)
+		{
+			throw new VcsException($"p4 shelve {flag} shelved {shelved.Count} file(s) in change {number}, but it also deleted from the shelf files that uak was not told to drop: " +
+				string.Join(", ", unexpected) + $". They left change {number} while uak was shelving (they may still be opened in another changelist). Their shelved content is gone from this shelf: shelve them again where they belong.");
+		}
+		return new PerforceShelveResult(shelved, replaced, removed, kept) { Shelf = after };
+	});
+
+	/// <summary>
+	/// Whether a file holds the same thing on two reads of a shelf: the same action and the same digest (a digest that appears
+	/// or disappears is a change).
+	/// </summary>
+	public static bool SameShelvedFile(PerforceShelfFile a, PerforceShelfFile b)
+		=> a.DepotFile.Equals(b.DepotFile, StringComparison.Ordinal) && a.Action.Equals(b.Action, StringComparison.OrdinalIgnoreCase) && string.Equals(a.Digest, b.Digest, StringComparison.OrdinalIgnoreCase);
+
+	/// <summary>Whether two reads of a shelf hold the same files, each with the same action and digest (see <see cref="SameShelvedFile"/>).</summary>
+	public static bool SameShelf(IReadOnlyCollection<PerforceShelfFile> a, IReadOnlyCollection<PerforceShelfFile> b)
+	{
+		if (a.Count != b.Count)
+		{
+			return false;
+		}
+		Dictionary<string, PerforceShelfFile> byPath = new(StringComparer.Ordinal);
+		foreach (PerforceShelfFile file in a)
+		{
+			byPath[file.DepotFile] = file;
+		}
+		return byPath.Count == a.Count && b.All(file => byPath.TryGetValue(file.DepotFile, out PerforceShelfFile? other) && SameShelvedFile(file, other));
+	}
+
+	/// <summary>
+	/// The files on a pending changelist's shelf that are not opened in it (a later <c>p4 shelve -f</c> keeps them, and a submit
+	/// of the shelf would include them). This client's changelists only.
+	/// </summary>
+	public Task<IReadOnlyList<string>> GetShelvedNotOpenedAsync(int number, CancellationToken cancellationToken = default) => GuardAsync("describe", async () =>
+	{
+		PerforceChange change = ToChange(await GetOwnPendingChangeRecordAsync(number, cancellationToken).ConfigureAwait(false));
+		HashSet<string> opened = new(change.Files, StringComparer.Ordinal);
+		IReadOnlyList<PerforceShelfFile> shelf = await GetShelfCoreAsync(number, cancellationToken).ConfigureAwait(false);
+		return (IReadOnlyList<string>)shelf.Select(file => file.DepotFile).Where(file => !opened.Contains(file)).ToList();
 	});
 
 	/// <summary>The files on a changelist's shelf (<c>p4 describe -S -s</c>); empty when nothing is shelved.</summary>
@@ -203,7 +313,9 @@ public sealed partial class PerforceVersionControl
 
 	/// <summary>
 	/// When a changelist's files were last shelved (<c>p4 change -o</c>'s shelveUpdate, in the server's time zone from
-	/// <c>p4 info</c>'s tzoffset), or null when it has no shelf. Any client's changelist: this only reads.
+	/// <c>p4 info</c>'s tzoffset), or null when it has no shelf or the server's time zone isn't known (no tzoffset). Any
+	/// client's changelist: this only reads. The time has 1 s resolution, and tzoffset is the server's offset now, so a
+	/// daylight-saving change since the shelve moves it by the change; callers compare it with a margin, never alone.
 	/// </summary>
 	public Task<DateTimeOffset?> GetShelveTimeAsync(int number, CancellationToken cancellationToken = default) => GuardAsync("change -o", async () =>
 	{
@@ -215,8 +327,13 @@ public sealed partial class PerforceVersionControl
 			return (DateTimeOffset?)null;
 		}
 		PerforceRawRecord info = await GetServerInfoAsync(cancellationToken).ConfigureAwait(false);
-		int offset = int.TryParse(info.Get("tzoffset"), NumberStyles.Integer, CultureInfo.InvariantCulture, out int seconds) ? seconds : 0;
-		return new DateTimeOffset(local, TimeSpan.FromSeconds(offset));
+		// Without the server's offset the time can't be placed: reading it as UTC could make it too early, which would make an
+		// older preflight look newer than the shelf.
+		if (!int.TryParse(info.Get("tzoffset"), NumberStyles.Integer, CultureInfo.InvariantCulture, out int seconds) || Math.Abs(seconds) > 14 * 3600 || seconds % 60 != 0)
+		{
+			return null;
+		}
+		return new DateTimeOffset(local, TimeSpan.FromSeconds(seconds));
 	});
 
 	PerforceRawRecord? _serverInfo;

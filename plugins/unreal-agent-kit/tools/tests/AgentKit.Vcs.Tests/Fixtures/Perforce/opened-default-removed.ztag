@@ -1,0 +1,10 @@
+... code stat
+... depotFile //Game/main/Config/Removed.ini
+... clientFile //user-ws/Config/Removed.ini
+... rev 1
+... haveRev 1
+... action delete
+... change default
+... type text
+... user user
+... client user-ws

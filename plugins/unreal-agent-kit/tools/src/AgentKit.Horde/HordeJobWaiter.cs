@@ -69,6 +69,27 @@ public sealed class HordeJobWaiter
 	public async Task<(HordeJob? Job, bool TimedOut)> WaitAsync(IHordeApi api, string jobId, TimeSpan? timeout, TextWriter output, CancellationToken cancellationToken)
 	{
 		DateTime? deadline = timeout is null ? null : UtcNow() + timeout.Value;
+		HordeApiSession? session = api as HordeApiSession;
+		if (session is not null && deadline is not null)
+		{
+			// A sign-in after a 401 mid-wait may take only the time the wait has left.
+			session.SignInTimeLimit = () => deadline.Value - UtcNow();
+		}
+		try
+		{
+			return await PollAsync(api, jobId, deadline, output, cancellationToken).ConfigureAwait(false);
+		}
+		finally
+		{
+			if (session is not null)
+			{
+				session.SignInTimeLimit = null;
+			}
+		}
+	}
+
+	async Task<(HordeJob? Job, bool TimedOut)> PollAsync(IHordeApi api, string jobId, DateTime? deadline, TextWriter output, CancellationToken cancellationToken)
+	{
 		HordeJob? job = null;
 		TimeSpan interval = MinimumInterval;
 		bool unreachable = false;

@@ -5,17 +5,18 @@ using Microsoft.Extensions.Logging;
 namespace AgentKit.Horde;
 
 /// <summary>
-/// The Horde client a command works with, around the real one. When the client uses uak's cached token and the server answers
-/// 401, it deletes that token, signs in afresh (silently, else through the sign-in page) and retries only the request that
-/// failed, once: a preflight is never created or shelved twice, and a wait keeps its job and its deadline. It can also
-/// rebuild its client (a fresh connection, same sign-in), which <see cref="HordeJobWaiter"/> does after repeated transient
-/// failures.
+/// The Horde client a command works with, around the real one. When the server answers 401 to a client that uses a token
+/// uak handed it (uak's cached token, or the token carried over by a rebuild), it signs in afresh (silently, else through the
+/// sign-in page; deleting the cached token first when that was the one refused) and retries only the request that failed,
+/// once: a preflight is never created or shelved twice, and a wait keeps its job and its deadline. It can also rebuild its
+/// client (a fresh connection), which <see cref="HordeJobWaiter"/> does after repeated transient failures.
 /// </summary>
 public sealed class HordeApiSession : IHordeApi
 {
 	IHordeApi _inner;
 	bool _fromCache;
-	readonly Func<CancellationToken, Task<IHordeApi?>> _signIn;
+	bool _rebuilt;
+	readonly Func<TimeSpan?, CancellationToken, Task<IHordeApi?>> _signIn;
 	readonly Func<string?, IHordeApi> _rebuild;
 	readonly Action _forgetCachedToken;
 	readonly ILogger _logger;
@@ -23,11 +24,14 @@ public sealed class HordeApiSession : IHordeApi
 	/// <summary>Wraps a client.</summary>
 	/// <param name="inner">The client to start with.</param>
 	/// <param name="fromCache">Whether it uses uak's cached token, so a 401 means the cached token was refused.</param>
-	/// <param name="signIn">Signs in afresh without the cache; null (after saying why) when nobody signed in.</param>
-	/// <param name="rebuild">Creates a client with a given token (null: Horde's own token handling).</param>
+	/// <param name="signIn">
+	/// Signs in afresh without the cache, waiting for an interactive sign-in at most the given time (null: the command's own
+	/// -login-timeout); null (after saying why) when nobody signed in.
+	/// </param>
+	/// <param name="rebuild">Creates a client with a given token (null: Horde's own token handling, which refreshes itself).</param>
 	/// <param name="forgetCachedToken">Deletes uak's cached token.</param>
-	/// <param name="logger">For the one warning about a refused cached token.</param>
-	public HordeApiSession(IHordeApi inner, bool fromCache, Func<CancellationToken, Task<IHordeApi?>> signIn, Func<string?, IHordeApi> rebuild, Action forgetCachedToken, ILogger logger)
+	/// <param name="logger">For the one warning about a refused token.</param>
+	public HordeApiSession(IHordeApi inner, bool fromCache, Func<TimeSpan?, CancellationToken, Task<IHordeApi?>> signIn, Func<string?, IHordeApi> rebuild, Action forgetCachedToken, ILogger logger)
 	{
 		_inner = inner;
 		_fromCache = fromCache;
@@ -39,6 +43,12 @@ public sealed class HordeApiSession : IHordeApi
 
 	/// <summary>How many times the client was rebuilt; for tests and -verbose.</summary>
 	public int Rebuilds { get; private set; }
+
+	/// <summary>
+	/// While set, how long a sign-in after a 401 may still take: <see cref="HordeJobWaiter"/> sets it to the time left before
+	/// its -timeout, so a sign-in mid-wait never runs past the wait's deadline. Zero or less: no sign-in is tried.
+	/// </summary>
+	public Func<TimeSpan?>? SignInTimeLimit { get; set; }
 
 	/// <inheritdoc/>
 	public Uri ServerUrl => _inner.ServerUrl;
@@ -68,20 +78,29 @@ public sealed class HordeApiSession : IHordeApi
 	/// <inheritdoc/>
 	public Task<HordeJob?> GetJobAsync(string jobId, string? modifiedAfter, CancellationToken cancellationToken) => CallAsync(api => api.GetJobAsync(jobId, modifiedAfter, cancellationToken), cancellationToken);
 
-	/// <summary>Replaces the client with a new one carrying the same token: a fresh connection after the old one kept failing.</summary>
+	/// <summary>
+	/// Replaces the client with a new one: a fresh connection after the old one kept failing. A client on uak's cached token
+	/// keeps that token; any other gets Horde's own token handling again (which refreshes itself), never a copy of its current
+	/// access token, which would expire. Either way, a 401 on the new client signs in again once.
+	/// </summary>
 	public async Task RebuildAsync(CancellationToken cancellationToken)
 	{
 		string? token = null;
-		try
+		if (_fromCache)
 		{
-			token = await _inner.GetAccessTokenAsync(cancellationToken).ConfigureAwait(false);
-		}
-		catch (Exception exception) when (exception is HttpRequestException or HordeAuthException or IOException or InvalidOperationException)
-		{
-			_logger.LogDebug("No token to carry over to a new Horde client: {Message}", exception.Message);
+			try
+			{
+				token = await _inner.GetAccessTokenAsync(cancellationToken).ConfigureAwait(false);
+			}
+			catch (Exception exception) when (exception is HttpRequestException or HordeAuthException or IOException or InvalidOperationException)
+			{
+				_logger.LogDebug("No token to carry over to a new Horde client: {Message}", exception.Message);
+			}
+			_fromCache = token is not null;
 		}
 		IHordeApi old = _inner;
 		_inner = _rebuild(token);
+		_rebuilt = true;
 		Rebuilds++;
 		_logger.LogDebug("Rebuilt the Horde client after repeated failures.");
 		await old.DisposeAsync().ConfigureAwait(false);
@@ -93,15 +112,28 @@ public sealed class HordeApiSession : IHordeApi
 		{
 			return await call(_inner).ConfigureAwait(false);
 		}
-		catch (HordeAuthException exception) when (exception.NotSignedIn && _fromCache)
+		catch (HordeAuthException exception) when (exception.NotSignedIn && (_fromCache || _rebuilt))
 		{
-			// The server refused uak's cached token (revoked, or its signing keys changed): delete it, sign in again, and retry
-			// this one request.
+			// The server refused a token uak handed the client (uak's cached token, revoked or with changed signing keys; or the
+			// sign-in a rebuilt client couldn't refresh): sign in again, and retry this one request.
+			if (_fromCache)
+			{
+				_forgetCachedToken();
+				_logger.LogWarning("Horde refused uak's saved sign-in, so it is deleted; signing in again.");
+			}
+			else
+			{
+				_logger.LogWarning("Horde refused the sign-in after uak reconnected; signing in again.");
+			}
 			_fromCache = false;
-			_forgetCachedToken();
-			_logger.LogWarning("Horde refused uak's saved sign-in, so it is deleted; signing in again.");
-			IHordeApi? fresh = await _signIn(cancellationToken).ConfigureAwait(false)
-				?? throw new HordeAuthException($"Not signed in to Horde at {ServerUrl} after uak's saved sign-in was refused.", notSignedIn: true);
+			_rebuilt = false;
+			TimeSpan? limit = SignInTimeLimit?.Invoke();
+			if (limit is { } left && left <= TimeSpan.Zero)
+			{
+				throw new HordeAuthException($"Horde at {ServerUrl} refused the sign-in, and the wait's -timeout passed before uak could sign in again.", notSignedIn: true);
+			}
+			IHordeApi? fresh = await _signIn(limit, cancellationToken).ConfigureAwait(false)
+				?? throw new HordeAuthException($"Not signed in to Horde at {ServerUrl} after it refused the sign-in uak had.", notSignedIn: true);
 			IHordeApi old = _inner;
 			_inner = fresh;
 			await old.DisposeAsync().ConfigureAwait(false);

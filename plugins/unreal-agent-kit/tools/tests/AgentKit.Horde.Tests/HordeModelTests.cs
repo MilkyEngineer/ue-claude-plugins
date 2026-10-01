@@ -184,6 +184,15 @@ public sealed class HordeModelTests
 
 		IReadOnlyList<HordeJobSummary> jobs = HordeJobSummary.ParseList(JsonNode.Parse("""[{ "id": "j1", "streamId": "s", "templateId": "t", "state": "Running", "createTime": "x" }]"""));
 		Assert.IsTrue(jobs.Single().IsActive);
+		Assert.IsNull(jobs.Single().AdditionalArguments);
+		Assert.IsNull(jobs.Single().Targets);
+
+		// Another tool's request: its additional arguments and targets are read, so it is never taken for uak's.
+		HordeJobSummary other = HordeJobSummary.ParseList(JsonNode.Parse("""[{ "id": "j2", "streamId": "s", "templateId": "t", "state": "Waiting", "parameters": {}, "additionalArguments": ["-Extra"], "targets": ["Editor Win64"] }]""")).Single();
+		CollectionAssert.AreEqual(new[] { "-Extra" }, other.AdditionalArguments!.ToArray());
+		CollectionAssert.AreEqual(new[] { "Editor Win64" }, other.Targets!.ToArray());
+		Assert.IsFalse(HordePreflightCommand.IsSameRequest(other, "s", "t", new Dictionary<string, string>(), autoSubmit: false));
+		Assert.IsTrue(HordePreflightCommand.IsSameRequest(other with { AdditionalArguments = [], Targets = null }, "s", "t", new Dictionary<string, string>(), autoSubmit: false));
 	}
 
 	static readonly HordeStream[] s_streams =

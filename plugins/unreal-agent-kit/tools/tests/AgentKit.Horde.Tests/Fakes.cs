@@ -55,11 +55,18 @@ internal sealed class FakeHordeApi : IHordeApi
 	/// <summary>Successive answers to FindPreflightsAsync; the last repeats.</summary>
 	public List<List<HordeJobSummary>> Preflights { get; } = [];
 
+	/// <summary>When set, FindPreflightsAsync fails with it.</summary>
+	public Exception? PreflightsFailure { get; set; }
+
 	/// <summary>Successive answers (or exceptions) to GetJobAsync; the last repeats.</summary>
 	public List<object?> JobAnswers { get; } = [];
 
 	public Exception? CreateFailure { get; set; }
 
+	/// <summary>Failures for the first creates, in turn (null: that one succeeds); after them, <see cref="CreateFailure"/>.</summary>
+	public List<Exception?> CreateFailures { get; } = [];
+
+	/// <summary>Every create request sent, including refused ones.</summary>
 	public List<HordePreflightRequest> Created { get; } = [];
 
 	public List<string?> ModifiedAfter { get; } = [];
@@ -97,6 +104,10 @@ internal sealed class FakeHordeApi : IHordeApi
 
 	public Task<IReadOnlyList<HordeJobSummary>> FindPreflightsAsync(int change, CancellationToken cancellationToken)
 	{
+		if (PreflightsFailure is not null)
+		{
+			return Task.FromException<IReadOnlyList<HordeJobSummary>>(PreflightsFailure);
+		}
 		IReadOnlyList<HordeJobSummary> answer = Preflights.Count == 0 ? [] : Preflights[Math.Min(_preflightCalls, Preflights.Count - 1)];
 		_preflightCalls++;
 		return Task.FromResult(answer);
@@ -105,7 +116,8 @@ internal sealed class FakeHordeApi : IHordeApi
 	public Task<string> CreatePreflightAsync(HordePreflightRequest request, CancellationToken cancellationToken)
 	{
 		Created.Add(request);
-		return CreateFailure is null ? Task.FromResult("newjob") : Task.FromException<string>(CreateFailure);
+		Exception? failure = Created.Count <= CreateFailures.Count ? CreateFailures[Created.Count - 1] : CreateFailure;
+		return failure is null ? Task.FromResult("newjob") : Task.FromException<string>(failure);
 	}
 
 	public Task<HordeJob?> GetJobAsync(string jobId, string? modifiedAfter, CancellationToken cancellationToken)
@@ -139,19 +151,46 @@ internal sealed class FakeWorkspace : IPreflightWorkspace
 	/// <summary>When the change was last shelved; jobs in the tests are created an hour later.</summary>
 	public DateTimeOffset? ShelveTime { get; set; } = new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
 
+	/// <summary>The change's shelf; null makes reading it fail.</summary>
+	public List<PerforceShelfFile>? Shelf { get; set; } = [new("//Project/Main/Docs/Notes.md", "edit", "0A1B2C3D4E5F60718293A4B5C6D7E8F9")];
+
+	/// <summary>Shelved files that are not opened in the change.</summary>
+	public List<string> ShelvedNotOpened { get; } = [];
+
+	/// <summary>What ShelveAsync returns; by default it shelved Notes.md and the shelf is <see cref="Shelf"/>.</summary>
+	public PerforceShelveResult? ShelveResult { get; set; }
+
 	public Task<IReadOnlyList<PerforceStreamLink>> GetStreamChainAsync(CancellationToken cancellationToken) => Task.FromResult<IReadOnlyList<PerforceStreamLink>>(Chain);
 
 	public Task<PerforceShelveResult> ShelveAsync(int change, CancellationToken cancellationToken)
 	{
 		Shelved.Add(change);
-		return Task.FromResult(new PerforceShelveResult([new PerforceShelvedFile("//Project/Main/Docs/Notes.md", "edit")], [], []));
+		return Task.FromResult(ShelveResult ?? new PerforceShelveResult([new PerforceShelvedFile("//Project/Main/Docs/Notes.md", "edit")], [], [], []) { Shelf = Shelf ?? [] });
 	}
 
 	public Task<DateTimeOffset?> GetShelveTimeAsync(int change, CancellationToken cancellationToken) => Task.FromResult(ShelveTime);
 
+	public Task<IReadOnlyList<PerforceShelfFile>> GetShelfAsync(int change, CancellationToken cancellationToken)
+		=> Shelf is null ? Task.FromException<IReadOnlyList<PerforceShelfFile>>(new VcsException("p4 describe failed")) : Task.FromResult<IReadOnlyList<PerforceShelfFile>>(Shelf);
+
+	public Task<IReadOnlyList<string>> GetShelvedNotOpenedAsync(int change, CancellationToken cancellationToken) => Task.FromResult<IReadOnlyList<string>>(ShelvedNotOpened);
+
 	public void Dispose()
 	{
 	}
+}
+
+/// <summary>A logger that keeps every line as "Level: message".</summary>
+internal sealed class CapturingLogger : Microsoft.Extensions.Logging.ILogger
+{
+	public List<string> Lines { get; } = [];
+
+	public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+	public bool IsEnabled(Microsoft.Extensions.Logging.LogLevel logLevel) => true;
+
+	public void Log<TState>(Microsoft.Extensions.Logging.LogLevel logLevel, Microsoft.Extensions.Logging.EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
+		=> Lines.Add(logLevel + ": " + formatter(state, exception));
 }
 
 /// <summary>A clock that moves only when the waiter "sleeps", recording each sleep.</summary>

@@ -21,8 +21,23 @@ public interface IPreflightWorkspace : IDisposable
 	/// <summary>Shelves every file opened in a pending change of this client (<c>p4 shelve -f</c>).</summary>
 	Task<PerforceShelveResult> ShelveAsync(int change, CancellationToken cancellationToken);
 
-	/// <summary>When the change's files were last shelved, or null when it has no shelf.</summary>
+	/// <summary>When the change's files were last shelved, or null when it has no shelf or the time can't be placed.</summary>
 	Task<DateTimeOffset?> GetShelveTimeAsync(int change, CancellationToken cancellationToken);
+
+	/// <summary>The change's shelf (empty when nothing is shelved).</summary>
+	Task<IReadOnlyList<PerforceShelfFile>> GetShelfAsync(int change, CancellationToken cancellationToken);
+
+	/// <summary>The files on the shelf of a pending change of this client that are not opened in it.</summary>
+	Task<IReadOnlyList<string>> GetShelvedNotOpenedAsync(int change, CancellationToken cancellationToken);
+}
+
+/// <summary>uak refuses to go on, to protect what Horde would submit (exit 5: an error, not a usage problem).</summary>
+public sealed class HordeRefusedException : Exception
+{
+	/// <summary>Creates the exception with the message for the user.</summary>
+	public HordeRefusedException(string message) : base(message)
+	{
+	}
 }
 
 /// <summary><see cref="IPreflightWorkspace"/> over the workspace's Perforce client.</summary>
@@ -80,6 +95,12 @@ public sealed class PerforcePreflightWorkspace : IPreflightWorkspace
 
 	/// <inheritdoc/>
 	public Task<DateTimeOffset?> GetShelveTimeAsync(int change, CancellationToken cancellationToken) => _p4.GetShelveTimeAsync(change, cancellationToken);
+
+	/// <inheritdoc/>
+	public Task<IReadOnlyList<PerforceShelfFile>> GetShelfAsync(int change, CancellationToken cancellationToken) => _p4.GetShelfAsync(change, cancellationToken);
+
+	/// <inheritdoc/>
+	public Task<IReadOnlyList<string>> GetShelvedNotOpenedAsync(int change, CancellationToken cancellationToken) => _p4.GetShelvedNotOpenedAsync(change, cancellationToken);
 
 	/// <inheritdoc/>
 	public void Dispose() => _p4.Dispose();
@@ -150,6 +171,9 @@ public abstract class HordeCommandBase : IUakCommand
 	/// <summary>The saved build settings; tests point them elsewhere.</summary>
 	internal Func<HordeBuildSettingsStore> BuildSettings { get; set; } = () => HordeBuildSettingsStore.ForUser();
 
+	/// <summary>uak's records of the preflights it started; tests point them elsewhere.</summary>
+	internal Func<HordePreflightRecordStore> PreflightRecords { get; set; } = () => HordePreflightRecordStore.ForUser();
+
 	/// <summary>The clock for saved settings' times; tests replace it.</summary>
 	internal Func<DateTime> UtcNow { get; set; } = () => DateTime.UtcNow;
 
@@ -196,6 +220,12 @@ public abstract class HordeCommandBase : IUakCommand
 		{
 			// 403: signed in, but not allowed. Signing in again would not help.
 			context.Logger.LogError("{Message}", exception.Message + " You are signed in but not allowed to do this; ask the Horde admin for access.");
+			return HordeExitCodes.Error;
+		}
+		catch (HordeRefusedException exception)
+		{
+			// uak's own refusal to protect what Horde would submit: an error (5), not a usage problem (2).
+			context.Logger.LogError("{Message}", exception.Message);
 			return HordeExitCodes.Error;
 		}
 		catch (UakUsageException)
@@ -252,7 +282,7 @@ public abstract class HordeCommandBase : IUakCommand
 		HordeTokenCache cache = TokenCache();
 		bool environmentToken = HordeApi.HasEnvironmentToken(server.Url);
 		HordeApiSession Session(IHordeApi inner, bool fromCache) => new(inner, fromCache,
-			token => SignInFreshAsync(context, server, login, log, cache, environmentToken, token),
+			(limit, token) => SignInFreshAsync(context, server, limit is { } left && left < login.Timeout ? login with { Timeout = left } : login, log, cache, environmentToken, token),
 			token => CreateApi(server.Url, false, token, context.Logger),
 			() => ForgetToken(context, server.Url),
 			context.Logger);
@@ -418,6 +448,9 @@ public abstract class HordeCommandBase : IUakCommand
 	/// <summary>Writes a value as indented JSON.</summary>
 	internal Task WriteJsonAsync<T>(T value) => Output.WriteLineAsync(JsonSerializer.Serialize(value, s_jsonOptions));
 
+	/// <summary>A shelve's files for JSON (depot path and action), or null without a shelve.</summary>
+	internal static object? ShelvedFiles(PerforceShelveResult? shelved) => shelved?.Shelved.Select(file => new { depotFile = file.DepotFile, action = file.Action }).ToList();
+
 	/// <summary>The dashboard page of a job.</summary>
 	internal static string JobUrl(Uri server, string jobId) => new Uri(server, "job/" + Uri.EscapeDataString(jobId)).ToString();
 
@@ -438,7 +471,7 @@ public abstract class HordeCommandBase : IUakCommand
 	/// Waits for a job (when <paramref name="wait"/>) or reads it once, prints the summary (or JSON), and returns the exit code:
 	/// 0 success, 1 failure or incomplete, 3 still running, 7 warnings.
 	/// </summary>
-	internal async Task<int> ReportJobAsync(UakContext context, IHordeApi api, string jobId, bool wait, TimeSpan? timeout, bool verbose, bool json, HordeOpenMode open, CancellationToken cancellationToken, bool announce = true)
+	internal async Task<int> ReportJobAsync(UakContext context, IHordeApi api, string jobId, bool wait, TimeSpan? timeout, bool verbose, bool json, HordeOpenMode open, CancellationToken cancellationToken, bool announce = true, PerforceShelveResult? shelved = null)
 	{
 		HordeJob? job;
 		bool timedOut;
@@ -464,7 +497,7 @@ public abstract class HordeCommandBase : IUakCommand
 			// -timeout passed before any poll got an answer (Horde unreachable all along): the job's state is unknown, so wait again.
 			if (json)
 			{
-				await WriteJsonAsync(new { id = jobId, url = JobUrl(api.ServerUrl, jobId), result = "Unknown", timedOut = true }).ConfigureAwait(false);
+				await WriteJsonAsync(new { id = jobId, url = JobUrl(api.ServerUrl, jobId), result = "Unknown", timedOut = true, shelved = ShelvedFiles(shelved), replaced = shelved?.Replaced, kept = shelved?.Kept }).ConfigureAwait(false);
 			}
 			else
 			{
@@ -517,6 +550,9 @@ public abstract class HordeCommandBase : IUakCommand
 				skipped = skipped.Count,
 				batchErrors = job.BatchErrors,
 				steps = verbose ? latest.Select(Step) : null,
+				shelved = ShelvedFiles(shelved),
+				replaced = shelved?.Replaced,
+				kept = shelved?.Kept,
 			}).ConfigureAwait(false);
 			return exitCode;
 		}
@@ -974,7 +1010,8 @@ public sealed class HordePreflightCommand : HordeCommandBase
 	/// <inheritdoc/>
 	public override string Usage =>
 		"uak horde preflight -c=<shelved change> [-template=<id or name>] [-param:<id>=<value> ...] [-use-template-defaults]\n" +
-		"                    [-stream=<id>] [-shelve] [-force] [-autosubmit] [-wait [-timeout=<seconds>] [-verbose] [-no-open]]\n" +
+		"                    [-stream=<id>] [-shelve] [-force] [-autosubmit [-allow-shelved-only]]\n" +
+		"                    [-wait [-timeout=<seconds>] [-verbose] [-no-open]]\n" +
 		"                    [-login-timeout=<seconds> | -no-login] [-server=<url>] [-json]\n" +
 		"  Builds with the stream's saved build settings (template and parameters, see uak horde config). With none saved,\n" +
 		"  and no -template= or -param:, it starts nothing and exits 6, printing the templates and their parameters (as\n" +
@@ -990,20 +1027,28 @@ public sealed class HordePreflightCommand : HordeCommandBase
 		"  -use-template-defaults  skip the saved settings and the exit-6 check (CI): the template (-template=, else the\n" +
 		"               stream's default) with its default parameters.\n" +
 		"  -shelve      first shelve the change's opened files (p4 shelve -f; nothing is reverted), then start a new\n" +
-		"               preflight. Refused while an auto-submit preflight of the change is running. Agents use it only on\n" +
-		"               changelists they created.\n" +
+		"               preflight. Refused while an auto-submit preflight of the change is running (Horde submits the\n" +
+		"               change's CURRENT shelf when it succeeds), checked before shelving and again just before. Shelved\n" +
+		"               files whose content changed, and shelved files kept although not opened, are listed. Agents use it\n" +
+		"               only on changelists they created.\n" +
 		"  -force       start a new preflight even when an equal one is still running. By default (without -shelve) uak\n" +
-		"               reports a still-running preflight of this change instead (\"reused: <job>\") when it has the same\n" +
-		"               stream, template, parameters and auto-submit setting and was created after the change was last shelved.\n" +
+		"               reports a still-running preflight of this change instead (\"reused: <job>\") only when uak started it\n" +
+		"               (it keeps a record of each), with the same stream, template, parameters and auto-submit setting and\n" +
+		"               no other arguments or targets, at least 5 s after the change was last shelved, and the change's shelf\n" +
+		"               is still the one uak recorded then.\n" +
 		"  -autosubmit  ONLY when the user asked for it: if the preflight succeeds, Horde edits the change's description and\n" +
-		"               SUBMITS it. Off by default; uak never turns it on by itself.\n" +
+		"               SUBMITS the change's shelf. Off by default; uak never turns it on by itself. Refused while another\n" +
+		"               auto-submit preflight of the change is running (unless it is reused). With -shelve, also refused\n" +
+		"               when the shelf holds files that are not opened in the change (Horde would submit them too).\n" +
+		"  -allow-shelved-only  with -shelve -autosubmit: go ahead although the shelf holds files not opened in the change.\n" +
 		"  -wait        wait quietly for the result, then print a short summary (failing steps with their URLs).\n" +
 		"  -timeout=    with -wait: stop waiting after this many seconds (exit 3); wait again with uak horde job -wait.\n" +
 		"  -verbose     with -wait: every step in the summary.\n" +
 		"  -no-open     with -wait: don't open the job's page in the browser this time (see uak horde config -open=).\n" + LoginUsage +
 		"  Exit codes: 0 started (with -wait: succeeded), 1 failed or did not complete, 2 usage error, 3 still running after\n" +
 		"  -timeout, 4 not signed in (the sign-in failed or timed out, or -no-login), 5 another error (including 403, not\n" +
-		"  allowed), 6 build settings needed (nothing started), 7 succeeded with warnings.";
+		"  allowed, and uak's refusals above: an auto-submit preflight of the change is running, or the shelf holds files that\n" +
+		"  aren't opened), 6 build settings needed (nothing started), 7 succeeded with warnings.";
 
 	internal override Func<UakContext, CancellationToken, Task<int>> Parse(UakArguments arguments)
 	{
@@ -1034,12 +1079,37 @@ public sealed class HordePreflightCommand : HordeCommandBase
 		}
 		LoginOptions login = LoginOptions.Parse(arguments);
 		bool noOpen = arguments.GetFlag("no-open");
+		bool allowShelvedOnly = arguments.GetFlag("allow-shelved-only");
+		if (allowShelvedOnly && !(shelve && autoSubmit))
+		{
+			throw new UakUsageException("-allow-shelved-only goes with -shelve -autosubmit.");
+		}
 
 		return async (context, cancellationToken) =>
 		{
 			HordeServer found = ResolveServer(server);
 			HordeOpenMode open = wait ? ResolveOpen(noOpen) : HordeOpenMode.Never;
 			IPreflightWorkspace? workspace = shelve || streamId is null ? await Workspace(context, cancellationToken).ConfigureAwait(false) : null;
+			bool workspaceTried = workspace is not null;
+
+			// The workspace when a read needs it and the command didn't so far; null when there is none (then nothing is reused).
+			async Task<IPreflightWorkspace?> WorkspaceOrNullAsync()
+			{
+				if (workspace is null && !workspaceTried)
+				{
+					workspaceTried = true;
+					try
+					{
+						workspace = await Workspace(context, cancellationToken).ConfigureAwait(false);
+					}
+					catch (Exception exception) when (exception is UakUsageException or VcsException)
+					{
+						context.Logger.LogDebug("No Perforce workspace, so uak can't read change {Change}'s shelf: {Message}", change, exception.Message);
+					}
+				}
+				return workspace;
+			}
+
 			try
 			{
 				TextWriter log = json ? TextWriter.Null : Output;
@@ -1063,37 +1133,78 @@ public sealed class HordePreflightCommand : HordeCommandBase
 				HordeTemplate chosen = build.Template;
 				IReadOnlyDictionary<string, string> sent = HordeBuildParameters.ToHorde(chosen, build.Parameters);
 
-				// The change's preflights, read before anything is shelved.
-				List<HordeJobSummary> active = (await api.FindPreflightsAsync(change, cancellationToken).ConfigureAwait(false)).Where(job => job.IsActive).ToList();
-				HordeJobSummary? submitting = active.FirstOrDefault(job => job.AutoSubmit);
-				HordeJobSummary? reused = null;
-				if (shelve)
+				// With -shelve -autosubmit, shelved files that aren't opened in the change would be submitted with it: p4 shelve -f
+				// keeps them on the shelf, and Horde submits the whole shelf.
+				if (shelve && autoSubmit && !allowShelvedOnly)
 				{
-					// A new shelf under a running auto-submit preflight could change what Horde submits.
-					if (submitting is not null)
+					IReadOnlyList<string> shelvedOnly = await workspace!.GetShelvedNotOpenedAsync(change, cancellationToken).ConfigureAwait(false);
+					if (shelvedOnly.Count > 0)
 					{
-						throw new UakUsageException($"An auto-submit preflight of change {change} is running ({JobUrl(found.Url, submitting.Id)}), so the change is not shelved again: that could change what Horde submits. Nothing was shelved or started. Wait for it to finish.");
+						throw new HordeRefusedException(ShelvedOnlyRefusal(change, shelvedOnly, shelved: false));
 					}
 				}
-				else if (!force)
+
+				// The change's preflights, read before anything is shelved. Horde auto-submits the change's CURRENT shelf when an
+				// auto-submit preflight succeeds, whatever shelf that preflight built.
+				List<HordeJobSummary> active = (await api.FindPreflightsAsync(change, cancellationToken).ConfigureAwait(false)).Where(job => job.IsActive).ToList();
+				List<HordeJobSummary> submitting = active.Where(job => job.AutoSubmit).ToList();
+				if (shelve && submitting.Count > 0)
 				{
-					// Reuse only a preflight of the same request, created after the shelf it would build was made.
-					DateTimeOffset? shelvedAt = await GetShelveTimeAsync(context, workspace, change, cancellationToken).ConfigureAwait(false);
-					IReadOnlyDictionary<string, string> expected = HordeBuildParameters.Effective(chosen, sent);
-					reused = shelvedAt is null ? null : active.FirstOrDefault(job => job.Created is DateTimeOffset created && created >= shelvedAt.Value && IsSameRequest(job, stream.Id, chosen.Id, expected, autoSubmit));
-				}
-				if (reused is null && submitting is not null && !autoSubmit)
-				{
-					await notices.WriteLineAsync($"Note: an AUTO-SUBMIT preflight of change {change} is running: {JobUrl(found.Url, submitting.Id)}. This starts a separate preflight, without auto-submit.").ConfigureAwait(false);
+					throw new HordeRefusedException(ShelveRefusal(found.Url, change, submitting));
 				}
 
+				// When the change was last shelved and what its shelf holds: to reuse a running preflight, and to tell whether a
+				// running auto-submit preflight built this shelf. Unknown (null) means no reuse, and a warning.
+				IReadOnlyDictionary<string, string> expected = HordeBuildParameters.Effective(chosen, sent);
+				DateTimeOffset? shelvedAt = null;
+				IReadOnlyList<PerforceShelfFile>? shelf = null;
+				if (!shelve && (!force || submitting.Count > 0) && await WorkspaceOrNullAsync().ConfigureAwait(false) is IPreflightWorkspace reader)
+				{
+					shelvedAt = await ReadOrNullAsync(context, change, () => reader.GetShelveTimeAsync(change, cancellationToken)).ConfigureAwait(false);
+					shelf = await ReadOrNullAsync(context, change, () => reader.GetShelfAsync(change, cancellationToken)).ConfigureAwait(false);
+				}
+				HordePreflightRecordStore records = PreflightRecords();
+				HordeJobSummary? reused = shelve || force ? null
+					: active.FirstOrDefault(job => IsReusable(job, records.Read(found.Url, job.Id), change, stream.Id, chosen.Id, expected, autoSubmit, shelvedAt, shelf));
+
+				// Two auto-submit preflights of one change: each would submit the change's current shelf when it succeeds.
+				List<HordeJobSummary> otherSubmitting = submitting.Where(job => job.Id != reused?.Id).ToList();
+				if (autoSubmit && otherSubmitting.Count > 0)
+				{
+					throw new HordeRefusedException($"Another auto-submit preflight of change {change} is running ({string.Join(", ", otherSubmitting.Select(job => JobUrl(found.Url, job.Id)))}), " +
+						"and uak doesn't reuse it (another request, or uak can't tell that it built the change's current shelf). A second one would also submit the change. Nothing was started. Wait for it to finish, or ask the user.");
+				}
+				foreach (HordeJobSummary job in otherSubmitting)
+				{
+					await notices.WriteLineAsync(BuildsCurrentShelf(job, records.Read(found.Url, job.Id), change, shelvedAt, shelf)
+						? $"Note: an AUTO-SUBMIT preflight of change {change} is running: {JobUrl(found.Url, job.Id)}. This starts a separate preflight, without auto-submit."
+						: $"WARNING: an AUTO-SUBMIT preflight of change {change} is running ({JobUrl(found.Url, job.Id)}), and it was created before the change was last shelved, or uak can't tell. " +
+						"When it succeeds, Horde submits the change's CURRENT shelf, which that preflight may not have built. Tell the user (through the lead). This starts a separate preflight, without auto-submit.").ConfigureAwait(false);
+				}
+
+				PerforceShelveResult? shelved = null;
 				if (shelve)
 				{
-					PerforceShelveResult shelved = await workspace!.ShelveAsync(change, cancellationToken).ConfigureAwait(false);
-					await log.WriteLineAsync($"Shelved {shelved.Shelved.Count} file(s) in change {change}.").ConfigureAwait(false);
+					// Again just before shelving: an auto-submit preflight started since the first look would submit the new shelf.
+					List<HordeJobSummary> late = (await api.FindPreflightsAsync(change, cancellationToken).ConfigureAwait(false)).Where(job => job.IsActive && job.AutoSubmit).ToList();
+					if (late.Count > 0)
+					{
+						throw new HordeRefusedException(ShelveRefusal(found.Url, change, late));
+					}
+					shelved = await workspace!.ShelveAsync(change, cancellationToken).ConfigureAwait(false);
+					await notices.WriteLineAsync($"Shelved {shelved.Shelved.Count} file(s) in change {change}.").ConfigureAwait(false);
 					foreach (string file in shelved.Replaced)
 					{
-						await log.WriteLineAsync($"  replaced on the shelf (its shelved content changed): {file}").ConfigureAwait(false);
+						await notices.WriteLineAsync($"  replaced on the shelf (its shelved content or action changed): {file}").ConfigureAwait(false);
+					}
+					foreach (string file in shelved.Kept)
+					{
+						await notices.WriteLineAsync($"  kept on the shelf, but not opened in change {change} (the preflight builds it, and a submit would include it): {file}").ConfigureAwait(false);
+					}
+					shelf = shelved.Shelf;
+					if (autoSubmit && !allowShelvedOnly && shelved.Kept.Count > 0)
+					{
+						throw new HordeRefusedException(ShelvedOnlyRefusal(change, shelved.Kept, shelved: true));
 					}
 				}
 
@@ -1103,12 +1214,19 @@ public sealed class HordePreflightCommand : HordeCommandBase
 				{
 					jobId = reused.Id;
 					jobAutoSubmit = reused.AutoSubmit;
-					await notices.WriteLineAsync($"reused: {jobId} (still running, with the same stream, template, parameters and auto-submit setting, and created after change {change} was last shelved; -force starts another)").ConfigureAwait(false);
+					await notices.WriteLineAsync($"reused: {jobId} (still running; uak started it with the same stream, template, parameters and auto-submit setting, and change {change}'s shelf hasn't changed since; -force starts another)").ConfigureAwait(false);
 				}
 				else
 				{
-					jobId = await CreateAsync(api, new HordePreflightRequest(stream.Id, chosen.Id, change, autoSubmit, sent), cancellationToken).ConfigureAwait(false);
+					// What the job will build, for uak's record of it: only a recorded job is ever reused.
+					if (shelf is null && await WorkspaceOrNullAsync().ConfigureAwait(false) is IPreflightWorkspace shelfReader)
+					{
+						shelf = await ReadOrNullAsync(context, change, () => shelfReader.GetShelfAsync(change, cancellationToken)).ConfigureAwait(false);
+					}
+					HordePreflightRequest request = new(stream.Id, chosen.Id, change, autoSubmit, sent);
+					jobId = await CreateAsync(api, request, expected, cancellationToken).ConfigureAwait(false);
 					jobAutoSubmit = autoSubmit;
+					Record(context, records, found.Url, jobId, request, shelf);
 				}
 
 				// The job reported here was started with exactly this template and these parameters (a reused one matched them).
@@ -1126,11 +1244,25 @@ public sealed class HordePreflightCommand : HordeCommandBase
 				{
 					if (json)
 					{
-						await WriteJsonAsync(new { id = jobId, url = JobUrl(found.Url, jobId), change, streamId = stream.Id, templateId = chosen.Id, parameters = build.Parameters, buildSettings = reused is null ? build.Source : "reused job", autoSubmit = jobAutoSubmit, reused = reused is not null }).ConfigureAwait(false);
+						await WriteJsonAsync(new
+						{
+							id = jobId,
+							url = JobUrl(found.Url, jobId),
+							change,
+							streamId = stream.Id,
+							templateId = chosen.Id,
+							parameters = build.Parameters,
+							buildSettings = reused is null ? build.Source : "reused job",
+							autoSubmit = jobAutoSubmit,
+							reused = reused is not null,
+							shelved = ShelvedFiles(shelved),
+							replaced = shelved?.Replaced,
+							kept = shelved?.Kept,
+						}).ConfigureAwait(false);
 					}
 					return HordeExitCodes.Success;
 				}
-				return await ReportJobAsync(context, api, jobId, true, timeout, verbose, json, open, cancellationToken, announce: false).ConfigureAwait(false);
+				return await ReportJobAsync(context, api, jobId, true, timeout, verbose, json, open, cancellationToken, announce: false, shelved).ConfigureAwait(false);
 			}
 			finally
 			{
@@ -1140,32 +1272,45 @@ public sealed class HordePreflightCommand : HordeCommandBase
 	}
 
 	/// <summary>
-	/// When the change was last shelved, from the workspace (found now when the command didn't need it so far). Null when it
-	/// can't be read, which means no reuse: uak can't tell whether a running preflight builds the current shelf.
+	/// How long after the change's last shelve a preflight must have been created to count as building that shelf: the shelve
+	/// time has 1 s resolution, and the Perforce and Horde servers' clocks may differ a little.
 	/// </summary>
-	async Task<DateTimeOffset?> GetShelveTimeAsync(UakContext context, IPreflightWorkspace? workspace, int change, CancellationToken cancellationToken)
+	public static readonly TimeSpan ShelveTimeMargin = TimeSpan.FromSeconds(5);
+
+	/// <summary>A read of the change's shelf state, or null (logged) when it fails: uak then can't tell, so nothing is reused.</summary>
+	static async Task<T?> ReadOrNullAsync<T>(UakContext context, int change, Func<Task<T>> read)
 	{
-		IPreflightWorkspace? owned = null;
 		try
 		{
-			workspace ??= owned = await Workspace(context, cancellationToken).ConfigureAwait(false);
-			return await workspace.GetShelveTimeAsync(change, cancellationToken).ConfigureAwait(false);
+			return await read().ConfigureAwait(false);
 		}
-		catch (Exception exception) when (exception is UakUsageException or VcsException)
+		catch (VcsException exception)
 		{
-			context.Logger.LogDebug("Can't read when change {Change} was shelved, so no running preflight is reused: {Message}", change, exception.Message);
-			return null;
-		}
-		finally
-		{
-			owned?.Dispose();
+			context.Logger.LogDebug("Can't read change {Change}'s shelf, so no running preflight is reused: {Message}", change, exception.Message);
+			return default;
 		}
 	}
 
-	/// <summary>Whether a running preflight is the same request: stream, template, auto-submit, and every parameter value.</summary>
+	/// <summary>The refusal to shelve under running auto-submit preflights.</summary>
+	static string ShelveRefusal(Uri server, int change, IEnumerable<HordeJobSummary> submitting)
+		=> $"An auto-submit preflight of change {change} is running ({string.Join(", ", submitting.Select(job => JobUrl(server, job.Id)))}). When it succeeds, Horde submits the change's " +
+			"CURRENT shelf, so the change is not shelved again: that would change what Horde submits. Nothing was shelved or started. Wait for it to finish, or ask the user.";
+
+	/// <summary>The refusal to auto-submit a shelf that holds files not opened in the change.</summary>
+	static string ShelvedOnlyRefusal(int change, IReadOnlyList<string> files, bool shelved)
+		=> $"Change {change}'s shelf holds files that are not opened in it, and an auto-submit would submit them too: {string.Join(", ", files)}. " +
+			(shelved ? "The change was shelved; no preflight was started. " : "Nothing was shelved or started. ") +
+			"Delete them from the shelf (uak vcs shelve -c=<change> -replace -drop-unopened, only if that work isn't needed), or pass -allow-shelved-only when the user wants them submitted.";
+
+	/// <summary>Whether a running preflight is the same request: stream, template, auto-submit, every parameter value, and no other arguments or targets.</summary>
 	internal static bool IsSameRequest(HordeJobSummary job, string streamId, string templateId, IReadOnlyDictionary<string, string> expected, bool autoSubmit)
 	{
 		if (!job.StreamId.Equals(streamId, StringComparison.OrdinalIgnoreCase) || !job.TemplateId.Equals(templateId, StringComparison.OrdinalIgnoreCase) || job.AutoSubmit != autoSubmit || job.Parameters is null)
+		{
+			return false;
+		}
+		// uak never sends these; a job that has them was started some other way, with a command line uak can't compare.
+		if (job.AdditionalArguments is { Count: > 0 } || job.Targets is { Count: > 0 })
 		{
 			return false;
 		}
@@ -1177,6 +1322,54 @@ public sealed class HordePreflightCommand : HordeCommandBase
 			}
 		}
 		return true;
+	}
+
+	/// <summary>
+	/// Whether a running preflight builds the change's current shelf, as far as uak can tell: it was created at least
+	/// <see cref="ShelveTimeMargin"/> after the change was last shelved, and, when uak started it, the shelf uak recorded then
+	/// is the current shelf. False when any of that is unknown.
+	/// </summary>
+	internal static bool BuildsCurrentShelf(HordeJobSummary job, HordePreflightRecord? record, int change, DateTimeOffset? shelvedAt, IReadOnlyList<PerforceShelfFile>? shelf)
+	{
+		if (shelvedAt is null || job.Created is not DateTimeOffset created || created < shelvedAt.Value + ShelveTimeMargin)
+		{
+			return false;
+		}
+		return record is null || (record.Change == change && shelf is { Count: > 0 } && PerforceVersionControl.SameShelf(record.ShelfFiles, shelf));
+	}
+
+	/// <summary>
+	/// Whether a running preflight may be reported instead of starting another: uak started it (it has a record), it is the same
+	/// request, and it builds the change's current shelf (<see cref="BuildsCurrentShelf"/>).
+	/// </summary>
+	internal static bool IsReusable(HordeJobSummary job, HordePreflightRecord? record, int change, string streamId, string templateId, IReadOnlyDictionary<string, string> expected, bool autoSubmit, DateTimeOffset? shelvedAt, IReadOnlyList<PerforceShelfFile>? shelf)
+		=> record is not null && record.Job.Equals(job.Id, StringComparison.Ordinal) && IsSameRequest(job, streamId, templateId, expected, autoSubmit) && BuildsCurrentShelf(job, record, change, shelvedAt, shelf);
+
+	/// <summary>Records a preflight uak started, with the shelf it builds. Without a shelf nothing is recorded (it is never reused); a failure is only logged.</summary>
+	void Record(UakContext context, HordePreflightRecordStore records, Uri server, string jobId, HordePreflightRequest request, IReadOnlyList<PerforceShelfFile>? shelf)
+	{
+		if (shelf is not { Count: > 0 })
+		{
+			return;
+		}
+		try
+		{
+			records.Save(server, new HordePreflightRecord
+			{
+				Job = jobId,
+				Change = request.Change,
+				Stream = request.StreamId,
+				Template = request.TemplateId,
+				AutoSubmit = request.AutoSubmit,
+				Parameters = request.Parameters?.ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal) ?? [],
+				Shelf = HordePreflightRecordStore.ToRecorded(shelf),
+				Created = UtcNow(),
+			}, UtcNow());
+		}
+		catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+		{
+			context.Logger.LogDebug("Could not record preflight {Job}: {Message}", jobId, exception.Message);
+		}
 	}
 
 	/// <summary>
@@ -1202,9 +1395,11 @@ public sealed class HordePreflightCommand : HordeCommandBase
 
 	/// <summary>
 	/// Starts the preflight. When the request fails without a clear answer (the connection dropped, a time-out, a 5xx), the job
-	/// may still have been created, so uak looks for it before reporting the failure; it never sends the request twice.
+	/// may still have been created, so uak looks for a new job of exactly this request (<see cref="IsSameRequest"/>, with
+	/// <paramref name="expected"/>, the parameter values the job reports) before reporting the failure; it never sends the
+	/// request twice.
 	/// </summary>
-	static async Task<string> CreateAsync(IHordeApi api, HordePreflightRequest request, CancellationToken cancellationToken)
+	static async Task<string> CreateAsync(IHordeApi api, HordePreflightRequest request, IReadOnlyDictionary<string, string> expected, CancellationToken cancellationToken)
 	{
 		HashSet<string> before = [.. (await api.FindPreflightsAsync(request.Change, cancellationToken).ConfigureAwait(false)).Select(job => job.Id)];
 		try
@@ -1214,7 +1409,7 @@ public sealed class HordePreflightCommand : HordeCommandBase
 		catch (Exception exception) when (HordeJobWaiter.IsTransient(exception, cancellationToken))
 		{
 			HordeJobSummary? created = (await api.FindPreflightsAsync(request.Change, cancellationToken).ConfigureAwait(false))
-				.FirstOrDefault(job => !before.Contains(job.Id) && job.StreamId.Equals(request.StreamId, StringComparison.OrdinalIgnoreCase) && job.TemplateId.Equals(request.TemplateId, StringComparison.OrdinalIgnoreCase));
+				.FirstOrDefault(job => !before.Contains(job.Id) && IsSameRequest(job, request.StreamId, request.TemplateId, expected, request.AutoSubmit));
 			if (created is not null)
 			{
 				return created.Id;

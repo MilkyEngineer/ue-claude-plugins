@@ -84,13 +84,16 @@ public sealed class PerforceWriteTests
 	public async Task UpdateDescriptionSendsTheWholeSpecBack()
 	{
 		using TempDirectory root = new();
-		FakePerforceConnection connection = Fake(root).On("change", call => call.Arguments[0] == "-o" ? "change-o-pending" : "change-updated").On("opened", "empty");
+		FakePerforceConnection connection = Fake(root).On("change", call => call.Arguments[0] == "-o" ? "change-o-pending" : "change-updated").On("opened", "opened-change-pending");
 		using PerforceVersionControl p4 = new(connection, root.Directory);
 
-		Assert.IsEmpty(await p4.UpdateDescriptionAsync(12346, "Fix the spawn order, take two.", Token));
+		PerforceDescriptionUpdate update = await p4.UpdateDescriptionAsync(12346, "Fix the spawn order, take two.", Token);
+		Assert.IsEmpty(update.Restored);
+		Assert.IsEmpty(update.Released);
 
-		CollectionAssert.AreEqual(new[] { "opened", "change", "change" }, connection.Calls.Select(call => call.Command).ToArray());
-		CollectionAssert.AreEqual(new[] { "-o", "12346" }, connection.Calls[1].Arguments.ToArray());
+		CollectionAssert.AreEqual(new[] { "change", "opened", "change" }, connection.Calls.Select(call => call.Command).ToArray(), "the spec, the changelist's files just before the write, the write");
+		CollectionAssert.AreEqual(new[] { "-o", "12346" }, connection.Calls[0].Arguments.ToArray());
+		CollectionAssert.AreEqual(new[] { "-c", "12346" }, connection.Calls[1].Arguments.ToArray());
 		CollectionAssert.AreEqual(new[] { "-i" }, connection.Calls[2].Arguments.ToArray());
 		List<KeyValuePair<string, string>> sent = DecodeSpec(connection.Calls[2].Input!);
 		// Every field of change -o but "code", in order, with only the description replaced: dropping Files would move the files out.
@@ -102,31 +105,63 @@ public sealed class PerforceWriteTests
 		Assert.AreEqual("job000123", sent.Single(field => field.Key == "Jobs0").Value);
 	}
 
+	/// <summary>A fake whose <c>opened -c 12346</c> answers are <paramref name="inChange"/> in turn (the last repeats) and <c>opened -c default</c> is <paramref name="inDefault"/>.</summary>
+	static FakePerforceConnection DescribeRace(TempDirectory root, string written, string inDefault, params string[] inChange)
+	{
+		int reads = 0;
+		return Fake(root)
+			.On("change", call => call.Arguments[0] == "-o" ? "change-o-pending" : written)
+			.On("opened", call => call.Arguments[1] == "default" ? inDefault : inChange[Math.Min(reads++, inChange.Length - 1)])
+			.On("reopen", "empty");
+	}
+
 	[TestMethod]
 	public async Task UpdateDescriptionMovesBackFilesAConcurrentReopenLost()
 	{
 		using TempDirectory root = new();
-		int defaultReads = 0;
-		FakePerforceConnection connection = Fake(root)
-			.On("change", call => call.Arguments[0] == "-o" ? "change-o-pending" : "change-updated-removing")
-			.On("opened", call => call.Arguments[1] == "default" ? (defaultReads++ == 0 ? "empty" : "opened-default-late") : "opened-change-late")
-			.On("reopen", "reopen-late");
+		// Late.cpp was reopened into the change after uak read the spec, so the spec moved it out; Unrelated.cpp reached the
+		// default changelist on its own and must stay there.
+		FakePerforceConnection connection = DescribeRace(root, "change-updated-removing-one", "opened-default-late-and-other", "opened-change-before", "opened-change-pending", "opened-change-before");
 		using PerforceVersionControl p4 = new(connection, root.Directory);
 
-		IReadOnlyList<string> restored = await p4.UpdateDescriptionAsync(12346, "New text", Token);
+		PerforceDescriptionUpdate update = await p4.UpdateDescriptionAsync(12346, "New text", Token);
 
-		CollectionAssert.AreEqual(new[] { "//Game/main/Source/Game/Late.cpp" }, restored.ToArray(), "the file reopened in between went back into the change");
+		CollectionAssert.AreEqual(new[] { "//Game/main/Source/Game/Late.cpp" }, update.Restored.ToArray(), "the file reopened in between went back into the change");
+		Assert.IsEmpty(update.Released);
 		PerforceCall reopen = connection.Calls.Single(call => call.Command == "reopen");
 		CollectionAssert.AreEqual(new[] { "-c12346" }, reopen.Arguments.ToArray());
-		CollectionAssert.AreEqual(new[] { "//Game/main/Source/Game/Late.cpp" }, reopen.FileArguments.ToArray());
+		CollectionAssert.AreEqual(new[] { "//Game/main/Source/Game/Late.cpp" }, reopen.FileArguments.ToArray(), "never the unrelated file in the default changelist");
 
-		// When nothing new shows up in the default changelist, uak can't tell which files moved: a failure that says so.
-		FakePerforceConnection unknown = Fake(root)
-			.On("change", call => call.Arguments[0] == "-o" ? "change-o-pending" : "change-updated-removing")
-			.On("opened", "empty");
+		// p4 says it moved two files out, but uak finds one: it can't tell which, so it moves nothing and says so.
+		FakePerforceConnection unknown = DescribeRace(root, "change-updated-removing", "opened-default-late-and-other", "opened-change-before", "opened-change-pending");
 		using PerforceVersionControl lost = new(unknown, root.Directory);
-		StringAssert.Contains((await Assert.ThrowsExactlyAsync<VcsException>(() => lost.UpdateDescriptionAsync(12346, "New text", Token))).Message, "could not tell which");
-		Assert.IsFalse(unknown.Calls.Any(call => call.Command == "reopen"));
+		VcsException exception = await Assert.ThrowsExactlyAsync<VcsException>(() => lost.UpdateDescriptionAsync(12346, "New text", Token));
+		StringAssert.Contains(exception.Message, "could not tell exactly which");
+		StringAssert.Contains(exception.Message, "//Game/main/Source/Game/Late.cpp");
+		Assert.IsFalse(unknown.Calls.Any(call => call.Command == "reopen"), "nothing is moved on a guess");
+	}
+
+	[TestMethod]
+	public async Task UpdateDescriptionReturnsFilesThePullBroughtInFromTheDefaultChange()
+	{
+		using TempDirectory root = new();
+		// Removed.ini was moved from the change to the default changelist after uak read the spec, which still lists it, so p4
+		// pulled it back in ("adding 1 file(s)"); uak returns it to the default changelist.
+		FakePerforceConnection connection = DescribeRace(root, "change-updated-adding", "opened-default-removed", "opened-change-new-only", "opened-change-pending");
+		using PerforceVersionControl p4 = new(connection, root.Directory);
+
+		PerforceDescriptionUpdate update = await p4.UpdateDescriptionAsync(12346, "New text", Token);
+
+		CollectionAssert.AreEqual(new[] { "//Game/main/Config/Removed.ini" }, update.Released.ToArray());
+		Assert.IsEmpty(update.Restored);
+		PerforceCall reopen = connection.Calls.Single(call => call.Command == "reopen");
+		CollectionAssert.AreEqual(new[] { "-cdefault" }, reopen.Arguments.ToArray());
+		CollectionAssert.AreEqual(new[] { "//Game/main/Config/Removed.ini" }, reopen.FileArguments.ToArray());
+
+		// The file didn't arrive back in the default changelist: a failure naming it.
+		FakePerforceConnection stuck = DescribeRace(root, "change-updated-adding", "empty", "opened-change-new-only", "opened-change-pending");
+		using PerforceVersionControl stuckP4 = new(stuck, root.Directory);
+		StringAssert.Contains((await Assert.ThrowsExactlyAsync<VcsException>(() => stuckP4.UpdateDescriptionAsync(12346, "New text", Token))).Message, "could not be reopened back into the default changelist");
 	}
 
 	[TestMethod]
@@ -224,6 +259,95 @@ public sealed class PerforceWriteTests
 
 		using PerforceVersionControl none = new(Fake(root).On("change", "change-o-new"), root.Directory);
 		Assert.IsNull(await none.GetShelveTimeAsync(12350, Token));
+
+		// Without the server's offset the time can't be placed: unknown, never read as UTC (which could make it too early).
+		using PerforceVersionControl noZone = new(Fake(root).On("change", "change-o-pending").On("info", "info-no-tz"), root.Directory);
+		Assert.IsNull(await noZone.GetShelveTimeAsync(12346, Token));
+	}
+
+	[TestMethod]
+	public async Task AFileThatLeftTheChangeWhileReplacingFailsTheShelveAndIsNamed()
+	{
+		using TempDirectory root = new();
+		// change -o lists New.cpp and Removed.ini, both shelved; Removed.ini left the change before p4 shelve -r ran, so -r
+		// deleted it from the shelf although nobody asked.
+		FakePerforceConnection connection = Fake(root).On("change", "change-o-pending").On("shelve", "shelve").OnEach("describe", "describe-s-pending", "describe-s-one");
+		using PerforceVersionControl p4 = new(connection, root.Directory);
+
+		VcsException exception = await Assert.ThrowsExactlyAsync<VcsException>(() => p4.ShelveAsync(12346, ShelveMode.Replace, cancellationToken: Token));
+
+		StringAssert.Contains(exception.Message, "//Game/main/Config/Removed.ini");
+		StringAssert.Contains(exception.Message, "not told to drop");
+		Assert.IsTrue(connection.Calls.Any(call => call.Command == "shelve"), "the shelve happened; the failure says what it cost");
+
+		// -drop-unopened covers only the files uak saw shelved and not opened, not one that left the change afterwards.
+		FakePerforceConnection dropping = Fake(root).On("change", "change-o-pending").On("shelve", "shelve").OnEach("describe", "describe-s-shelved-only", "describe-s-one");
+		using PerforceVersionControl dropper = new(dropping, root.Directory);
+		VcsException dropped = await Assert.ThrowsExactlyAsync<VcsException>(() => dropper.ShelveAsync(12346, ShelveMode.Replace, dropUnopened: true, Token));
+		StringAssert.Contains(dropped.Message, "//Game/main/Config/Removed.ini");
+		Assert.DoesNotContain("ShelvedOnly.cpp", dropped.Message, "that one was asked for");
+	}
+
+	[TestMethod]
+	public async Task AShelfThatCantBeReadAfterAReplaceNamesWhatMayHaveGone()
+	{
+		using TempDirectory root = new();
+		FakePerforceConnection connection = Fake(root).On("change", "change-o-pending").On("shelve", "shelve")
+			.OnEach("describe", "describe-s-shelved-only", "text:Connect to server failed; check $P4PORT.\n");
+		using PerforceVersionControl p4 = new(connection, root.Directory);
+
+		VcsException exception = await Assert.ThrowsExactlyAsync<VcsException>(() => p4.ShelveAsync(12346, ShelveMode.Replace, dropUnopened: true, Token));
+
+		StringAssert.Contains(exception.Message, "shelved 2 file(s) in change 12346, but uak could not read the shelf afterwards");
+		StringAssert.Contains(exception.Message, "//Game/main/Source/Game/ShelvedOnly.cpp", "the files -r deleted (shelved and not opened)");
+		StringAssert.Contains(exception.Message, "Connect to server failed");
+
+		// -f deletes nothing, so it names nothing, but still fails: uak can't say what changed.
+		FakePerforceConnection update = Fake(root).On("change", "change-o-pending").On("shelve", "shelve")
+			.OnEach("describe", "describe-s-pending", "text:Connect to server failed; check $P4PORT.\n");
+		using PerforceVersionControl updater = new(update, root.Directory);
+		VcsException updateFailure = await Assert.ThrowsExactlyAsync<VcsException>(() => updater.ShelveAsync(12346, ShelveMode.Update, cancellationToken: Token));
+		StringAssert.Contains(updateFailure.Message, "could not read the shelf afterwards");
+		Assert.DoesNotContain("deletes", updateFailure.Message);
+	}
+
+	[TestMethod]
+	public async Task AChangedActionOrADigestThatAppearsOrGoesCountsAsReplaced()
+	{
+		using TempDirectory root = new();
+		// New.cpp's digest is gone, and Removed.ini's action changed from delete to edit with the same digest.
+		FakePerforceConnection connection = Fake(root).On("change", "change-o-pending").On("shelve", "shelve").OnEach("describe", "describe-s-pending", "describe-s-pending-action", "describe-s-pending-action", "describe-s-pending");
+		using PerforceVersionControl p4 = new(connection, root.Directory);
+
+		PerforceShelveResult result = await p4.ShelveAsync(12346, ShelveMode.Update, cancellationToken: Token);
+		CollectionAssert.AreEquivalent(new[] { "//Game/main/Source/Game/New.cpp", "//Game/main/Config/Removed.ini" }, result.Replaced.ToArray());
+
+		// And back: a digest that appears is a change too.
+		PerforceShelveResult back = await p4.ShelveAsync(12346, ShelveMode.Update, cancellationToken: Token);
+		CollectionAssert.AreEquivalent(new[] { "//Game/main/Source/Game/New.cpp", "//Game/main/Config/Removed.ini" }, back.Replaced.ToArray());
+
+		PerforceShelfFile file = new("//a", "edit", "AB");
+		Assert.IsTrue(PerforceVersionControl.SameShelvedFile(file, file with { Digest = "ab" }), "digests compare ignoring case");
+		Assert.IsFalse(PerforceVersionControl.SameShelvedFile(file, file with { Digest = null }));
+		Assert.IsFalse(PerforceVersionControl.SameShelvedFile(file, file with { Action = "add" }));
+		Assert.IsTrue(PerforceVersionControl.SameShelf([file, new("//b", "add", null)], [new("//b", "add", null), file]), "order doesn't matter");
+		Assert.IsFalse(PerforceVersionControl.SameShelf([file], [file, new("//b", "add", null)]));
+		Assert.IsFalse(PerforceVersionControl.SameShelf([file, file], [file, new("//b", "add", null)]));
+	}
+
+	[TestMethod]
+	public async Task AnUpdateReportsShelvedFilesItKeptAndTheShelf()
+	{
+		using TempDirectory root = new();
+		// ShelvedOnly.cpp is shelved but not opened: p4 shelve -f keeps it, and a submit of the shelf would include it.
+		FakePerforceConnection connection = Fake(root).On("change", "change-o-pending").On("shelve", "shelve").On("describe", "describe-s-shelved-only");
+		using PerforceVersionControl p4 = new(connection, root.Directory);
+
+		PerforceShelveResult result = await p4.ShelveAsync(12346, ShelveMode.Update, cancellationToken: Token);
+
+		CollectionAssert.AreEqual(new[] { "//Game/main/Source/Game/ShelvedOnly.cpp" }, result.Kept.ToArray());
+		Assert.HasCount(3, result.Shelf, "the shelf after shelving");
+		CollectionAssert.AreEqual(new[] { "//Game/main/Source/Game/ShelvedOnly.cpp" }, (await p4.GetShelvedNotOpenedAsync(12346, Token)).ToArray());
 	}
 
 	[TestMethod]

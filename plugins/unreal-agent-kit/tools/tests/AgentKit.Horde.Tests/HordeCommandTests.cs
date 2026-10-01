@@ -40,6 +40,7 @@ public sealed class HordeCommandTests
 			store.Save(s_server, "project-main", new HordeTemplate("editor-preflight", "Editor Preflight", true, true), new Dictionary<string, string>(), DateTime.UtcNow);
 		}
 		command.BuildSettings = () => store;
+		command.PreflightRecords = () => new HordePreflightRecordStore(Path.Combine(home, "horde"));
 		command.TokenCache = () => cache ?? new HordeTokenCache(Path.Combine(home, "horde"), null);
 		command.Output = output;
 		command.ErrorOutput = errors ?? new StringWriter();
@@ -261,67 +262,171 @@ public sealed class HordeCommandTests
 	static HordeJobSummary RunningPreflight(string id, string created = "2026-01-01T01:00:00Z", bool autoSubmit = false, Dictionary<string, string>? parameters = null)
 		=> new(id, "project-main", "editor-preflight", "Running", created) { AutoSubmit = autoSubmit, Parameters = parameters ?? [] };
 
+	static string NewHome() => Path.Combine(Path.GetTempPath(), "uak-horde-tests", Guid.NewGuid().ToString("N"));
+
+	/// <summary>Records a job as one uak started on change 12345, building <paramref name="shelf"/> (by default a new FakeWorkspace's shelf).</summary>
+	static void Remember(string home, string jobId, IEnumerable<AgentKit.Vcs.PerforceShelfFile>? shelf = null, int change = 12345)
+		=> new HordePreflightRecordStore(Path.Combine(home, "horde")).Save(s_server, new HordePreflightRecord
+		{
+			Job = jobId,
+			Change = change,
+			Stream = "project-main",
+			Template = "editor-preflight",
+			Shelf = HordePreflightRecordStore.ToRecorded(shelf ?? new FakeWorkspace().Shelf!),
+			Created = DateTime.UtcNow,
+		}, DateTime.UtcNow);
+
+	/// <summary>A context whose logger keeps its lines.</summary>
+	static UakContext Logged(out CapturingLogger logger)
+	{
+		logger = new CapturingLogger();
+		return new UakContext { StateDirectory = new DirectoryInfo(Path.GetTempPath()), Logger = logger };
+	}
+
+	/// <summary>Runs a preflight of change 12345 with a running job (remembered as uak's own unless told otherwise).</summary>
+	async Task<(FakeHordeApi Api, string Output, int Exit, string Errors)> RunPreflight(HordeJobSummary? running, FakeWorkspace? workspace, bool remembered, params string[] arguments)
+	{
+		FakeHordeApi api = WithStreams();
+		string home = NewHome();
+		if (running is not null)
+		{
+			api.Preflights.Add([running]);
+			if (remembered)
+			{
+				Remember(home, running.Id);
+			}
+		}
+		using StringWriter output = new();
+		using StringWriter errors = new();
+		int exit = await Setup(new HordePreflightCommand(), api, workspace ?? new FakeWorkspace(), output, errors: errors, home: home).RunAsync(s_context, ["-c=12345", .. arguments], Token);
+		return (api, output.ToString(), exit, errors.ToString());
+	}
+
 	[TestMethod]
 	public async Task OnlyTheSameRequestMadeAfterTheLastShelveIsReused()
 	{
-		async Task<(FakeHordeApi Api, string Output, int Exit)> Run(HordeJobSummary? running, FakeWorkspace? workspace = null, params string[] arguments)
-		{
-			FakeHordeApi api = WithStreams();
-			if (running is not null)
-			{
-				api.Preflights.Add([running]);
-			}
-			using StringWriter output = new();
-			int exit = await Setup(new HordePreflightCommand(), api, workspace ?? new FakeWorkspace(), output).RunAsync(s_context, ["-c=12345", .. arguments], Token);
-			return (api, output.ToString(), exit);
-		}
-
-		// The same stream, template, parameters and auto-submit, created after the last shelve: reported, not started again.
-		(FakeHordeApi same, string text, int exit) = await Run(RunningPreflight("oldjob"));
+		// The same stream, template, parameters and auto-submit, started by uak after the last shelve, on the same shelf:
+		// reported, not started again.
+		(FakeHordeApi same, string text, int exit, _) = await RunPreflight(RunningPreflight("oldjob"), null, true);
 		Assert.AreEqual(0, exit);
 		Assert.IsEmpty(same.Created);
 		StringAssert.StartsWith(text, "reused: oldjob (still running");
 		StringAssert.Contains(text, "(reused job)" + Environment.NewLine + "Job URL: https://horde.example.com/job/oldjob");
 		StringAssert.Contains(text, "job oldjob (reused)");
 
-		// Created before the change was last shelved: it builds an older shelf.
-		Assert.HasCount(1, (await Run(RunningPreflight("stale", created: "2025-12-31T23:59:00Z"))).Api.Created);
-		// No parameters in the answer, or no shelve time: uak can't tell, so it starts a new one.
-		Assert.HasCount(1, (await Run(RunningPreflight("unknown") with { Parameters = null })).Api.Created);
-		Assert.HasCount(1, (await Run(RunningPreflight("oldjob"), new FakeWorkspace { ShelveTime = null })).Api.Created);
+		// Created before the change was last shelved, or within the margin after it: it may build an older shelf.
+		Assert.HasCount(1, (await RunPreflight(RunningPreflight("stale", created: "2025-12-31T23:59:00Z"), null, true)).Api.Created);
+		Assert.HasCount(1, (await RunPreflight(RunningPreflight("close", created: "2026-01-01T00:00:03Z"), null, true)).Api.Created);
+		// No parameters in the answer, no shelve time, or the shelf can't be read: uak can't tell, so it starts a new one.
+		Assert.HasCount(1, (await RunPreflight(RunningPreflight("unknown") with { Parameters = null }, null, true)).Api.Created);
+		Assert.HasCount(1, (await RunPreflight(RunningPreflight("oldjob"), new FakeWorkspace { ShelveTime = null }, true)).Api.Created);
+		Assert.HasCount(1, (await RunPreflight(RunningPreflight("oldjob"), new FakeWorkspace { Shelf = null }, true)).Api.Created);
+		// Not started by uak (no record), or its recorded shelf isn't the current one: a new one.
+		Assert.HasCount(1, (await RunPreflight(RunningPreflight("theirs"), null, false)).Api.Created);
+		FakeWorkspace reshelved = new() { Shelf = [new("//Project/Main/Docs/Notes.md", "edit", "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF")] };
+		Assert.HasCount(1, (await RunPreflight(RunningPreflight("oldjob"), reshelved, true)).Api.Created);
+		// Started with other arguments or targets: not uak's request.
+		Assert.HasCount(1, (await RunPreflight(RunningPreflight("args") with { AdditionalArguments = ["-Extra"] }, null, true)).Api.Created);
+		Assert.HasCount(1, (await RunPreflight(RunningPreflight("targets") with { Targets = ["Editor Win64"] }, null, true)).Api.Created);
 		// -force always starts one.
-		Assert.HasCount(1, (await Run(RunningPreflight("oldjob"), null, "-force")).Api.Created);
+		Assert.HasCount(1, (await RunPreflight(RunningPreflight("oldjob"), null, true, "-force")).Api.Created);
 
 		// A running auto-submit preflight is not reused for a request without auto-submit, and the output says it is running.
-		(FakeHordeApi submitting, string note, _) = await Run(RunningPreflight("autojob", autoSubmit: true));
+		(FakeHordeApi submitting, string note, _, _) = await RunPreflight(RunningPreflight("autojob", autoSubmit: true), null, true);
 		Assert.IsFalse(submitting.Created.Single().AutoSubmit);
-		StringAssert.Contains(note, "an AUTO-SUBMIT preflight of change 12345 is running: https://horde.example.com/job/autojob");
+		StringAssert.Contains(note, "Note: an AUTO-SUBMIT preflight of change 12345 is running: https://horde.example.com/job/autojob");
 		// With -autosubmit it is, and the output says auto-submit is on.
-		(FakeHordeApi both, string on, _) = await Run(RunningPreflight("autojob", autoSubmit: true), null, "-autosubmit");
+		(FakeHordeApi both, string on, _, _) = await RunPreflight(RunningPreflight("autojob", autoSubmit: true), null, true, "-autosubmit");
 		Assert.IsEmpty(both.Created);
 		StringAssert.Contains(on, "reused: autojob");
 		StringAssert.Contains(on, "AUTO-SUBMIT IS ON");
 	}
 
 	[TestMethod]
+	public async Task ANewPreflightIsRecordedWithItsShelf()
+	{
+		FakeHordeApi api = WithStreams();
+		string home = NewHome();
+		FakeWorkspace workspace = new();
+		using StringWriter output = new();
+		Assert.AreEqual(0, await Setup(new HordePreflightCommand(), api, workspace, output, home: home).RunAsync(s_context, ["-c=12345"], Token));
+
+		HordePreflightRecord record = new HordePreflightRecordStore(Path.Combine(home, "horde")).Read(s_server, "newjob")!;
+		Assert.AreEqual(12345, record.Change);
+		Assert.AreEqual("editor-preflight", record.Template);
+		Assert.IsTrue(AgentKit.Vcs.PerforceVersionControl.SameShelf(record.ShelfFiles, workspace.Shelf!));
+
+		// A shelf that can't be read: no record, so the job is never reused.
+		string other = NewHome();
+		Assert.AreEqual(0, await Setup(new HordePreflightCommand(), WithStreams(), new FakeWorkspace { Shelf = null }, output, home: other).RunAsync(s_context, ["-c=12345", "-force"], Token));
+		Assert.IsNull(new HordePreflightRecordStore(Path.Combine(other, "horde")).Read(s_server, "newjob"));
+		Assert.IsNull(new HordePreflightRecordStore(Path.Combine(other, "horde")).PathFor(s_server, "../escape"), "a job id is never a path");
+	}
+
+	[TestMethod]
+	public async Task AutoSubmitIsRefusedWhileAnotherAutoSubmitPreflightRuns()
+	{
+		// E7b: created before the last shelve, so not reused: a second auto-submit job would also submit the change.
+		(FakeHordeApi stale, _, int exit, _) = await RunPreflight(RunningPreflight("autojob", created: "2025-12-31T23:00:00Z", autoSubmit: true), null, true, "-autosubmit");
+		Assert.AreEqual(HordeExitCodes.Error, exit);
+		Assert.IsEmpty(stale.Created, "nothing started");
+
+		// Parameters uak can't compare: not known to be the same request, so not reused either.
+		(FakeHordeApi other, _, int otherExit, _) = await RunPreflight(RunningPreflight("autojob", autoSubmit: true) with { Parameters = null }, null, true, "-autosubmit");
+		Assert.IsEmpty(other.Created);
+		Assert.AreEqual(HordeExitCodes.Error, otherExit);
+
+		// -force doesn't get past it.
+		(FakeHordeApi forced, _, int forcedExit, _) = await RunPreflight(RunningPreflight("autojob", autoSubmit: true), null, true, "-autosubmit", "-force");
+		Assert.AreEqual(HordeExitCodes.Error, forcedExit);
+		Assert.IsEmpty(forced.Created);
+
+		// The refusal says why.
+		FakeHordeApi api = WithStreams();
+		api.Preflights.Add([RunningPreflight("autojob", created: "2025-12-31T23:00:00Z", autoSubmit: true)]);
+		using StringWriter output = new();
+		Assert.AreEqual(HordeExitCodes.Error, await Setup(new HordePreflightCommand(), api, new FakeWorkspace(), output).RunAsync(Logged(out CapturingLogger logger), ["-c=12345", "-autosubmit"], Token));
+		StringAssert.Contains(logger.Lines.Single(line => line.StartsWith("Error:", StringComparison.Ordinal)), "Another auto-submit preflight of change 12345 is running (https://horde.example.com/job/autojob)");
+	}
+
+	[TestMethod]
+	public async Task AnAutoSubmitPreflightOfAnOlderShelfIsAWarning()
+	{
+		(FakeHordeApi api, string output, int exit, _) = await RunPreflight(RunningPreflight("autojob", created: "2025-12-31T23:00:00Z", autoSubmit: true), null, false);
+		Assert.AreEqual(0, exit);
+		Assert.HasCount(1, api.Created);
+		StringAssert.Contains(output, "WARNING: an AUTO-SUBMIT preflight of change 12345 is running (https://horde.example.com/job/autojob), and it was created before the change was last shelved");
+		StringAssert.Contains(output, "Horde submits the change's CURRENT shelf");
+
+		// uak started it on another shelf: the same warning.
+		FakeWorkspace reshelved = new() { Shelf = [new("//Project/Main/Docs/Notes.md", "edit", "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF")] };
+		StringAssert.Contains((await RunPreflight(RunningPreflight("autojob", autoSubmit: true), reshelved, true)).Output, "WARNING: an AUTO-SUBMIT preflight");
+		// Even with -force, which reads the shelf only for this.
+		StringAssert.Contains((await RunPreflight(RunningPreflight("autojob", created: "2025-12-31T23:00:00Z", autoSubmit: true), null, false, "-force")).Output, "WARNING: an AUTO-SUBMIT preflight");
+	}
+
+	[TestMethod]
 	public async Task ReuseComparesEveryParameterValue()
 	{
 		FakeHordeApi api = WithTemplates();
+		string home = NewHome();
 		// The saved settings in Setup are editor-preflight with its defaults; Horde reports a job's values with "True"/"False".
 		Dictionary<string, string> defaults = new() { ["run-tests"] = "True", ["win64"] = "True", ["ps5"] = "False", ["config-dev"] = "True", ["config-test"] = "False", ["extra-args"] = "" };
 		api.Preflights.Add([RunningPreflight("samejob", parameters: defaults)]);
+		Remember(home, "samejob");
+		Remember(home, "otherjob");
 		using StringWriter output = new();
-		Assert.AreEqual(0, await Setup(new HordePreflightCommand(), api, new FakeWorkspace(), output).RunAsync(s_context, ["-c=12345"], Token));
+		Assert.AreEqual(0, await Setup(new HordePreflightCommand(), api, new FakeWorkspace(), output, home: home).RunAsync(s_context, ["-c=12345"], Token));
 		Assert.IsEmpty(api.Created);
 
 		FakeHordeApi other = WithTemplates();
 		other.Preflights.Add([RunningPreflight("otherjob", parameters: new(defaults) { ["ps5"] = "True" })]);
-		Assert.AreEqual(0, await Setup(new HordePreflightCommand(), other, new FakeWorkspace(), output).RunAsync(s_context, ["-c=12345"], Token));
+		Assert.AreEqual(0, await Setup(new HordePreflightCommand(), other, new FakeWorkspace(), output, home: home).RunAsync(s_context, ["-c=12345"], Token));
 		Assert.HasCount(1, other.Created, "different parameters: a new preflight");
 
 		FakeHordeApi overridden = WithTemplates();
 		overridden.Preflights.Add([RunningPreflight("samejob", parameters: defaults)]);
-		Assert.AreEqual(0, await Setup(new HordePreflightCommand(), overridden, new FakeWorkspace(), output).RunAsync(s_context, ["-c=12345", "-param:run-tests=false"], Token));
+		Assert.AreEqual(0, await Setup(new HordePreflightCommand(), overridden, new FakeWorkspace(), output, home: home).RunAsync(s_context, ["-c=12345", "-param:run-tests=false"], Token));
 		Assert.HasCount(1, overridden.Created, "-param: changes the request");
 	}
 
@@ -336,13 +441,81 @@ public sealed class HordeCommandTests
 		Assert.HasCount(1, api.Created, "a new shelf gets a new preflight");
 		CollectionAssert.AreEqual(new[] { 12345 }, workspace.Shelved);
 
+		// Refused (exit 5, not a usage error), shelving and starting nothing.
 		FakeHordeApi submitting = WithStreams();
 		submitting.Preflights.Add([RunningPreflight("autojob", autoSubmit: true)]);
 		FakeWorkspace untouched = new();
-		UakUsageException refused = await Assert.ThrowsExactlyAsync<UakUsageException>(() => Setup(new HordePreflightCommand(), submitting, untouched, output).RunAsync(s_context, ["-c=12345", "-shelve"], Token));
-		StringAssert.Contains(refused.Message, "auto-submit preflight of change 12345 is running");
+		Assert.AreEqual(HordeExitCodes.Error, await Setup(new HordePreflightCommand(), submitting, untouched, output).RunAsync(Logged(out CapturingLogger logger), ["-c=12345", "-shelve"], Token));
+		StringAssert.Contains(logger.Lines.Single(line => line.StartsWith("Error:", StringComparison.Ordinal)), "auto-submit preflight of change 12345 is running");
 		Assert.IsEmpty(untouched.Shelved, "nothing shelved");
 		Assert.IsEmpty(submitting.Created);
+
+		// One that starts between the first look and the shelve: the second look, just before shelving, refuses too.
+		FakeHordeApi late = WithStreams();
+		late.Preflights.AddRange([[], [RunningPreflight("autojob", autoSubmit: true)]]);
+		FakeWorkspace stillUntouched = new();
+		Assert.AreEqual(HordeExitCodes.Error, await Setup(new HordePreflightCommand(), late, stillUntouched, output).RunAsync(s_context, ["-c=12345", "-shelve"], Token));
+		Assert.IsEmpty(stillUntouched.Shelved);
+		Assert.IsEmpty(late.Created);
+	}
+
+	[TestMethod]
+	public async Task ShelveAutoSubmitRefusesShelvedFilesThatAreNotOpened()
+	{
+		// Before shelving: the shelf holds a file that isn't opened, which an auto-submit would submit too.
+		FakeWorkspace kept = new();
+		kept.ShelvedNotOpened.Add("//Project/Main/Docs/Old.md");
+		FakeHordeApi api = WithStreams();
+		using StringWriter output = new();
+		Assert.AreEqual(HordeExitCodes.Error, await Setup(new HordePreflightCommand(), api, kept, output).RunAsync(Logged(out CapturingLogger logger), ["-c=12345", "-shelve", "-autosubmit"], Token));
+		StringAssert.Contains(logger.Lines.Single(line => line.StartsWith("Error:", StringComparison.Ordinal)), "//Project/Main/Docs/Old.md");
+		Assert.IsEmpty(kept.Shelved);
+		Assert.IsEmpty(api.Created);
+
+		// Without -autosubmit, or with -allow-shelved-only, it goes ahead.
+		Assert.AreEqual(0, await Setup(new HordePreflightCommand(), WithStreams(), kept, output).RunAsync(s_context, ["-c=12345", "-shelve"], Token));
+		FakeHordeApi allowed = WithStreams();
+		Assert.AreEqual(0, await Setup(new HordePreflightCommand(), allowed, kept, output).RunAsync(s_context, ["-c=12345", "-shelve", "-autosubmit", "-allow-shelved-only"], Token));
+		Assert.IsTrue(allowed.Created.Single().AutoSubmit);
+
+		// After shelving: the shelve kept such a file (it left the change meanwhile). Shelved, but nothing started.
+		FakeWorkspace keptLate = new() { ShelveResult = new([new("//Project/Main/Docs/Notes.md", "edit")], [], [], ["//Project/Main/Docs/Late.md"]) };
+		FakeHordeApi refused = WithStreams();
+		using StringWriter shelvedOutput = new();
+		Assert.AreEqual(HordeExitCodes.Error, await Setup(new HordePreflightCommand(), refused, keptLate, shelvedOutput).RunAsync(Logged(out CapturingLogger lateLogger), ["-c=12345", "-shelve", "-autosubmit"], Token));
+		StringAssert.Contains(lateLogger.Lines.Single(line => line.StartsWith("Error:", StringComparison.Ordinal)), "The change was shelved; no preflight was started.");
+		StringAssert.Contains(shelvedOutput.ToString(), "kept on the shelf, but not opened in change 12345");
+		CollectionAssert.AreEqual(new[] { 12345 }, keptLate.Shelved);
+		Assert.IsEmpty(refused.Created);
+
+		await Assert.ThrowsExactlyAsync<UakUsageException>(() => Setup(new HordePreflightCommand(), WithStreams(), kept, output).RunAsync(s_context, ["-c=12345", "-shelve", "-allow-shelved-only"], Token));
+	}
+
+	[TestMethod]
+	public async Task UnderJsonTheShelveIsReportedOnStandardErrorAndInTheJson()
+	{
+		// E2: the files whose shelved content changed went nowhere under -json.
+		FakeWorkspace workspace = new() { ShelveResult = new([new("//Project/Main/Docs/Notes.md", "edit")], ["//Project/Main/Docs/Notes.md"], [], ["//Project/Main/Docs/Old.md"]) };
+		FakeHordeApi api = WithStreams();
+		using StringWriter output = new();
+		using StringWriter errors = new();
+		Assert.AreEqual(0, await Setup(new HordePreflightCommand(), api, workspace, output, errors: errors).RunAsync(s_context, ["-c=12345", "-shelve", "-json"], Token));
+
+		StringAssert.Contains(errors.ToString(), "Shelved 1 file(s) in change 12345.");
+		StringAssert.Contains(errors.ToString(), "replaced on the shelf (its shelved content or action changed): //Project/Main/Docs/Notes.md");
+		StringAssert.Contains(errors.ToString(), "kept on the shelf, but not opened in change 12345");
+		using JsonDocument document = JsonDocument.Parse(output.ToString());
+		Assert.AreEqual("//Project/Main/Docs/Notes.md", document.RootElement.GetProperty("shelved")[0].GetProperty("depotFile").GetString());
+		Assert.AreEqual("//Project/Main/Docs/Notes.md", document.RootElement.GetProperty("replaced")[0].GetString());
+		Assert.AreEqual("//Project/Main/Docs/Old.md", document.RootElement.GetProperty("kept")[0].GetString());
+
+		// With -wait, the job's JSON carries them too.
+		FakeHordeApi waited = WithStreams();
+		waited.JobAnswers.Add(Done("Success").Json);
+		using StringWriter waitOutput = new();
+		Assert.AreEqual(0, await Setup(new HordePreflightCommand(), waited, workspace, waitOutput).RunAsync(s_context, ["-c=12345", "-shelve", "-wait", "-json"], Token));
+		using JsonDocument waitDocument = JsonDocument.Parse(waitOutput.ToString());
+		Assert.AreEqual("//Project/Main/Docs/Old.md", waitDocument.RootElement.GetProperty("kept")[0].GetString());
 	}
 
 	[TestMethod]
@@ -350,9 +523,11 @@ public sealed class HordeCommandTests
 	{
 		FakeHordeApi api = WithStreams();
 		api.Preflights.Add([RunningPreflight("autojob", autoSubmit: true)]);
+		string home = NewHome();
+		Remember(home, "autojob");
 		using StringWriter output = new();
 		using StringWriter errors = new();
-		Assert.AreEqual(0, await Setup(new HordePreflightCommand(), api, new FakeWorkspace(), output, errors: errors).RunAsync(s_context, ["-c=12345", "-autosubmit", "-json"], Token));
+		Assert.AreEqual(0, await Setup(new HordePreflightCommand(), api, new FakeWorkspace(), output, errors: errors, home: home).RunAsync(s_context, ["-c=12345", "-autosubmit", "-json"], Token));
 
 		StringAssert.StartsWith(errors.ToString(), "reused: autojob");
 		StringAssert.Contains(errors.ToString(), "AUTO-SUBMIT IS ON");
@@ -497,16 +672,129 @@ public sealed class HordeCommandTests
 	{
 		FakeHordeApi api = WithStreams();
 		api.CreateFailure = new TaskCanceledException("timed out");
-		api.Preflights.AddRange([[], [], [new HordeJobSummary("madeanyway", "project-main", "editor-preflight", "Waiting", "x")]]);
+		api.Preflights.AddRange([[], [], [new HordeJobSummary("madeanyway", "project-main", "editor-preflight", "Waiting", "x") { Parameters = new Dictionary<string, string>() }]]);
 		using StringWriter output = new();
 
 		Assert.AreEqual(0, await Setup(new HordePreflightCommand(), api, new FakeWorkspace(), output).RunAsync(s_context, ["-c=12345"], Token));
 		Assert.HasCount(1, api.Created, "sent once");
 		StringAssert.Contains(output.ToString(), "Job URL: https://horde.example.com/job/madeanyway");
 
+		// A new job of the same stream and template, but not this request (auto-submit, other arguments, parameters uak can't
+		// read): not adopted, so the failure stands.
+		foreach (HordeJobSummary someoneElses in new[]
+		{
+			new HordeJobSummary("theirs", "project-main", "editor-preflight", "Waiting", "x") { Parameters = new Dictionary<string, string>(), AutoSubmit = true },
+			new HordeJobSummary("theirs", "project-main", "editor-preflight", "Waiting", "x") { Parameters = new Dictionary<string, string>(), AdditionalArguments = ["-Extra"] },
+			new HordeJobSummary("theirs", "project-main", "editor-preflight", "Waiting", "x"),
+		})
+		{
+			FakeHordeApi lost = WithStreams();
+			lost.CreateFailure = new TaskCanceledException("timed out");
+			lost.Preflights.AddRange([[], [], [someoneElses]]);
+			using StringWriter lostOutput = new();
+			Assert.AreEqual(HordeExitCodes.Error, await Setup(new HordePreflightCommand(), lost, new FakeWorkspace(), lostOutput).RunAsync(s_context, ["-c=12345"], Token));
+			Assert.DoesNotContain("theirs", lostOutput.ToString());
+		}
+
 		FakeHordeApi refused = WithStreams();
 		refused.CreateFailure = new HordeApiException(400, "Change 12345 has no shelved files");
 		Assert.AreEqual(HordeExitCodes.Error, await Setup(new HordePreflightCommand(), refused, new FakeWorkspace(), output).RunAsync(s_context, ["-c=12345"], Token));
+	}
+
+	[TestMethod]
+	public async Task A401OnTheCreateIsRetriedExactlyOnce()
+	{
+		string home = NewHome();
+		HordeTokenCache cache = new(Path.Combine(home, "horde"), new FakeProtector());
+		string old = Tokens.Jwt(DateTime.UtcNow.AddHours(1), "old");
+		Assert.IsTrue(cache.Save(s_server, old));
+		FakeHordeApi api = WithStreams(new FakeHordeApi { LoggedIn = true, AccessToken = Tokens.Jwt(DateTime.UtcNow.AddHours(1), "fresh") });
+		api.CreateFailures.Add(new HordeAuthException("401", notSignedIn: true));
+		List<string?> tokens = [];
+		using StringWriter output = new();
+		HordePreflightCommand command = Setup(new HordePreflightCommand(), api, new FakeWorkspace(), output, home: home, cache: cache);
+		command.CreateApi = (_, _, token, _) =>
+		{
+			tokens.Add(token);
+			return api;
+		};
+
+		Assert.AreEqual(0, await command.RunAsync(s_context, ["-c=12345"], Token));
+		Assert.HasCount(2, api.Created, "the refused POST, then one retry");
+		CollectionAssert.AreEqual(new[] { old, null }, tokens, "the saved token, then one fresh sign-in");
+		StringAssert.Contains(output.ToString(), "Job URL: https://horde.example.com/job/newjob");
+
+		// Refused again after the fresh sign-in: no third POST.
+		FakeHordeApi refusing = WithStreams(new FakeHordeApi { LoggedIn = true });
+		refusing.CreateFailures.AddRange([new HordeAuthException("401", notSignedIn: true), new HordeAuthException("401", notSignedIn: true)]);
+		Assert.IsTrue(cache.Save(s_server, old));
+		Assert.AreEqual(HordeExitCodes.NotLoggedIn, await Setup(new HordePreflightCommand(), refusing, new FakeWorkspace(), output, home: home, cache: cache).RunAsync(s_context, ["-c=12345"], Token));
+		Assert.HasCount(2, refusing.Created);
+	}
+
+	[TestMethod]
+	public async Task ARebuiltClientKeepsHordesOwnSignInAndA401AfterItSignsInAgain()
+	{
+		// E1: a fresh sign-in (Horde's own, self-refreshing token handling) is rebuilt after 4 transient failures. The rebuilt
+		// client gets Horde's own handling again, not a copy of the access token; and a 401 after the rebuild signs in again.
+		FakeHordeApi api = new() { LoggedIn = true, AccessToken = Tokens.Jwt(DateTime.UtcNow.AddHours(1), "fresh") };
+		api.JobAnswers.AddRange([new HttpRequestException("reset"), new HttpRequestException("reset"), new HttpRequestException("reset"), new HttpRequestException("reset"),
+			new HordeAuthException("401", notSignedIn: true), Done("Success").Json]);
+		List<string?> tokens = [];
+		using StringWriter output = new();
+		HordeJobCommand command = Setup(new HordeJobCommand(), api, null, output);
+		command.CreateApi = (_, _, token, _) =>
+		{
+			tokens.Add(token);
+			return api;
+		};
+
+		Assert.AreEqual(0, await command.RunAsync(s_context, ["-id=job1", "-wait"], Token));
+		CollectionAssert.AreEqual(new string?[] { null, null, null }, tokens, "the sign-in, the rebuild, and the sign-in after the 401: never a pinned token");
+
+		// A client on uak's cached token keeps that token through a rebuild, and a 401 on it still signs in again.
+		string home = NewHome();
+		HordeTokenCache cache = new(Path.Combine(home, "horde"), new FakeProtector());
+		string saved = Tokens.Jwt(DateTime.UtcNow.AddHours(1), "saved");
+		Assert.IsTrue(cache.Save(s_server, saved));
+		FakeHordeApi cachedApi = new() { LoggedIn = true, AccessToken = saved };
+		cachedApi.JobAnswers.AddRange([new HttpRequestException("reset"), new HttpRequestException("reset"), new HttpRequestException("reset"), new HttpRequestException("reset"),
+			new HordeAuthException("401", notSignedIn: true), Done("Success").Json]);
+		List<string?> cachedTokens = [];
+		HordeJobCommand cached = Setup(new HordeJobCommand(), cachedApi, null, output, home: home, cache: cache);
+		cached.CreateApi = (_, _, token, _) =>
+		{
+			cachedTokens.Add(token);
+			return cachedApi;
+		};
+		Assert.AreEqual(0, await cached.RunAsync(s_context, ["-id=job1", "-wait"], Token));
+		CollectionAssert.AreEqual(new string?[] { saved, saved, null }, cachedTokens, "the saved token, kept by the rebuild, then a fresh sign-in");
+	}
+
+	[TestMethod]
+	public async Task ASignInMidWaitEndsAtTheWaitsDeadline()
+	{
+		// After 15 + 30 + 45 s of polls, 1 s of a 91 s wait is left when Horde refuses the cached token; nobody signs in.
+		string home = NewHome();
+		HordeTokenCache cache = new(Path.Combine(home, "horde"), new FakeProtector());
+		Assert.IsTrue(cache.Save(s_server, Tokens.Jwt(DateTime.UtcNow.AddHours(1), "saved")));
+		FakeHordeApi api = new() { LoggedIn = false, LoginHangs = true };
+		api.JobAnswers.AddRange([Jobs.Job("Running", "t1"), null, null, new HordeAuthException("401", notSignedIn: true)]);
+		using StringWriter output = new();
+		System.Diagnostics.Stopwatch elapsed = System.Diagnostics.Stopwatch.StartNew();
+
+		int exit = await Setup(new HordeJobCommand(), api, null, output, home: home, cache: cache).RunAsync(s_context, ["-id=job1", "-wait", "-timeout=91"], Token);
+
+		Assert.AreEqual(HordeExitCodes.NotLoggedIn, exit);
+		Assert.AreEqual(1, api.Logins, "the sign-in page opened once");
+		Assert.IsLessThan(60.0, elapsed.Elapsed.TotalSeconds, "bounded by the wait's 1 s left, not -login-timeout's 600 s");
+
+		// No time left at all: no sign-in is tried.
+		Assert.IsTrue(cache.Save(s_server, Tokens.Jwt(DateTime.UtcNow.AddHours(1), "saved")));
+		FakeHordeApi late = new() { LoggedIn = false, LoginHangs = true };
+		late.JobAnswers.AddRange([Jobs.Job("Running", "t1"), null, null, null, new HordeAuthException("401", notSignedIn: true)]);
+		Assert.AreEqual(HordeExitCodes.NotLoggedIn, await Setup(new HordeJobCommand(), late, null, output, home: home, cache: cache).RunAsync(s_context, ["-id=job1", "-wait", "-timeout=150"], Token));
+		Assert.AreEqual(0, late.Logins);
 	}
 
 	[TestMethod]
