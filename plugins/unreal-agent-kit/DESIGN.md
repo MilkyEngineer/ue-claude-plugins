@@ -13,7 +13,7 @@ It must not depend on any particular engine, project, platform or version-contro
 
 The owner decided on 2026-10-01:
 - the name is UnrealAgentKit, living in the `ue-claude-plugins` marketplace;
-- UE 5.8 and 5.7;
+- UE 5.8 and 5.7, installed or built from source (a source build has no `Engine/Build/InstalledBuild.txt`; tested with a 5.6 source build, whose projects may sit inside the engine's root folder);
 - Windows now, but keep everything platform-neutral (no Windows-only code without a Linux/Mac path or a clear TODO).
 
 ## Layout
@@ -23,6 +23,7 @@ plugins/unreal-agent-kit/
   .claude-plugin/plugin.json
   agents/            tiered workers and the reviewer (generic ground rules)
   skills/            the workflow skill (briefs, delegation, reviews, doc sync) and templates
+  hooks/             SessionStart: says when this version's uak isn't published yet
   docs/              install, settings, CLAUDE.md snippet
   tools/
     UnrealAgentKit.sln, Directory.Build.props, global.json, build/EpicGames.props
@@ -32,6 +33,7 @@ plugins/unreal-agent-kit/
     src/AgentKit.Vcs       IVersionControl: Git, Perforce, None
     src/AgentKit.Unreal    compile (UBT -SingleFile), build, automation tests
     src/uak                the CLI host
+    src/EpicGames.Perforce.FromSource  the engine's EpicGames.Perforce source, built when no prebuilt DLL exists
     tests/AgentKit.*.Tests MSTest (MSTest.Sdk), one project per library
 ```
 
@@ -62,7 +64,9 @@ plugins/unreal-agent-kit/
 - **EpicGames.Perforce.** The engine ships it prebuilt with AutomationTool: in `AutomationUtils/<tfm>/` in UE 5.8, and directly in `AutomationUtils/` in UE 5.7. AgentKit.Vcs references that DLL itself, based on `$(UakEngineRoot)`: the resolved engine root, with a trailing slash. `UakEngineDir` is only the optional input. It is not in `build/EpicGames.props`, because only AgentKit.Vcs and its tests need it.
   - Its one third-party dependency comes from the engine too: OpenTelemetry.Api beside it (5.8), or System.Linq.Async in `AutomationTool/` (5.7).
   - We use our own `P4ProcessConnection`, an `IPerforceConnection` that runs `p4 -G` (found on PATH only) with a per-command timeout (`UAK_P4_TIMEOUT`, 15 s by default), so no native library is needed.
-  - `src/AgentKit.Vcs/EpicGames.Perforce.props` holds the reference. It prefers `AutomationUtils/$(TargetFramework)/`, then `AutomationUtils/`, and `-p:UakPerforceDll=<path>` overrides both. The build fails with a clear message if the DLL is missing.
+  - `src/AgentKit.Vcs/EpicGames.Perforce.props` holds the reference. It prefers `AutomationUtils/$(TargetFramework)/`, then `AutomationUtils/`, and `-p:UakPerforceDll=<path>` overrides both.
+  - **Source builds** have no AutomationTool until someone runs it, so there is no prebuilt DLL. Then `src/EpicGames.Perforce.FromSource` compiles the engine's own `Engine/Source/Programs/Shared/EpicGames.Perforce` source (assembly name `EpicGames.Perforce`) into the kit's `tools/bin`, against the engine's prebuilt EpicGames.Core and its System.Linq.Async from `UnrealBuildTool/`. Nothing is written into the engine. The kit's warning and analyzer rules don't apply to that code.
+  - The build fails with a clear message if there is neither a DLL nor the source.
   - We don't use `PerforceConnection` itself: it starts a bare `p4.exe` (which Windows looks up in the current directory first) and has no time limit.
   - The API we use, the same in 5.7 and 5.8: `PerforceSettings(IPerforceEnvironment)`, `IPerforceConnection`, `IPerforceOutput`, `PerforceRecord.FromFields`, `TryGetInfoAsync`, `TryGetChangesAsync`, `TryFStatAsync`, `TryAddAsync`, `AddOptions.IncludeWildcards` and `InfoOptions`.
 - **Use what exists.** Where an EpicGames library already does the job, use it. Examples:
@@ -226,6 +230,7 @@ Writes stay out of scope for now: no commit, submit, checkout or edit.
   - recommended settings: `CLAUDE_CODE_DISABLE_BG_SHELL_PRESSURE_REAP=1`, the auto-compact window;
   - a CLAUDE.md snippet;
   - how to build `uak` on first use.
+- **SessionStart hook** (`hooks/hooks.json`, `hooks/check-uak.sh`): at startup, only in an Unreal project (a `.uproject` at or above the project folder, or an engine root), it checks for `$UAK_HOME/<plugin version>/uak`. When that is missing it shows the user a one-line notice and gives Claude the publish command, with the plugin's own path, so it can offer to run it. A plugin update therefore prompts a republish. It only reads files, always exits 0, and is POSIX `sh`, because it must run on every user's machine before `uak` exists (Claude Code runs hooks in Git Bash on Windows). Publishing from the installed plugin copy is fine: only its throwaway `tools/bin` and `tools/obj` are written there, and the install goes to `$UAK_HOME`.
 
 ## Shared contracts
 

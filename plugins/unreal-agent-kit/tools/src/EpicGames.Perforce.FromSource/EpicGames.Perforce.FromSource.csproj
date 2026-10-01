@@ -1,0 +1,38 @@
+<Project Sdk="Microsoft.NET.Sdk">
+	<!--
+		Copyright Alex Stevens (@MilkyEngineer). All Rights Reserved.
+
+		Builds EpicGames.Perforce from the engine's own C# source, for engines that ship no prebuilt EpicGames.Perforce.dll:
+		a source build whose AutomationTool hasn't been built yet. AgentKit.Vcs uses it only then (EpicGames.Perforce.props).
+		The source is read from the engine and compiled into the kit's own tools/bin and tools/obj: nothing is written into the
+		engine. It is the engine's code, so the kit's warning and analyzer rules don't apply to it.
+	-->
+	<PropertyGroup>
+		<AssemblyName>EpicGames.Perforce</AssemblyName>
+		<RootNamespace>EpicGames.Perforce</RootNamespace>
+		<UakPerforceSourceDir>$(UakEngineRoot)Engine/Source/Programs/Shared/EpicGames.Perforce/</UakPerforceSourceDir>
+		<EnableDefaultItems>false</EnableDefaultItems>
+		<ImplicitUsings>disable</ImplicitUsings>
+		<AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+		<TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+		<WarningLevel>0</WarningLevel>
+		<RunAnalyzers>false</RunAnalyzers>
+		<GenerateDocumentationFile>false</GenerateDocumentationFile>
+		<IsPackable>false</IsPackable>
+	</PropertyGroup>
+
+	<ItemGroup>
+		<Compile Include="$(UakPerforceSourceDir)**/*.cs" Exclude="$(UakPerforceSourceDir)obj/**;$(UakPerforceSourceDir)bin/**" />
+	</ItemGroup>
+
+	<ItemGroup Condition="'$(UakEpicGamesDir)' != ''">
+		<!-- EpicGames.Core comes from build/EpicGames.props. Its one third-party dependency, whichever this engine version uses. -->
+		<Reference Include="System.Linq.Async" HintPath="$(UakEpicGamesDir)System.Linq.Async.dll" Private="true" Condition="Exists('$(UakEpicGamesDir)System.Linq.Async.dll')" />
+		<Reference Include="OpenTelemetry.Api" HintPath="$(UakEpicGamesDir)OpenTelemetry.Api.dll" Private="true" Condition="Exists('$(UakEpicGamesDir)OpenTelemetry.Api.dll')" />
+	</ItemGroup>
+
+	<Target Name="UakCheckPerforceSource" BeforeTargets="CoreCompile">
+		<Error Condition="!Exists('$(UakPerforceSourceDir)IPerforceConnection.cs')"
+			Text="UnrealAgentKit: '$(UakEngineRoot)' has neither a prebuilt EpicGames.Perforce.dll nor its source in '$(UakPerforceSourceDir)'." />
+	</Target>
+</Project>

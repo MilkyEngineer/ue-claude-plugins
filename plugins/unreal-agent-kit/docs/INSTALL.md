@@ -19,17 +19,19 @@ This adds the agents (`ue-low`, `ue-medium`, `ue-high`, `ue-xhigh`, `ue-review`)
 
 ## 2. Get the source for `uak`
 
-Claude Code keeps its own copy of the plugin under `~/.claude/plugins/`, and replaces it on every update. Publish `uak` from a clone you control instead:
+The plugin you just installed holds the source. Claude Code keeps that copy under `~/.claude/plugins/` and replaces it on every update, which is fine: the publish (step 4) installs `uak` outside it. When you start Claude Code in an Unreal project, the plugin's SessionStart hook prints the exact path while this version's `uak` isn't published yet. Ask Claude to run the publish, or run it yourself.
+
+You can publish from a clone you control instead:
 
 ```
 git clone https://github.com/MilkyEngineer/ue-claude-plugins.git
 ```
 
-Below, `<kit>` means `ue-claude-plugins/plugins/unreal-agent-kit` in that clone. After pulling a newer version, publish again.
+Below, `<kit>` means the plugin's folder: the installed copy, or `ue-claude-plugins/plugins/unreal-agent-kit` in a clone. After a plugin update (or pulling a newer version), publish again: the hook reminds you.
 
 ## 3. Find the engine's dotnet
 
-The engine ships a .NET SDK at `<Engine root>/Engine/Binaries/ThirdParty/DotNet/<version>/<platform>/`. The version folder is `10.0` in UE 5.8 and `8.0.412` in UE 5.7. The platform folder is:
+The engine ships a .NET SDK at `<Engine root>/Engine/Binaries/ThirdParty/DotNet/<version>/<platform>/`. The version folder is `10.0` in UE 5.8 and `8.0.412` in UE 5.7 (a source build has its own, for example `8.0.300` in 5.6). The platform folder is:
 
 | Host | Folder | Program |
 | --- | --- | --- |
@@ -116,11 +118,11 @@ Run from `<kit>/tools`, with the same `<dotnet>` and environment variables. Run 
 <dotnet> test --solution UnrealAgentKit.sln
 ```
 
-The build goes to `<kit>/tools/bin/<project>/Debug/net10.0/`. A detached run started from that build keeps its files open, so the build can't be rebuilt while a run is going.
+With an SDK 8 engine (UE 5.7, or a 5.6 source build), which predates `--solution`, the test command is `<dotnet> test UnrealAgentKit.sln`. The build goes to `<kit>/tools/bin/<project>/Debug/<tfm>/` (`net10.0` for UE 5.8, `net8.0` for SDK 8 engines). A detached run started from that build keeps its files open, so the build can't be rebuilt while a run is going.
 
 ## 7. Point `uak` at the project and engine
 
-Usually nothing is needed. `uak` finds the project by walking up from the current folder to the nearest `.uproject`. It finds the engine that contains the project, else the one the project's `EngineAssociation` names. Set these only when that guess is wrong, for example with several projects in one folder or a source-built engine elsewhere:
+Usually nothing is needed. `uak` finds the project by walking up from the current folder to the nearest `.uproject`. It finds the engine that contains the project, else the one the project's `EngineAssociation` names. A source build works the same way: a project inside the engine's root folder (next to `Engine/`) uses that engine, and a project elsewhere names it in `EngineAssociation` (the GUID `Setup.bat` registers). Set these only when that guess is wrong, for example with several projects in one folder or a source-built engine that isn't registered:
 
 | Variable | Meaning |
 | --- | --- |

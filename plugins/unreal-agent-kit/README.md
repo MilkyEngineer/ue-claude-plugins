@@ -18,6 +18,7 @@ One lead agent plans a milestone, splits it into epics and delegates each to a w
   - `uak build` and `uak test`: builds and automation tests that take the lock themselves, with pass, fail and count checks.
   - `uak vcs status|changed|revision`: version control (Git, Perforce or none).
   - `uak env`: the project, engine, state folder and version control the kit resolved, and how.
+- **A SessionStart hook** (`hooks/`): in an Unreal project, it says when this plugin version's `uak` isn't published yet, and gives Claude the command to publish it.
   - `uak help [command]`: every command's options. A project can add its own commands in `<Project>/.uak/commands/`, loaded only when you turn them on with `UAK_PROJECT_COMMANDS=1` (they run with your rights, so only for a project you trust).
 - **Docs** (`docs/`): [INSTALL.md](docs/INSTALL.md), [SETTINGS.md](docs/SETTINGS.md) and a [CLAUDE.md snippet](docs/CLAUDE-snippet.md).
 
@@ -28,13 +29,13 @@ One lead agent plans a milestone, splits it into epics and delegates each to a w
 /plugin install unreal-agent-kit@ue-claude-plugins
 ```
 
-Then publish `uak` once with the engine's dotnet (`<engine dotnet> publish tools/src/uak -c Release`, which installs it in `~/.unreal-agent-kit/<version>/`), put it on `PATH`, add the recommended settings, and paste the CLAUDE.md snippet into your project. [INSTALL.md](docs/INSTALL.md) has the steps.
+Then publish `uak` once with the engine's dotnet (a SessionStart hook reminds you while it isn't published, and after each plugin update) (`<engine dotnet> publish tools/src/uak -c Release`, which installs it in `~/.unreal-agent-kit/<version>/`), put it on `PATH`, add the recommended settings, and paste the CLAUDE.md snippet into your project. [INSTALL.md](docs/INSTALL.md) has the steps.
 
-**Requirements:** Claude Code and an Unreal Engine install (UE 5.8 or 5.7). Nothing else: `uak` builds with the .NET SDK bundled in `Engine/Binaries/ThirdParty/DotNet` against the libraries the engine ships, and the published `uak` is self-contained.
+**Requirements:** Claude Code and Unreal Engine 5.8 or 5.7, installed or built from source. Nothing else: `uak` builds with the .NET SDK bundled in `Engine/Binaries/ThirdParty/DotNet` against the libraries the engine ships, and the published `uak` is self-contained.
 
 ## Platform status
 
-- **Windows** is tested, with UE 5.8 and UE 5.7.
+- **Windows** is tested, with installed UE 5.8 and UE 5.7, and a UE 5.6 source build.
 - **Linux and Mac:** the code paths exist (engine lookup, process detaching, platform paths), but they are untested.
 
 Main TODOs:

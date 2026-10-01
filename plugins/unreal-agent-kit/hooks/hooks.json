@@ -1,0 +1,17 @@
+{
+  "description": "At startup in an Unreal project, says so when this plugin version's uak is not installed yet, and how to publish it.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/check-uak.sh\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}
