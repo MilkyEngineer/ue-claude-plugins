@@ -29,7 +29,8 @@ public static class StateFiles
 		WriteBytes(path, UakJson.SerializeToUtf8(value));
 	}
 
-	private static void WriteBytes(string path, byte[] bytes)
+	/// <summary>Writes bytes whole (see <see cref="WriteText"/>): a temporary file, then a rename; the last writer wins.</summary>
+	public static void WriteBytes(string path, byte[] bytes)
 	{
 		string fullPath = Path.GetFullPath(path);
 		Directory.CreateDirectory(Path.GetDirectoryName(fullPath)!);

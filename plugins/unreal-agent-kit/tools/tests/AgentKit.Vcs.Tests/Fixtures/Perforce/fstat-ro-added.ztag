@@ -1,0 +1,9 @@
+... code stat
+... depotFile //Game/main/Source/Game/Art@2x.png
+... clientFile {root}/Source/Game/Art%402x.png
+... isMapped 
+... action add
+... change 12346
+... type binary
+... actionOwner user
+... workRev 1

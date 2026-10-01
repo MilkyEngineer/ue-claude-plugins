@@ -1,5 +1,5 @@
 ---
-name: ue-review
+name: review
 description: "Read-only adversarial reviewer for Unreal Engine projects, at extra-high effort. Use for milestone adversarial reviews and independent reviews of an epic's changes. It reports findings and never edits files."
 model: inherit
 effort: xhigh

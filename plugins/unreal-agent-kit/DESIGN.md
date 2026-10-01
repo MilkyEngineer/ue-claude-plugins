@@ -7,7 +7,8 @@ UnrealAgentKit is a Claude Code plugin with two parts:
   - detached runs that are tracked, and a wait for one to end;
   - a single-file compile check;
   - build and test wrappers;
-  - a version-control abstraction.
+  - a version-control abstraction, with Perforce writes up to shelving;
+  - Horde preflights and a quiet wait for their results.
 
 It must not depend on any particular engine, project, platform or version-control system. Apart from Claude Code, it uses only what building Unreal Engine already requires: the engine's bundled .NET SDK, and the prebuilt C# libraries the engine ships (`EpicGames.*` and the third-party libraries beside them). `uak` itself needs no NuGet package. NuGet is needed only for the tests (MSTest.Sdk) and for a self-contained publish (the .NET runtime pack, which the bundled SDK lacks).
 
@@ -31,7 +32,8 @@ plugins/unreal-agent-kit/
     src/AgentKit.Core      context resolution, process running, JSON, logging, IUakCommand
     src/AgentKit.Locking   the queued lock
     src/AgentKit.Runs      detached runs and their registry
-    src/AgentKit.Vcs       IVersionControl: Git, Perforce, None
+    src/AgentKit.Vcs       IVersionControl: Git, Perforce, None; Perforce writes (edit, add, reopen, change, shelve)
+    src/AgentKit.Horde     uak horde: the Horde server setting, sign-in, streams, preflights and jobs
     src/AgentKit.Unreal    compile (UBT -SingleFile), build, automation tests
     src/uak                the CLI host
     src/EpicGames.Perforce.FromSource  the engine's EpicGames.Perforce source, built when no prebuilt DLL exists
@@ -73,6 +75,7 @@ plugins/unreal-agent-kit/
   - The build fails with a clear message if there is neither a DLL nor the source.
   - We don't use `PerforceConnection` itself: it starts a bare `p4.exe` (which Windows looks up in the current directory first) and has no time limit.
   - The API we use, the same in 5.7 and 5.8: `PerforceSettings(IPerforceEnvironment)`, `IPerforceConnection`, `IPerforceOutput`, `PerforceRecord.FromFields`, `TryGetInfoAsync`, `TryGetChangesAsync`, `TryFStatAsync`, `TryAddAsync`, `AddOptions.IncludeWildcards` and `InfoOptions`.
+- **EpicGames.Horde.** UnrealBuildTool references it, so every engine with a built UnrealBuildTool ships it prebuilt in `Engine/Binaries/DotNET/UnrealBuildTool/`, with its dependency closure (EpicGames.OIDC, Grpc, IdentityModel and the rest, as `UnrealBuildTool.deps.json` lists them). `src/AgentKit.Horde/EpicGames.Horde.props` references that DLL and closure from the same folder, imported by AgentKit.Horde and its tests only; each reference is conditional on its file, and a missing `EpicGames.Horde.dll` fails the build. It is not built from source (that needs Grpc.Tools code generation and a dozen NuGet packages). uak uses its HTTP client, its OIDC sign-in and token cache, and its request types; not its storage or compute code, so the storage code's native libraries (Oodle, e_sqlite3) are not copied.
 - **Use what exists.** Where an EpicGames library already does the job, use it. Examples:
   - `EpicGames.Core`: `SingleInstanceMutex`, `ManagedProcess`, `FileReference` and `DirectoryReference`, `CommandLineArguments`, JSON helpers;
   - `EpicGames.Build`: `GlobalSingleInstanceMutex.GetUniqueMutexForPath`;
@@ -185,7 +188,7 @@ The engine root is the directory that contains `Engine/Build/Build.version`. Pat
 - `IsIgnoredAsync(path)` (git: `check-ignore`; p4: `add -n`);
 - `DescribeAsync()` (a one-line summary for `uak env`).
 
-Writes stay out of scope for now: no commit, submit, checkout or edit.
+Writes are Perforce only, on the side (`PerforceVersionControl`, not `IVersionControl`), and stop at shelving: nothing commits, submits or reverts (see "Perforce writes").
 
 - **Detection,** in this order:
   1. `-vcs=`, or the `UAK_VCS` environment variable. Values: `git`, `perforce` (or `p4`), `none`. `-vcs=` is a global option that Core resolves into `UakContext.RequestedVersionControl`, and the vcs commands also accept it locally;
@@ -200,6 +203,35 @@ Writes stay out of scope for now: no commit, submit, checkout or edit.
 - **git time limit:** every git command has a time limit (`UAK_GIT_TIMEOUT`, 30 s); git is stopped and the command fails with a `VcsException` that names the variable.
 - **Perforce safety:** every p4 command has a time limit (`UAK_P4_TIMEOUT`, 15 s). When detection couldn't reach the server, `uak env` reports that instead of asking again. File arguments are escaped (`@`→%40, `#`→%23, `%`→%25, `*`→%2A), a path containing `...` is rejected, and `add -n` takes the raw name with `-f`.
 - **Commands:** `uak vcs status [paths...]`, `uak vcs changed [-path=]` and `uak vcs revision`, each with `-json`. Data goes to stdout and errors to the logger, so `-json` output is safe to parse.
+
+### Perforce writes
+
+`uak vcs edit|add|reopen <file>... [-c=<changelist>|default]`, `uak vcs change new -description=`, `uak vcs change describe -c= -description=`, and `uak vcs shelve -c=<changelist> [-replace [-drop-unopened]]` or `uak vcs shelve <file>... [-description=] [-force]`. Each takes `-json` and `-vcs=`. In a Git workspace, or with none, they are usage errors that say "Perforce only".
+
+- **Only this client's pending changelists.** A target changelist is read with `p4 change -o` first; one that is submitted, unknown, or another client's is refused before anything changes.
+- **Checked afterwards.** edit, add and reopen ask `p4 fstat -Ro` which client changelist each file ended in; exit 0 only when every file is where it was asked to be. A file p4 left elsewhere (already opened in another changelist; not on the client; ignored by P4IGNORE) is reported with p4's own message.
+- **Named files.** Wildcards (`...`, `*`, `?`) are refused. Directories are refused unless `-folders`, for edit and reopen only: a directory also takes every other file opened under it. Half of a move (move/add or move/delete, from fstat's movedFile) is refused for reopen and shelve unless the other half is named too, because p4 moves both halves together.
+- **Client names** compare exactly; names that differ in case alone match only when `p4 info` says the server ignores case (caseHandling). Half of a move (move/add or move/delete, from fstat's movedFile) is refused for reopen and shelve unless the other half is named too, because p4 moves both halves together.
+- **Client names** compare exactly; names that differ in case alone match only when `p4 info` says the server ignores case (caseHandling). Paths must be inside the client root. add refuses files that don't exist (p4 would open them for add anyway) and passes names holding `@ # % *` raw with `-f`; the others escape them.
+- **Descriptions.** `change describe` sends back the whole `p4 change -o` record (its files, jobs and every other field) with only Description replaced: a spec without its Files field moves the files out of the changelist ("updated, removing N file(s)"). A file reopened into the changelist between the read and the write is missing from that spec, so p4 still moves it out, to the default changelist: uak lists the default changelist's files before and after (`p4 opened -c default`), reopens the new ones back into the changelist, checks them, and reports them. `change new` sends Change "new", the client and the description, with no Files, so nothing moves into it.
+- **Shelve.** `-c=` runs `p4 shelve -f -c<N>` (or `-r` with `-replace`, which makes the shelf exactly the opened files) after checking that something is opened, since `-r` with nothing opened would empty the shelf. uak reads the shelf before and after (`p4 describe -S -s`): `-r` deletes shelved files that are not opened in the changelist, and a shelf can be the only copy of that work, so `-replace` is refused, listing those files, unless `-drop-unopened`; every file the shelf loses is printed, and so is every shelved file whose content changed (its digest). With files instead, uak first checks every file is opened here (or changes nothing), refuses files in a numbered changelist (they would leave it; `-force` moves them) and half moves, then creates a changelist, reopens the files into it, checks them, and shelves it; it prints each file's original changelist. Shelving may take up to 30 minutes (`PerforceVersionControl.ShelveTimeout`), because it sends file contents; queries keep `UAK_P4_TIMEOUT`.
+- **Records.** EpicGames.Perforce has no typed record for some of these answers (its ReopenRecord has no fields), so `PerforceRawRecord` reads every field of each record through the library's own `PerforceOutput.ParseRecord`, and writes specs back with `PerforceRecord.Serialize`.
+- **Tests** use recorded answers of a real p4d (fixtures), and an opt-in test runs every write against a throwaway local p4d over `rsh:` (`UAK_TEST_P4D`, the path of a p4d program).
+
+## Horde
+
+`uak horde config|login|logout|streams|templates|preflight|job`, in AgentKit.Horde, on EpicGames.Horde (see "Engine libraries").
+
+- **The server** comes from `-server=`, then `<UAK_HOME>/config.json`'s `horde.server` (shared by every kit version; `uak horde config -server=` writes it, atomically, keeping other settings), then Horde's own default (`UE_HORDE_URL`, the registry value Horde's tools write on Windows, `~/.horde.json` elsewhere). With none, the commands fail with a message telling the agent to ask the user (through the lead) for the URL.
+- **Sign-in.** A command first gets a token silently (Horde's token cache, refreshed without a prompt; `AllowAuthPrompt` off). When that fails, it opens the Horde sign-in page in the browser, in that process, and waits up to `-login-timeout` (600 s), then exits 4. `-no-login` never opens it. The sign-in waits on the library's auth state directly (`GetAccessTokenAsync(true)`), not inside an HTTP request, so HttpClient's 100 s time-out doesn't cut it short: `-login-timeout` is the real limit. EpicGames.OIDC stores only the refresh token, so if the identity provider rejects the silent refresh (for example Entra ID's AADSTS90009), each process would sign in again; uak's token cache (below) bridges that, and the user should ask the Horde admin to check the server's OIDC scope. `uak -verbose` shows the library's own messages.
+- **Stream and template.** The workspace's client stream, then its parents up through virtual streams to the first non-virtual one (a shelf holds that stream's paths), matched as Horde's dashboard does: by name, then by id (the name without `//`, `/` as `-`, lower case), then by name plus `-VS`. The template: `-template=` (id or name, must allow preflights), else the stream's default preflight template, else its only runnable preflight template. Streams and templates are read into uak's own records: the library's response classes can't be deserialized.
+- **Starting a preflight.** EpicGames.Horde's own `CreateJobRequest`, serialized with its own settings: `PreflightCommitId`, `UpdateIssues = false`, `AutoSubmit` only with `-autosubmit` (which tells Horde to edit the change's description and submit it when the preflight succeeds; the usage text and output say so). Job creation isn't idempotent and the library's HTTP handler retries, so the POST goes once through a plain HttpClient with the bearer token. Before shelving or creating anything, uak lists the change's preflights. With `-shelve` it never reuses one (a new shelf needs a new build), and refuses to shelve while an auto-submit preflight of the change is running (a new shelf could change what Horde submits). Without `-shelve` (and without `-force`) it reports a still-running preflight instead of starting another ("reused: <job>") only when it has the same stream, template, auto-submit setting and every parameter value (the job's reported parameters against the template's defaults with uak's values over them) and was created after the change was last shelved (`p4 change -o`'s shelveUpdate, in the server's time zone); when any of that can't be read, it starts a new one. The line naming the template and parameters, and the auto-submit state, describe the job actually reported. After a create that fails without a clear answer, uak looks for the job before reporting the failure.
+- **The job URL** (`<server>/job/<id>`) is printed as "Job URL: ..." the moment the job is created or found, before any wait (standard error under `-json`), so it survives a failure, a time-out or Ctrl+C. Agents send it to the lead at once.
+- **Results** follow Horde's own rule (JobExtensions.GetTargetState): the latest step per node; any failure fails the job, else warnings, else skipped or aborted steps (or a batch that couldn't run) leave it incomplete, else success. The summary lists only failing steps and those with warnings, with their step and log URLs; `-verbose` lists every step.
+- **Waiting** (`-wait`) polls with `modifiedAfter` (an unchanged job is an empty answer), every 15 s, backing off to 60 s while nothing changes; prints one line when the job starts running and one when Horde can't be reached; survives transient errors (no connection, time-outs, 408, 429, 5xx); and stops at `-timeout`. After 4 transient failures in a row it rebuilds its client (a fresh connection, same sign-in). A time-out before any poll got an answer is "still running" too (3). Exit codes: 0 success, 1 failure or incomplete, 2 usage error (uak's own, before anything is sent), 3 still running, 4 not signed in, 5 another error (including 403, not allowed, and any answer uak can't read: never mistaken for a job result), 6 (preflight) build settings needed, 7 success with warnings.
+- **Build settings.** A preflight's template and parameter values are saved per user, server and Horde stream, in `<UAK_HOME>/horde/<server>/<stream>/templates.json` (`<server>` is the host, then the port and path segments joined by `_`): the chosen template and each template's values, written atomically, keeping keys uak doesn't know. `uak horde config -template= -param:<id>=` saves them after checking them against the server's template (ids, bool values, list choices, a text's regular expression); `-reset-build` forgets them. Parameters come from the stream list's templates (Bool, Text and List; a List has no id in Horde, only its choices, so uak names it from its label). Values go to Horde as `CreateJobRequest.Parameters`: a bool or text by id, a list as every choice's id with "true" or "false". With nothing saved and no `-template=`/`-param:`, or with saved settings that no longer fit the server's templates, a preflight starts nothing and exits 6, printing the templates as `uak horde templates -json` does, so the lead can ask the user (agents can't answer prompts on standard input). `-use-template-defaults` skips this for CI.
+- **Token cache.** EpicGames.OIDC keeps only refresh tokens; when a server refuses refreshes, every process would sign in again. So on Windows uak keeps the access token per server in `<UAK_HOME>/horde/<server>/token.bin`: JSON with the server and the expiry (the JWT's `exp`; no expiry, no cache), encrypted with DPAPI for the current user (CryptProtectData, the server's URL as entropy), written atomically (last writer wins). It is passed as `HordeOptions.AccessToken` while more than 5 minutes are left. A 401 on it deletes it, signs in afresh, and retries only the request that failed (`HordeApiSession`): a preflight is never shelved or created twice, and a wait keeps its job and its deadline. A token EpicGames.Horde takes from the environment (`UE_HORDE_TOKEN` for the `UE_HORDE_URL` host) is neither replaced by the cache nor saved in it. `uak horde login` checks a cached token with the server before saying it is signed in. An unreadable file is ignored and replaced. `uak horde logout` deletes it. Other platforms cache nothing. The token is never printed or logged.
+- **Opening pages.** `horde.open` in the config (`uak horde config -open=never|created|finished|failed`, default never) opens the job's page, or the first failed step's, in the default browser during `-wait`; `-no-open` skips it once. A failure to open is one warning.
 
 ## Unreal operations (Unreal)
 
@@ -243,19 +275,20 @@ Writes stay out of scope for now: no commit, submit, checkout or edit.
 
 ## Plugin content
 
-- **Agents:**
-  - `ue-low`, running on Sonnet;
-  - `ue-medium`, `ue-high` and `ue-xhigh`;
-  - `ue-runner`, on Sonnet at low effort, which cannot edit: it runs a given list and reports, so a verification never changes what it verifies;
-  - `ue-research`, read-only at high effort, for engine investigations answered with `file:line` evidence. Its reading never conflicts with workers' edits, but its experiments queue like any run: `uak test` takes the editor lock, and `uak compile` waits for UBT's mutex. `uak compile` only compiles files inside a module, so an experiment compiles existing project files only; one that needs new code asks the lead, and a worker writes it (a file a researcher added to a module would be picked up by other agents' builds);
-  - `ue-review`, read-only.
+- **Agents** (named `unreal-agent-kit:<name>` in Claude Code; before 0.3.0 they were `ue-<name>`, see CHANGELOG.md):
+  - `low`, running on Sonnet;
+  - `medium`, `high` and `xhigh`;
+  - `runner`, on Sonnet at low effort, which cannot edit: it runs a given list and reports, so a verification never changes what it verifies;
+  - `research`, read-only at high effort, for engine investigations answered with `file:line` evidence. Its reading never conflicts with workers' edits, but its experiments queue like any run: `uak test` takes the editor lock, and `uak compile` waits for UBT's mutex. `uak compile` only compiles files inside a module, so an experiment compiles existing project files only; one that needs new code asks the lead, and a worker writes it (a file a researcher added to a module would be picked up by other agents' builds);
+  - `review`, read-only;
+  - `architect`, at high effort, which drafts a milestone's plan, briefs README and epic briefs from the skill's templates, writing only the draft files the lead names; it runs nothing and never edits code.
 - **Their ground rules:**
   - never spawn agents (`disallowedTools: Agent`);
   - never kill processes or commit unless told;
   - take the lock for editor and build runs;
   - start anything that may run over an hour detached through `uak runs start`, and wait for it with one background `uak runs wait`;
   - ask the lead with SendMessage to "main";
-  - ask for a ue-runner for long, low-judgment work;
+  - ask for a runner for long, low-judgment work;
   - follow epic briefs, and rewrite their Current state and Next step at every hand-back, so the lead can respawn a fresh agent from the brief instead of resuming a large context;
   - no new batch or shell scripts: tools go in `uak`.
 - **The workflow skill:** briefs (a README plus E#.md per milestone), caps, effort tiers, delegation (runner and research requests), when to resume an agent and when to respawn it from its brief, reviews, spec-doc sync, and an opt-in usage-limit watchdog (only if the project's owner allows auto-resume).

@@ -1,0 +1,11 @@
+<Project Sdk="MSTest.Sdk/4.0.2">
+	<PropertyGroup>
+		<RootNamespace>AgentKit.Horde.Tests</RootNamespace>
+		<IsPackable>false</IsPackable>
+	</PropertyGroup>
+	<!-- The tests serialize EpicGames.Horde's request types, so they compile against it too. -->
+	<Import Project="..\..\src\AgentKit.Horde\EpicGames.Horde.props" />
+	<ItemGroup>
+		<ProjectReference Include="..\..\src\AgentKit.Horde\AgentKit.Horde.csproj" />
+	</ItemGroup>
+</Project>

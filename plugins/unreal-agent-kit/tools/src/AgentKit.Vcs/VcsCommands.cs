@@ -36,7 +36,7 @@ internal sealed class VcsArguments
 /// <summary>Shared plumbing for the <c>vcs</c> commands: detection, error handling and output.</summary>
 public abstract class VcsCommandBase : IUakCommand
 {
-	static readonly JsonSerializerOptions s_jsonOptions = new()
+	internal static readonly JsonSerializerOptions s_jsonOptions = new()
 	{
 		WriteIndented = true,
 		PropertyNamingPolicy = JsonNamingPolicy.CamelCase,

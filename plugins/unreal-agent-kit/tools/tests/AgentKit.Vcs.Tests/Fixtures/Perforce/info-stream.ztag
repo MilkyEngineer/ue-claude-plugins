@@ -1,0 +1,7 @@
+... code stat
+... userName user
+... clientName user-ws
+... clientRoot {root}
+... clientStream //Game/main-virtual
+... serverAddress perforce.example.com:1666
+... serverVersion P4D/LINUX26X86_64/2024.2/2697822 (2024/12/10)

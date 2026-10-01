@@ -17,7 +17,7 @@ Or from a shell: `claude plugin marketplace add MilkyEngineer/ue-claude-plugins`
 
 A multi-agent workflow for Unreal Engine projects, and `uak`, the CLI it runs on. One lead plans a milestone, splits it into epics and delegates each to a worker at the right effort. Workers share one editor, so builds and editor runs queue on a lock.
 
-- **Agents:** `ue-low` (Sonnet), `ue-medium`, `ue-high` and `ue-xhigh` workers, none of which can spawn agents; `ue-runner`, which runs and reports but cannot edit; and two read-only agents, `ue-research` for engine investigations and `ue-review` for adversarial reviews.
+- **Agents:** `low` (Sonnet), `medium`, `high` and `xhigh` workers, none of which can spawn agents; `runner`, which runs and reports but cannot edit; two read-only agents, `research` for engine investigations and `review` for adversarial reviews; and `architect`, which drafts milestone plans and briefs. Claude Code shows them as `unreal-agent-kit:<name>`.
 - **Workflow skill:** effort tiers and caps, milestone plans with epic briefs (templates included), delegation, resume-or-respawn, reviews, spec-doc sync, and an opt-in usage-limit and restart watchdog.
 - **`uak`:** a queued editor lock that is released when its holder dies; detached runs that survive shells and restarts; single-file compile checks through UBT; build and automation-test wrappers with count checks; Git and Perforce status.
 

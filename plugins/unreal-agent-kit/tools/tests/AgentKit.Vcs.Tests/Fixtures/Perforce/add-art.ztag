@@ -1,0 +1,6 @@
+... code stat
+... depotFile //Game/main/Source/Game/Art%402x.png
+... clientFile {root}/Source/Game/Art@2x.png
+... workRev 1
+... action add
+... type binary

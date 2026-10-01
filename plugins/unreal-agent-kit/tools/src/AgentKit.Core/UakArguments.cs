@@ -134,6 +134,31 @@ public sealed class UakArguments
 		throw new UakUsageException($"-{key} must be one of {string.Join(", ", Enum.GetNames<T>())}, not '{Text}'.");
 	}
 
+	/// <summary>
+	/// Every -&lt;prefix&gt;&lt;name&gt;=Value option, such as -param:clean=true for the prefix "param:", as (name, value) in the
+	/// order given; counts as reading them. A value may be empty (-param:name=); a missing name or a missing '=' is a usage
+	/// error.
+	/// </summary>
+	public IReadOnlyList<KeyValuePair<string, string>> GetPrefixed(string prefix)
+	{
+		List<KeyValuePair<string, string>> Found = [];
+		foreach ((string Key, string? Value) in Options)
+		{
+			if (!Key.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+			{
+				continue;
+			}
+			Read.Add(Key);
+			string Name = Key[prefix.Length..];
+			if (Name.Length == 0 || Value is null)
+			{
+				throw new UakUsageException($"-{prefix}<name>=<value> needs a name and a value, not -{Key}{(Value is null ? "" : "=" + Value)}.");
+			}
+			Found.Add(new KeyValuePair<string, string>(Name, Value));
+		}
+		return Found;
+	}
+
 	/// <summary>Marks options as known without reading them, so <see cref="ThrowIfUnknown"/> allows them.</summary>
 	public void Accept(params string[] keys)
 	{

@@ -1,7 +1,7 @@
 {
   "name": "unreal-agent-kit",
-  "version": "0.2.4",
-  "description": "Multi-agent workflow for Unreal Engine projects (tiered workers, a runner, a read-only researcher and reviewer, epic briefs, delegation) plus uak, a CLI for a queued editor lock, detached runs, single-file compile checks, and build and test wrappers",
+  "version": "0.3.0",
+  "description": "Multi-agent workflow for Unreal Engine projects (tiered workers, a runner, a read-only researcher and reviewer, an architect for plans and briefs, epic briefs, delegation) plus uak, a CLI for a queued editor lock, detached runs, single-file compile checks, build and test wrappers, Perforce shelving and Horde preflights",
   "author": {
     "name": "Alex Stevens",
     "url": "https://github.com/MilkyEngineer"

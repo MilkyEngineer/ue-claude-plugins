@@ -26,5 +26,6 @@
 		<ProjectReference Include="..\AgentKit.Runs\AgentKit.Runs.csproj" />
 		<ProjectReference Include="..\AgentKit.Vcs\AgentKit.Vcs.csproj" />
 		<ProjectReference Include="..\AgentKit.Unreal\AgentKit.Unreal.csproj" />
+		<ProjectReference Include="..\AgentKit.Horde\AgentKit.Horde.csproj" />
 	</ItemGroup>
 </Project>

@@ -1,5 +1,5 @@
 ---
-name: ue-research
+name: research
 description: "Read-only researcher for Unreal Engine projects, at high effort. Use for engine and codebase investigations: how the engine does something, where it calls or uses a symbol, what an engine path assumes, which API fits, why a behaviour happens. It answers with file:line evidence and never edits files, so its research never conflicts with workers' edits; its compile and test experiments queue on the lock like any run."
 model: inherit
 effort: high

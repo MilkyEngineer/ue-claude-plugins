@@ -1,0 +1,11 @@
+... code stat
+... depotFile //Game/main/Source/Game/Game.cpp
+... clientFile {root}/Source/Game/Game.cpp
+... isMapped 
+... headRev 7
+... haveRev 7
+... action edit
+... change 12346
+... type text
+... actionOwner user
+... workRev 7

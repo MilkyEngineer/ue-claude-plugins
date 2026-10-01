@@ -46,6 +46,17 @@ public sealed class UakArgumentsTests
 	}
 
 	[TestMethod]
+	public void PrefixedOptions_AreReadTogether()
+	{
+		UakArguments Arguments = new(["-param:clean=true", "-Param:Platforms=Win64,PS5", "-param:empty=", "-other=1"]);
+		CollectionAssert.AreEqual(new[] { "clean=true", "Platforms=Win64,PS5", "empty=" }, Arguments.GetPrefixed("param:").Select(Pair => Pair.Key + "=" + Pair.Value).ToArray());
+		Assert.ThrowsExactly<UakUsageException>(Arguments.ThrowIfUnknown, "-other is still unread");
+		Assert.ThrowsExactly<UakUsageException>(() => new UakArguments(["-param:flag"]).GetPrefixed("param:"));
+		Assert.ThrowsExactly<UakUsageException>(() => new UakArguments(["-param:=1"]).GetPrefixed("param:"));
+		Assert.IsEmpty(new UakArguments(["-x"]).GetPrefixed("param:"));
+	}
+
+	[TestMethod]
 	public void Duplicates_And_Unknowns_AreUsageErrors()
 	{
 		Assert.ThrowsExactly<UakUsageException>(() => new UakArguments(["-A=1", "-a=2"]));

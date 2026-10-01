@@ -1,0 +1,15 @@
+... code stat
+... Change 12346
+... Date 2026/10/01 09:20:11
+... Client User-WS
+... User user
+... Status pending
+... Description Fix the spawn order.
+	Second line.
+... Jobs0 job000123
+... Files0 //Game/main/Source/Game/New.cpp
+... Files1 //Game/main/Config/Removed.ini
+... Type public
+... extraTag0 shelveUpdate
+... extraTagType0 date
+... shelveUpdate 2026/10/01 09:25:00

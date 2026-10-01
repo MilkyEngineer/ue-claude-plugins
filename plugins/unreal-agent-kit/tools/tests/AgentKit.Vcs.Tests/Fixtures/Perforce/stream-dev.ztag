@@ -1,0 +1,9 @@
+... code stat
+... Stream //Game/dev
+... Owner user
+... Name dev
+... Parent //Game/main
+... Type development
+... Options allsubmit unlocked toparent fromparent mergedown
+... ParentView inherit
+... Paths0 share ...

@@ -1,0 +1,10 @@
+... code stat
+... change 12346
+... depotFile //Game/main/Config/Removed.ini
+... rev 2
+... action delete
+
+... code stat
+... depotFile //Game/main/Source/Game/New.cpp
+... rev none
+... action add

@@ -5,7 +5,7 @@ Paste the block below into your project's CLAUDE.md, then replace each `<...>`. 
 ````markdown
 # Multi-agent workflow (UnrealAgentKit)
 
-- **Agents:** use the `unreal-agent-workflow` skill to plan and run work with the `ue-runner`, `ue-low`, `ue-medium`, `ue-high`, `ue-xhigh`, `ue-research` and `ue-review` agents. Caps on agents at once: <4> runner, <4> low, <2> medium, <2> high, <1> xhigh, <2> research, <1> review.
+- **Agents:** use the `unreal-agent-workflow` skill to plan and run work with the `runner`, `low`, `medium`, `high`, `xhigh`, `research`, `review` and `architect` agents (shown as `unreal-agent-kit:<name>`). Caps on agents at once: <4> runner, <4> low, <2> medium, <2> high, <1> xhigh, <2> research, <1> review, <1> architect.
 - **Where things are:**
   - code: <Source/..., Plugins/...>;
   - spec: <Documentation/Spec>, mirrored in <a separate doc, or "not mirrored">;
@@ -20,6 +20,7 @@ Paste the block below into your project's CLAUDE.md, then replace each `<...>`. 
 - **Spec style:** <British English, short sentences, section links as "[section N](file.md)">.
 - **Correctness:** the worst failure here is <for example "a silent wrong result" or "data loss">. When unsure, choose the conservative option. Changes to generated or cached output bump <the version constants>.
 - **Code search:** <clangd for C++ symbols; an engine source index; grep one engine module folder at a time>.
-- **Version control:** <git or Perforce>. Agents never commit or push unless told. <Milestone loop: "on a passing verification, commit and continue to the next milestone" | "stop at each milestone and report">.
+- **Version control:** <git or Perforce>. Agents never commit or push unless told. <Perforce: `uak vcs edit|add|reopen|shelve|change` for this client's pending changelists; never revert or submit.>
+- **Horde:** <none | preflights with `uak horde preflight -c=<shelved CL> [-wait -timeout=<s>]`; wait for a job with `uak horde job -id=<job> -wait -timeout=<s>` in a background shell. The server is set once with `uak horde config -server=<url>`. A horde command may open a sign-in page on the user's desktop, so agents tell the lead first, and send the lead the "Job URL: ..." line at once. `-shelve` only on changelists the agent created. On exit 6 (build settings needed) the lead asks the user (AskUserQuestion) and saves the answers with `uak horde config`. `-autosubmit` only when the user asks.> <Milestone loop: "on a passing verification, commit and continue to the next milestone" | "stop at each milestone and report">.
 - **Usage limits:** <"Auto-resume: allowed" (the lead keeps a watchdog and resumes agents after a usage limit resets) | "ask first" (the default)>.
 ````

@@ -1,0 +1,16 @@
+... code stat
+... depotFile //Game/main/Source/Game/Game.cpp
+... clientFile {root}/Source/Game/Game.cpp
+... isMapped 
+... headRev 7
+... haveRev 7
+... action edit
+... change default
+... type text
+... actionOwner user
+... workRev 7
+
+... code error
+... data {root}/Source/Game/Other.cpp - file(s) not opened on this client.
+... severity 2
+... generic 17

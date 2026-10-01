@@ -1,0 +1,55 @@
+<Project>
+	<!--
+		Copyright Alex Stevens (@MilkyEngineer). All Rights Reserved.
+
+		References the engine's prebuilt EpicGames.Horde (DESIGN.md, "Engine libraries"). Imported by AgentKit.Horde and its tests
+		only; build/EpicGames.props (Core) resolves UakEpicGamesDir first.
+
+		UnrealBuildTool references EpicGames.Horde (UBA, Horde storage), so every engine whose UnrealBuildTool is built ships it
+		in Engine/Binaries/DotNET/UnrealBuildTool/, with its whole dependency closure (UnrealBuildTool.deps.json). The kit takes
+		the DLL and that closure from the same folder, as it does for EpicGames.Core: no NuGet package, and the versions always
+		match the engine. It is not built from source: the source needs Grpc.Tools code generation and a dozen NuGet packages.
+		uak uses only its HTTP client and login (no storage, no compute), so the native libraries of the storage code (Oodle,
+		e_sqlite3) are not copied.
+		Each reference is conditional on the file, so an engine version that drops one still builds; EpicGames.Horde.dll itself
+		is required.
+	-->
+	<PropertyGroup>
+		<_UakHordeDir>$(UakEpicGamesDir)</_UakHordeDir>
+	</PropertyGroup>
+
+	<ItemGroup Condition="'$(_UakHordeDir)' != ''">
+		<Reference Include="EpicGames.Horde" HintPath="$(_UakHordeDir)EpicGames.Horde.dll" Private="true" Condition="Exists('$(_UakHordeDir)EpicGames.Horde.dll')" />
+		<Reference Include="EpicGames.OIDC" HintPath="$(_UakHordeDir)EpicGames.OIDC.dll" Private="true" Condition="Exists('$(_UakHordeDir)EpicGames.OIDC.dll')" />
+		<Reference Include="EpicGames.Serialization" HintPath="$(_UakHordeDir)EpicGames.Serialization.dll" Private="true" Condition="Exists('$(_UakHordeDir)EpicGames.Serialization.dll')" />
+		<Reference Include="EpicGames.Oodle" HintPath="$(_UakHordeDir)EpicGames.Oodle.dll" Private="true" Condition="Exists('$(_UakHordeDir)EpicGames.Oodle.dll')" />
+		<Reference Include="BitFaster.Caching" HintPath="$(_UakHordeDir)BitFaster.Caching.dll" Private="true" Condition="Exists('$(_UakHordeDir)BitFaster.Caching.dll')" />
+		<Reference Include="Dapper" HintPath="$(_UakHordeDir)Dapper.dll" Private="true" Condition="Exists('$(_UakHordeDir)Dapper.dll')" />
+		<Reference Include="Google.Protobuf" HintPath="$(_UakHordeDir)Google.Protobuf.dll" Private="true" Condition="Exists('$(_UakHordeDir)Google.Protobuf.dll')" />
+		<Reference Include="Grpc.Core.Api" HintPath="$(_UakHordeDir)Grpc.Core.Api.dll" Private="true" Condition="Exists('$(_UakHordeDir)Grpc.Core.Api.dll')" />
+		<Reference Include="Grpc.Net.Client" HintPath="$(_UakHordeDir)Grpc.Net.Client.dll" Private="true" Condition="Exists('$(_UakHordeDir)Grpc.Net.Client.dll')" />
+		<Reference Include="Grpc.Net.Common" HintPath="$(_UakHordeDir)Grpc.Net.Common.dll" Private="true" Condition="Exists('$(_UakHordeDir)Grpc.Net.Common.dll')" />
+		<Reference Include="K4os.Compression.LZ4" HintPath="$(_UakHordeDir)K4os.Compression.LZ4.dll" Private="true" Condition="Exists('$(_UakHordeDir)K4os.Compression.LZ4.dll')" />
+		<Reference Include="ZstdSharp" HintPath="$(_UakHordeDir)ZstdSharp.dll" Private="true" Condition="Exists('$(_UakHordeDir)ZstdSharp.dll')" />
+		<Reference Include="Microsoft.Data.Sqlite" HintPath="$(_UakHordeDir)Microsoft.Data.Sqlite.dll" Private="true" Condition="Exists('$(_UakHordeDir)Microsoft.Data.Sqlite.dll')" />
+		<Reference Include="SQLitePCLRaw.core" HintPath="$(_UakHordeDir)SQLitePCLRaw.core.dll" Private="true" Condition="Exists('$(_UakHordeDir)SQLitePCLRaw.core.dll')" />
+		<Reference Include="SQLitePCLRaw.batteries_v2" HintPath="$(_UakHordeDir)SQLitePCLRaw.batteries_v2.dll" Private="true" Condition="Exists('$(_UakHordeDir)SQLitePCLRaw.batteries_v2.dll')" />
+		<Reference Include="SQLitePCLRaw.provider.e_sqlite3" HintPath="$(_UakHordeDir)SQLitePCLRaw.provider.e_sqlite3.dll" Private="true" Condition="Exists('$(_UakHordeDir)SQLitePCLRaw.provider.e_sqlite3.dll')" />
+		<Reference Include="Microsoft.Extensions.Caching.Abstractions" HintPath="$(_UakHordeDir)Microsoft.Extensions.Caching.Abstractions.dll" Private="true" Condition="Exists('$(_UakHordeDir)Microsoft.Extensions.Caching.Abstractions.dll')" />
+		<Reference Include="Microsoft.Extensions.Caching.Memory" HintPath="$(_UakHordeDir)Microsoft.Extensions.Caching.Memory.dll" Private="true" Condition="Exists('$(_UakHordeDir)Microsoft.Extensions.Caching.Memory.dll')" />
+		<Reference Include="System.IO.Pipelines" HintPath="$(_UakHordeDir)System.IO.Pipelines.dll" Private="true" Condition="Exists('$(_UakHordeDir)System.IO.Pipelines.dll')" />
+		<Reference Include="System.Linq.Async" HintPath="$(_UakHordeDir)System.Linq.Async.dll" Private="true" Condition="Exists('$(_UakHordeDir)System.Linq.Async.dll')" />
+		<Reference Include="System.IO.Hashing" HintPath="$(_UakHordeDir)System.IO.Hashing.dll" Private="true" Condition="Exists('$(_UakHordeDir)System.IO.Hashing.dll')" />
+		<Reference Include="IdentityModel" HintPath="$(_UakHordeDir)IdentityModel.dll" Private="true" Condition="Exists('$(_UakHordeDir)IdentityModel.dll')" />
+		<Reference Include="IdentityModel.OidcClient" HintPath="$(_UakHordeDir)IdentityModel.OidcClient.dll" Private="true" Condition="Exists('$(_UakHordeDir)IdentityModel.OidcClient.dll')" />
+		<Reference Include="Microsoft.Extensions.Configuration.Json" HintPath="$(_UakHordeDir)Microsoft.Extensions.Configuration.Json.dll" Private="true" Condition="Exists('$(_UakHordeDir)Microsoft.Extensions.Configuration.Json.dll')" />
+		<Reference Include="Microsoft.Extensions.Configuration.FileExtensions" HintPath="$(_UakHordeDir)Microsoft.Extensions.Configuration.FileExtensions.dll" Private="true" Condition="Exists('$(_UakHordeDir)Microsoft.Extensions.Configuration.FileExtensions.dll')" />
+		<Reference Include="Microsoft.Extensions.FileProviders.Abstractions" HintPath="$(_UakHordeDir)Microsoft.Extensions.FileProviders.Abstractions.dll" Private="true" Condition="Exists('$(_UakHordeDir)Microsoft.Extensions.FileProviders.Abstractions.dll')" />
+		<Reference Include="Microsoft.Extensions.FileProviders.Physical" HintPath="$(_UakHordeDir)Microsoft.Extensions.FileProviders.Physical.dll" Private="true" Condition="Exists('$(_UakHordeDir)Microsoft.Extensions.FileProviders.Physical.dll')" />
+	</ItemGroup>
+
+	<Target Name="UakCheckHorde" BeforeTargets="ResolveAssemblyReferences" Condition="'$(_UakHordeDir)' != ''">
+		<Error Condition="!Exists('$(_UakHordeDir)EpicGames.Horde.dll')"
+			Text="UnrealAgentKit: no prebuilt EpicGames.Horde.dll in '$(_UakHordeDir)'. Build UnrealBuildTool for that engine first (it references EpicGames.Horde)." />
+	</Target>
+</Project>

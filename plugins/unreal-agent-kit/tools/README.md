@@ -35,7 +35,7 @@ With UE 5.7's SDK (8.0), which predates `--solution`, the test command is `<dotn
 ```
 
 - **What it makes.** A self-contained `uak` for this machine. It needs no installed .NET, and no `DOTNET_ROOT`.
-- **Where it goes.** To `$UAK_HOME/<kit version>/`, where `UAK_HOME` defaults to `~/.unreal-agent-kit`. The kit version is the `version` in `.claude-plugin/plugin.json` (and `<Version>` in `Directory.Build.props`). For kit version 0.2.4: `~/.unreal-agent-kit/0.2.4/uak.exe` on Windows, `~/.unreal-agent-kit/0.2.4/uak` elsewhere.
+- **Where it goes.** To `$UAK_HOME/<kit version>/`, where `UAK_HOME` defaults to `~/.unreal-agent-kit`. The kit version is the `version` in `.claude-plugin/plugin.json` (and `<Version>` in `Directory.Build.props`). For kit version 0.3.0: `~/.unreal-agent-kit/0.3.0/uak.exe` on Windows, `~/.unreal-agent-kit/0.3.0/uak` elsewhere.
   - The folder is outside the plugin, which Claude Code replaces on every update.
   - Each kit version gets its own folder, so publishing never overwrites a `uak` that is running.
 - **What to do next.** In Claude Code sessions, the plugin's `bin/` puts it on `PATH`. Elsewhere, put that folder on `PATH`, or call `uak` by its full path. Then check it with `uak env`.

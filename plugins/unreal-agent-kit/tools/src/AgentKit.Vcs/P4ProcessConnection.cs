@@ -68,6 +68,12 @@ public sealed class P4ProcessConnection : IPerforceConnection
 			: DefaultTimeout;
 	}
 
+	/// <summary>
+	/// The same connection (settings, logger and program) with another time limit, for commands that send file contents and
+	/// can take longer than a query, such as <c>p4 shelve</c>.
+	/// </summary>
+	public P4ProcessConnection WithTimeout(TimeSpan timeout) => new(Settings, Logger, timeout, _executable);
+
 	/// <summary>The p4 program: the one given, else "p4" on PATH. Throws <see cref="Win32Exception"/> when there is none, as a failed start would.</summary>
 	public string Executable => _executable ??= ExecutableLocator.FindOnPath("p4")
 		?? throw new Win32Exception(2, "p4 was not found on PATH");

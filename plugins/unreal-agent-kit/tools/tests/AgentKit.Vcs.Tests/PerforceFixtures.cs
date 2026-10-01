@@ -91,8 +91,8 @@ internal static class PerforceFixtures
 	}
 }
 
-/// <summary>One command the fake connection received.</summary>
-internal sealed record PerforceCall(string Command, IReadOnlyList<string> Arguments, IReadOnlyList<string> FileArguments);
+/// <summary>One command the fake connection received, with the -G input it was given (a spec for <c>change -i</c>), if any.</summary>
+internal sealed record PerforceCall(string Command, IReadOnlyList<string> Arguments, IReadOnlyList<string> FileArguments, byte[]? Input = null);
 
 /// <summary>
 /// An <see cref="IPerforceConnection"/> that answers each command with a recorded fixture, parsed by EpicGames.Perforce's
@@ -124,6 +124,13 @@ internal sealed class FakePerforceConnection : IPerforceConnection
 	/// <summary>Answers <paramref name="command"/> with the named fixture, or with plain text for "text:...".</summary>
 	public FakePerforceConnection On(string command, string fixture) => On(command, _ => fixture);
 
+	/// <summary>Answers each call of <paramref name="command"/> with the next fixture; the last one repeats.</summary>
+	public FakePerforceConnection OnEach(string command, params string[] fixtures)
+	{
+		int next = 0;
+		return On(command, _ => fixtures[Math.Min(next++, fixtures.Length - 1)]);
+	}
+
 	/// <summary>Answers <paramref name="command"/> with a fixture chosen from the call.</summary>
 	public FakePerforceConnection On(string command, Func<PerforceCall, string> fixture)
 	{
@@ -133,7 +140,7 @@ internal sealed class FakePerforceConnection : IPerforceConnection
 
 	public IPerforceOutput Command(string command, IReadOnlyList<string> arguments, IReadOnlyList<string>? fileArguments, byte[]? inputData, string? promptResponse, bool interceptIo)
 	{
-		PerforceCall call = new(command, [.. arguments], [.. fileArguments ?? []]);
+		PerforceCall call = new(command, [.. arguments], [.. fileArguments ?? []], inputData);
 		Calls.Add(call);
 		if (!_fixtures.TryGetValue(command, out Func<PerforceCall, string>? fixture))
 		{

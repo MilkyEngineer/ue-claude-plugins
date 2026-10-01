@@ -1,0 +1,13 @@
+... code stat
+... depotFile //Game/main/Source/Game/Game.cpp
+... movedFile //Game/main/Source/Game/OldGame.cpp
+... clientFile {root}/Source/Game/Game.cpp
+... isMapped 
+... movedRev 7
+... haveRev 7
+... action move/add
+... change default
+... type text
+... actionOwner user
+... workRev 7
+... resolved 

@@ -14,7 +14,7 @@ namespace AgentKit.Vcs;
 /// TODO: an opt-in offline check through <c>reconcile -n</c>, and reporting unresolved files as <see cref="VcsFileState.Conflicted"/>
 /// (fstat's "unresolved" tag, which <see cref="FStatRecord"/> does not map).
 /// </remarks>
-public sealed class PerforceVersionControl : IVersionControl
+public sealed partial class PerforceVersionControl : IVersionControl
 {
 	readonly IPerforceConnection _connection;
 
