@@ -21,13 +21,14 @@ public sealed class RunsStartCommand : IUakCommand
 
 	/// <inheritdoc />
 	public string Usage => """
-		uak runs start -name=<unique> -owner=<who> [-priority=High|Normal] [-output=<file>] [-result-file=<file>] [-force] -- <command> [<arguments>...]
+		uak runs start -name=<unique> -owner=<who> [-priority=High|Normal] [-output=<file>] [-result-file=<file>] [-force] [-allow-sleep] -- <command> [<arguments>...]
 		  -name=         the run's unique name: letters, digits, '_', '.' and '-'
 		  -owner=        who started it (an epic such as E3, or lead)
 		  -priority=     the priority of the run's lock requests (sets UAK_LOCK_PRIORITY for the command)
 		  -output=       the output file (default <State>/Runs/<name>.log); it is emptied when the run starts
 		  -result-file=  a file whose last PASSED/FAILED line `uak runs list` shows when there is no output
 		  -force         replace the record of a finished run with the same name
+		  -allow-sleep   let the machine sleep during the run; by default it is kept awake (Windows: system and display)
 		  The run takes the editor lock only if the command does; its lock requests show as "<name>/...".
 		  `uak runs list` shows it; `uak runs wait -name=<name> -timeout=<seconds>` waits for it to end.
 		""";
@@ -48,6 +49,7 @@ public sealed class RunsStartCommand : IUakCommand
 			OutputFile = parsed.GetString("output"),
 			ResultFile = parsed.GetString("result-file"),
 			Force = parsed.GetFlag("force"),
+			AllowSleep = parsed.GetFlag("allow-sleep"),
 			Command = CommandArguments.GetCommand(parsed),
 		};
 		parsed.ThrowIfUnknown();

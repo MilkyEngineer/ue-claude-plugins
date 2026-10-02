@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.1
+
+### Added
+
+- **Detached runs keep the machine awake.** On Windows, `uak runs start` now keeps the system and the display on for the whole run, so a laptop doesn't sleep, or enter Modern Standby, under a long build or a GPU-heavy editor run.
+  - `-allow-sleep` turns it off for one run; the record holds it as `AllowSleep`.
+  - If Windows refuses the request, the run's output says so.
+  - A closed lid still sleeps the machine.
+  - Linux and Mac aren't supported yet.
+
 ## 0.3.0
 
 ### Breaking

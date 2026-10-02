@@ -67,6 +67,9 @@ public sealed class RunRecord
 	/// </summary>
 	public string? Detach { get; set; }
 
+	/// <summary>Addition: let the machine sleep during the run (<c>-allow-sleep</c>). By default the wrapper keeps it awake (<see cref="KeepAwake"/>).</summary>
+	public bool AllowSleep { get; set; }
+
 	/// <summary>The run's process as an identity, or null before the wrapper recorded itself.</summary>
 	[JsonIgnore]
 	public ProcessIdentity? Process => Pid is int pid ? new ProcessIdentity(pid, ProcessStart) : null;

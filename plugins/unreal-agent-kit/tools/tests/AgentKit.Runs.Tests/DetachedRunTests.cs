@@ -75,7 +75,7 @@ public sealed class DetachedRunTests
 
 	private static List<string> Wrapper => Child.Command("wrap");
 
-	private Task<RunStartResult> StartAsync(string name, IReadOnlyList<string> command, LockPriority? priority = null, bool force = false)
+	private Task<RunStartResult> StartAsync(string name, IReadOnlyList<string> command, LockPriority? priority = null, bool force = false, bool allowSleep = false)
 	{
 		return RunStarter.StartAsync(_registry, new RunStartRequest
 		{
@@ -84,6 +84,7 @@ public sealed class DetachedRunTests
 			Command = command,
 			Priority = priority,
 			Force = force,
+			AllowSleep = allowSleep,
 			WorkingDirectory = _state.Root,
 		}, Wrapper, TestContext.CancellationToken);
 	}
@@ -135,6 +136,21 @@ public sealed class DetachedRunTests
 		StringAssert.Contains(log, "sleeping");
 		StringAssert.Contains(log, $"{RunRegistry.WrapperLinePrefix}Sleeper' (owner test) started");
 		StringAssert.Contains(log, "exit code 7");
+	}
+
+	[TestMethod]
+	public async Task KeepAwakeIsTheDefaultAndAllowSleepIsRecorded()
+	{
+		await StartAsync("Awake", Child.Command("echo-args", _state.PathOf("awake.json"), "0"));
+		await StartAsync("Sleepy", Child.Command("echo-args", _state.PathOf("sleepy.json"), "0"), allowSleep: true);
+		RunRecord awake = WaitForEnd("Awake");
+		RunRecord sleepy = WaitForEnd("Sleepy");
+		Assert.IsFalse(awake.AllowSleep, "Runs keep the machine awake unless -allow-sleep.");
+		Assert.IsTrue(sleepy.AllowSleep);
+		Assert.AreEqual(0, awake.ExitCode);
+		Assert.AreEqual(0, sleepy.ExitCode);
+		// A normal user process is granted the request: the wrapper writes a line only when Windows refuses it.
+		Assert.DoesNotContain("refused the keep-awake request", ReadOutput(awake.OutputFile!));
 	}
 
 	[TestMethod]

@@ -31,6 +31,9 @@ public sealed class RunStartRequest
 
 	/// <summary>Replace the record of a finished run with the same name (never a running one).</summary>
 	public bool Force { get; init; }
+
+	/// <summary>Let the machine sleep during the run, instead of keeping it awake (see <see cref="RunRecord.AllowSleep"/>).</summary>
+	public bool AllowSleep { get; init; }
 }
 
 /// <summary>What <see cref="RunStarter.StartAsync"/> started.</summary>
@@ -116,6 +119,7 @@ public static class RunStarter
 			Adopted = false,
 			Started = DateTime.UtcNow,
 			WorkingDirectory = workingDirectory,
+			AllowSleep = request.AllowSleep,
 		};
 		// Claim the name: check it is free and record the run as starting, as one step. A second starter of the same name
 		// waits for the claim, then finds this run starting and refuses, even with -force.

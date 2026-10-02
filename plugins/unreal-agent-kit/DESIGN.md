@@ -157,8 +157,9 @@ The engine root is the directory that contains `Engine/Build/Build.version`. Pat
 
 ## Detached runs (Runs)
 
-- `uak runs start -name= -owner= [-priority=] [-result-file=] [-output=] [-force] -- <command...>` starts a run. It waits up to 30 s for the wrapper to record itself, and exits 1 if the wrapper exits first.
+- `uak runs start -name= -owner= [-priority=] [-result-file=] [-output=] [-force] [-allow-sleep] -- <command...>` starts a run. It waits up to 30 s for the wrapper to record itself, and exits 1 if the wrapper exits first.
   - The run survives the end of the caller's shell and a restart of the agent session.
+  - **Keeping the machine awake** (0.3.1): the wrapper keeps the system and the display on for the whole run, unless `-allow-sleep` (recorded as `AllowSleep`). A laptop that sleeps, or enters Modern Standby, under a long build or a GPU-heavy editor run can lose the run, or stop the machine: a 0x19C power watchdog bugcheck was seen that way. On Windows it is `SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED)`, from a dedicated thread, because the request belongs to the thread that made it (`KeepAwake`). It ends with that thread, or with the process. A refused request is written to the run's output. It doesn't stop a closed lid from sleeping the machine. Linux and Mac: not yet (TODO: `systemd-inhibit`, `caffeinate`).
   - It is recorded in `<State>/Runs/<name>.json`, with output in `<name>.log`.
   - The run takes the lock only if the command itself does.
   - `-priority` passes `UAK_LOCK_PRIORITY` to the child, and the lock's name defaults to `UAK_LOCK_NAME`.
@@ -176,7 +177,7 @@ The engine root is the directory that contains `Engine/Build/Build.version`. Pat
   - Its own log lines start with `UakRun '`, and last-line reading skips them.
   - The wrapper retries the end record, and falls back to a log line if it still can't write it.
   - A running wrapper keeps its `uak` install's files open. That's harmless for versioned installs, but a dev build of uak can't be rebuilt while a run is going.
-- **Record fields:** Name, Owner, Pid, ProcessStart, Command, Arguments, CommandLine, OutputFile, ResultFile, Priority, Adopted, Started, Ended, ExitCode and LastLine, plus the optional `WorkingDirectory` and `Detach` (`breakaway`, `job` or `session`).
+- **Record fields:** Name, Owner, Pid, ProcessStart, Command, Arguments, CommandLine, OutputFile, ResultFile, Priority, Adopted, Started, Ended, ExitCode and LastLine, plus the optional `WorkingDirectory`, `Detach` (`breakaway`, `job` or `session`) and `AllowSleep`.
 
 ## Version control (Vcs)
 

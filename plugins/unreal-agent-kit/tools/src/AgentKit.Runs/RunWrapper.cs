@@ -51,6 +51,11 @@ public static class RunWrapper
 
 		int exitCode;
 		string? failure = null;
+		using KeepAwake awake = KeepAwake.Begin(!record.AllowSleep);
+		if (!record.AllowSleep && OperatingSystem.IsWindows() && !awake.IsActive)
+		{
+			output.WriteLine($"{RunRegistry.WrapperLinePrefix}{record.Name}': Windows refused the keep-awake request; the machine may sleep during the run");
+		}
 		try
 		{
 			exitCode = await RunCommandAsync(record, cancellationToken).ConfigureAwait(false);
