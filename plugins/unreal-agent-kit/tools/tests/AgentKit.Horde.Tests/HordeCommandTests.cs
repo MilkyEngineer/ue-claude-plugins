@@ -31,7 +31,7 @@ public sealed class HordeCommandTests
 	/// stream project-main has saved build settings (editor-preflight, its defaults) unless <paramref name="savedBuild"/> is
 	/// false. The token cache is off unless <paramref name="cache"/> is given.
 	/// </summary>
-	static T Setup<T>(T command, FakeHordeApi api, FakeWorkspace? workspace, StringWriter output, FakeClock? clock = null, string? configPath = null, List<string>? opened = null, StringWriter? errors = null, string? home = null, bool savedBuild = true, HordeTokenCache? cache = null) where T : HordeCommandBase
+	internal static T Setup<T>(T command, FakeHordeApi api, FakeWorkspace? workspace, StringWriter output, FakeClock? clock = null, string? configPath = null, List<string>? opened = null, StringWriter? errors = null, string? home = null, bool savedBuild = true, HordeTokenCache? cache = null) where T : HordeCommandBase
 	{
 		home ??= Path.Combine(Path.GetTempPath(), "uak-horde-tests", Guid.NewGuid().ToString("N"));
 		HordeBuildSettingsStore store = new(Path.Combine(home, "horde"));
@@ -966,8 +966,8 @@ public sealed class HordeCommandTests
 	[TestMethod]
 	public void CommandsAreNamedAndDocumentTheirExitCodes()
 	{
-		HordeCommandBase[] commands = [new HordeConfigCommand(), new HordeLoginCommand(), new HordeLogoutCommand(), new HordeStreamsCommand(), new HordeTemplatesCommand(), new HordePreflightCommand(), new HordeJobCommand()];
-		CollectionAssert.AreEqual(new[] { "horde config", "horde login", "horde logout", "horde streams", "horde templates", "horde preflight", "horde job" }, commands.Select(command => command.Name).ToArray());
+		HordeCommandBase[] commands = [new HordeConfigCommand(), new HordeLoginCommand(), new HordeLogoutCommand(), new HordeStreamsCommand(), new HordeTemplatesCommand(), new HordePreflightCommand(), new HordeJobCommand(), new HordeLogCommand()];
+		CollectionAssert.AreEqual(new[] { "horde config", "horde login", "horde logout", "horde streams", "horde templates", "horde preflight", "horde job", "horde log" }, commands.Select(command => command.Name).ToArray());
 		StringAssert.Contains(new HordePreflightCommand().Usage, "6 build settings");
 		Assert.IsTrue(commands.All(command => !command.RequiresEngine));
 		StringAssert.Contains(new HordeJobCommand().Usage, "3 still running");

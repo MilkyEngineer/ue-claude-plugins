@@ -134,6 +134,57 @@ internal sealed class FakeHordeApi : IHordeApi
 		};
 	}
 
+	/// <summary>Each log's events, by log id.</summary>
+	public Dictionary<string, List<HordeLogEvent>> LogEvents { get; } = [];
+
+	/// <summary>Each log's lines, by log id: the context lines and what SaveLogAsync writes.</summary>
+	public Dictionary<string, List<string>> LogLines { get; } = [];
+
+	/// <summary>Failures for a log's event, line and save requests, by log id.</summary>
+	public Dictionary<string, Exception> LogFailures { get; } = [];
+
+	/// <summary>When set, line requests fail with it (as a text log's lines, which aren't JSON).</summary>
+	public Exception? LinesFailure { get; set; }
+
+	/// <summary>Every events request: log id, index, count.</summary>
+	public List<(string LogId, int Index, int Count)> EventRequests { get; } = [];
+
+	/// <summary>Every lines request: log id, index, count.</summary>
+	public List<(string LogId, int Index, int Count)> LineRequests { get; } = [];
+
+	public Task<IReadOnlyList<HordeLogEvent>> GetLogEventsAsync(string logId, int index, int count, CancellationToken cancellationToken)
+	{
+		EventRequests.Add((logId, index, count));
+		if (LogFailures.TryGetValue(logId, out Exception? failure))
+		{
+			return Task.FromException<IReadOnlyList<HordeLogEvent>>(failure);
+		}
+		List<HordeLogEvent> events = LogEvents.TryGetValue(logId, out List<HordeLogEvent>? known) ? known : [];
+		return Task.FromResult<IReadOnlyList<HordeLogEvent>>(events.Skip(index).Take(count).ToList());
+	}
+
+	public Task<IReadOnlyList<string>> GetLogLinesAsync(string logId, int index, int count, CancellationToken cancellationToken)
+	{
+		LineRequests.Add((logId, index, count));
+		if (LinesFailure is not null)
+		{
+			return Task.FromException<IReadOnlyList<string>>(LinesFailure);
+		}
+		List<string> lines = LogLines.TryGetValue(logId, out List<string>? known) ? known : [];
+		return Task.FromResult<IReadOnlyList<string>>(lines.Skip(index).Take(count).ToList());
+	}
+
+	public async Task<long> SaveLogAsync(string logId, string path, CancellationToken cancellationToken)
+	{
+		if (LogFailures.TryGetValue(logId, out Exception? failure))
+		{
+			throw failure;
+		}
+		Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+		await File.WriteAllTextAsync(path, string.Join('\n', LogLines.TryGetValue(logId, out List<string>? lines) ? lines : []), cancellationToken);
+		return new FileInfo(path).Length;
+	}
+
 	public ValueTask DisposeAsync()
 	{
 		Disposed = true;

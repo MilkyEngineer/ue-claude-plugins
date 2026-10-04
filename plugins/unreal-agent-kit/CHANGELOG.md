@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.3.2
+
+### Added
+
+- **`uak horde log -job=<id>`:** a Horde job's errors and warnings, without reading whole logs. It reads the events Horde found in the steps' logs (each with its severity), not the log text, and prints per step one line (outcome, counts, the log's URL), then each distinct event with its line number, how often it occurred, and the lines before it. Errors come first; an event repeated within a step, or already shown under an earlier step, is only counted.
+  - Without `-step=`, the failed steps, then those with warnings. `-step=` takes a step id or name (or part of a name).
+  - `-errors` or `-warnings` keeps one severity; `-max=` (default 10) caps the distinct events per step; `-context=` sets the lines before each event (default 2 before errors, none before warnings); `-json` for scripts.
+  - `-save` also saves each step's whole log as text in the state folder (`Logs/horde/<job>/`) and prints where.
+  - Exit codes are those of `uak horde job`: the job's result (0, 1, 3, 7), 4 not signed in, 5 another error (no such job or step).
+- **`-issues`** on `uak horde job` and `uak horde preflight -wait`: the same report, with the defaults, after the summary.
+
 ## 0.3.1
 
 ### Added

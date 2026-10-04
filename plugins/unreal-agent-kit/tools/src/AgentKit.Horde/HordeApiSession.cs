@@ -78,6 +78,15 @@ public sealed class HordeApiSession : IHordeApi
 	/// <inheritdoc/>
 	public Task<HordeJob?> GetJobAsync(string jobId, string? modifiedAfter, CancellationToken cancellationToken) => CallAsync(api => api.GetJobAsync(jobId, modifiedAfter, cancellationToken), cancellationToken);
 
+	/// <inheritdoc/>
+	public Task<IReadOnlyList<HordeLogEvent>> GetLogEventsAsync(string logId, int index, int count, CancellationToken cancellationToken) => CallAsync(api => api.GetLogEventsAsync(logId, index, count, cancellationToken), cancellationToken);
+
+	/// <inheritdoc/>
+	public Task<IReadOnlyList<string>> GetLogLinesAsync(string logId, int index, int count, CancellationToken cancellationToken) => CallAsync(api => api.GetLogLinesAsync(logId, index, count, cancellationToken), cancellationToken);
+
+	/// <inheritdoc/>
+	public Task<long> SaveLogAsync(string logId, string path, CancellationToken cancellationToken) => CallAsync(api => api.SaveLogAsync(logId, path, cancellationToken), cancellationToken);
+
 	/// <summary>
 	/// Replaces the client with a new one: a fresh connection after the old one kept failing. A client on uak's cached token
 	/// keeps that token; any other gets Horde's own token handling again (which refreshes itself), never a copy of its current

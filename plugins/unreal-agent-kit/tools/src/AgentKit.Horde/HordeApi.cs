@@ -56,6 +56,15 @@ public interface IHordeApi : IAsyncDisposable
 
 	/// <summary>A job's state, or null when it hasn't changed since <paramref name="modifiedAfter"/> (a job's <see cref="HordeJob.UpdateTime"/>).</summary>
 	Task<HordeJob?> GetJobAsync(string jobId, string? modifiedAfter, CancellationToken cancellationToken);
+
+	/// <summary>A log's events (its errors and warnings, as Horde found them), from event <paramref name="index"/>, at most <paramref name="count"/>.</summary>
+	Task<IReadOnlyList<HordeLogEvent>> GetLogEventsAsync(string logId, int index, int count, CancellationToken cancellationToken);
+
+	/// <summary>A log's lines as text, from line <paramref name="index"/> (from 0), at most <paramref name="count"/>.</summary>
+	Task<IReadOnlyList<string>> GetLogLinesAsync(string logId, int index, int count, CancellationToken cancellationToken);
+
+	/// <summary>Saves a whole log as plain text to <paramref name="path"/> (replacing it), and returns its size in bytes.</summary>
+	Task<long> SaveLogAsync(string logId, string path, CancellationToken cancellationToken);
 }
 
 /// <summary>The server refused a request because the user isn't logged in, or may not do it.</summary>
@@ -183,6 +192,44 @@ public sealed class HordeApi : IHordeApi
 	{
 		string path = "api/v1/jobs/" + Uri.EscapeDataString(jobId) + (modifiedAfter is null ? "" : "?modifiedAfter=" + Uri.EscapeDataString(modifiedAfter));
 		return HordeJob.Parse(await GetJsonAsync(path, cancellationToken).ConfigureAwait(false));
+	}
+
+	/// <inheritdoc/>
+	public async Task<IReadOnlyList<HordeLogEvent>> GetLogEventsAsync(string logId, int index, int count, CancellationToken cancellationToken)
+		=> HordeLogParser.ParseEvents(await GetJsonAsync($"api/v1/logs/{Uri.EscapeDataString(logId)}/events?index={index.ToString(CultureInfo.InvariantCulture)}&count={count.ToString(CultureInfo.InvariantCulture)}", cancellationToken).ConfigureAwait(false));
+
+	/// <inheritdoc/>
+	public async Task<IReadOnlyList<string>> GetLogLinesAsync(string logId, int index, int count, CancellationToken cancellationToken)
+		=> HordeLogParser.ParseLines(await GetJsonAsync($"api/v1/logs/{Uri.EscapeDataString(logId)}/lines?index={index.ToString(CultureInfo.InvariantCulture)}&count={count.ToString(CultureInfo.InvariantCulture)}", cancellationToken).ConfigureAwait(false));
+
+	/// <inheritdoc/>
+	/// <remarks>Streams the log (<c>api/v1/logs/{id}/data?format=Text</c>) to a temporary file beside the target, then moves it into place.</remarks>
+	public async Task<long> SaveLogAsync(string logId, string path, CancellationToken cancellationToken)
+	{
+		string what = $"GET api/v1/logs/{Uri.EscapeDataString(logId)}/data";
+		using HttpResponseMessage response = await Http.GetAsync(what[4..] + "?format=Text", HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
+		if (!response.IsSuccessStatusCode)
+		{
+			await ReadAsync(response, what, cancellationToken).ConfigureAwait(false);
+		}
+		string full = Path.GetFullPath(path);
+		Directory.CreateDirectory(Path.GetDirectoryName(full)!);
+		string temporary = full + ".tmp";
+		try
+		{
+			await using (Stream source = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false))
+			await using (FileStream target = new(temporary, FileMode.Create, FileAccess.Write, FileShare.None))
+			{
+				await source.CopyToAsync(target, cancellationToken).ConfigureAwait(false);
+			}
+			File.Move(temporary, full, overwrite: true);
+		}
+		catch
+		{
+			File.Delete(temporary);
+			throw;
+		}
+		return new FileInfo(full).Length;
 	}
 
 	/// <inheritdoc/>

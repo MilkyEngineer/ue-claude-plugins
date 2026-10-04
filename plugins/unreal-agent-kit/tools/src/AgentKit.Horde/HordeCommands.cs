@@ -471,7 +471,7 @@ public abstract class HordeCommandBase : IUakCommand
 	/// Waits for a job (when <paramref name="wait"/>) or reads it once, prints the summary (or JSON), and returns the exit code:
 	/// 0 success, 1 failure or incomplete, 3 still running, 7 warnings.
 	/// </summary>
-	internal async Task<int> ReportJobAsync(UakContext context, IHordeApi api, string jobId, bool wait, TimeSpan? timeout, bool verbose, bool json, HordeOpenMode open, CancellationToken cancellationToken, bool announce = true, PerforceShelveResult? shelved = null)
+	internal async Task<int> ReportJobAsync(UakContext context, IHordeApi api, string jobId, bool wait, TimeSpan? timeout, bool verbose, bool json, HordeOpenMode open, CancellationToken cancellationToken, bool announce = true, PerforceShelveResult? shelved = null, HordeLogOptions? issues = null)
 	{
 		HordeJob? job;
 		bool timedOut;
@@ -530,6 +530,10 @@ public abstract class HordeCommandBase : IUakCommand
 			}
 		}
 
+		// -issues: the failed steps' errors and warnings, then the other steps' warnings, from the logs' events.
+		IReadOnlyList<HordeStepIssues>? stepIssues = issues is null || failed.Count + warned.Count == 0 ? null
+			: await LogReader.ReadAsync(api, [.. failed, .. warned], issues, null, cancellationToken).ConfigureAwait(false);
+
 		if (json)
 		{
 			object Step(HordeStep step) => new { name = step.Name, state = step.State, outcome = step.Outcome, url = StepUrl(server, job.Id, step.Id), log = step.LogId is null ? null : LogUrl(server, step.LogId) };
@@ -553,6 +557,7 @@ public abstract class HordeCommandBase : IUakCommand
 				shelved = ShelvedFiles(shelved),
 				replaced = shelved?.Replaced,
 				kept = shelved?.Kept,
+				issues = issues is null ? null : HordeLogReader.ToJson(server, job.Id, stepIssues ?? []),
 			}).ConfigureAwait(false);
 			return exitCode;
 		}
@@ -590,8 +595,22 @@ public abstract class HordeCommandBase : IUakCommand
 		{
 			await Output.WriteLineAsync($"  -timeout passed; wait again with: uak horde job -id={job.Id} -wait -timeout=<seconds>").ConfigureAwait(false);
 		}
+		if (stepIssues is not null)
+		{
+			await HordeLogReader.WriteTextAsync(Output, server, stepIssues).ConfigureAwait(false);
+			await Output.WriteLineAsync($"More: uak horde log -job={job.Id} [-step=<id or name>] [-max=<n>] [-context=<n>] [-save]").ConfigureAwait(false);
+		}
 		return exitCode;
 	}
+
+	/// <summary>Reads steps' log events; tests replace it to change its limits.</summary>
+	internal HordeLogReader LogReader { get; set; } = new();
+
+	/// <summary>The usage lines of -issues.</summary>
+	internal const string IssuesUsage =
+		"  -issues    also print the errors and warnings of the failed steps and those with warnings, from Horde's log\n" +
+		"             events: de-duplicated, at most 10 distinct per step, errors with 2 lines of context before them\n" +
+		"             (uak horde log shows more).\n";
 }
 
 /// <summary><c>uak horde config</c>: shows or sets the Horde server, the -open setting, and each stream's saved build settings.</summary>
@@ -1011,7 +1030,7 @@ public sealed class HordePreflightCommand : HordeCommandBase
 	public override string Usage =>
 		"uak horde preflight -c=<shelved change> [-template=<id or name>] [-param:<id>=<value> ...] [-use-template-defaults]\n" +
 		"                    [-stream=<id>] [-shelve] [-force] [-autosubmit [-allow-shelved-only]]\n" +
-		"                    [-wait [-timeout=<seconds>] [-verbose] [-no-open]]\n" +
+		"                    [-wait [-timeout=<seconds>] [-verbose] [-issues] [-no-open]]\n" +
 		"                    [-login-timeout=<seconds> | -no-login] [-server=<url>] [-json]\n" +
 		"  Builds with the stream's saved build settings (template and parameters, see uak horde config). With none saved,\n" +
 		"  and no -template= or -param:, it starts nothing and exits 6, printing the templates and their parameters (as\n" +
@@ -1044,6 +1063,8 @@ public sealed class HordePreflightCommand : HordeCommandBase
 		"  -wait        wait quietly for the result, then print a short summary (failing steps with their URLs).\n" +
 		"  -timeout=    with -wait: stop waiting after this many seconds (exit 3); wait again with uak horde job -wait.\n" +
 		"  -verbose     with -wait: every step in the summary.\n" +
+		"  -issues      with -wait: also the errors and warnings of failed steps and those with warnings (as uak horde\n" +
+		"               job -issues).\n" +
 		"  -no-open     with -wait: don't open the job's page in the browser this time (see uak horde config -open=).\n" + LoginUsage +
 		"  Exit codes: 0 started (with -wait: succeeded), 1 failed or did not complete, 2 usage error, 3 still running after\n" +
 		"  -timeout, 4 not signed in (the sign-in failed or timed out, or -no-login), 5 another error (including 403, not\n" +
@@ -1071,11 +1092,12 @@ public sealed class HordePreflightCommand : HordeCommandBase
 		bool wait = arguments.GetFlag("wait");
 		TimeSpan? timeout = ParseTimeout(arguments);
 		bool verbose = arguments.GetFlag("verbose");
+		bool issues = arguments.GetFlag("issues");
 		string? server = arguments.GetString("server");
 		bool json = arguments.GetFlag("json");
-		if (!wait && (timeout is not null || verbose))
+		if (!wait && (timeout is not null || verbose || issues))
 		{
-			throw new UakUsageException("-timeout and -verbose go with -wait.");
+			throw new UakUsageException("-timeout, -verbose and -issues go with -wait.");
 		}
 		LoginOptions login = LoginOptions.Parse(arguments);
 		bool noOpen = arguments.GetFlag("no-open");
@@ -1262,7 +1284,7 @@ public sealed class HordePreflightCommand : HordeCommandBase
 					}
 					return HordeExitCodes.Success;
 				}
-				return await ReportJobAsync(context, api, jobId, true, timeout, verbose, json, open, cancellationToken, announce: false, shelved).ConfigureAwait(false);
+				return await ReportJobAsync(context, api, jobId, true, timeout, verbose, json, open, cancellationToken, announce: false, shelved, issues ? new HordeLogOptions() : null).ConfigureAwait(false);
 			}
 			finally
 			{
@@ -1430,14 +1452,14 @@ public sealed class HordeJobCommand : HordeCommandBase
 
 	/// <inheritdoc/>
 	public override string Usage =>
-		"uak horde job -id=<job> [-wait [-timeout=<seconds>] [-no-open]] [-verbose] [-login-timeout=<seconds> | -no-login]\n" +
-		"              [-server=<url>] [-json]\n" +
+		"uak horde job -id=<job> [-wait [-timeout=<seconds>] [-no-open]] [-verbose] [-issues]\n" +
+		"              [-login-timeout=<seconds> | -no-login] [-server=<url>] [-json]\n" +
 		"  Prints the result, the job's URL, and only the failing steps (and those with warnings) with their URLs. With -wait,\n" +
 		"  \"Job URL: <url>\" comes first, before the wait.\n" +
 		"  -wait      wait until the job finishes: quiet (one line when it starts running), polling every 15 s and backing\n" +
 		"             off to 60 s while nothing changes. Run it in a background shell; it costs nothing while it waits.\n" +
 		"  -timeout=  stop waiting after this many seconds (exit 3): keep it under the shell's limit, then wait again.\n" +
-		"  -verbose   every step in the summary.\n" +
+		"  -verbose   every step in the summary.\n" + IssuesUsage +
 		"  -no-open   with -wait: don't open the job's page in the browser this time (see uak horde config -open=).\n" + LoginUsage +
 		"  Exit codes: 0 succeeded, 1 failed or did not complete, 2 usage error, 3 still running (after -timeout, or without\n" +
 		"  -wait; or Horde couldn't be reached before -timeout), 4 not signed in (the sign-in failed or timed out, or\n" +
@@ -1453,6 +1475,7 @@ public sealed class HordeJobCommand : HordeCommandBase
 		bool wait = arguments.GetFlag("wait");
 		TimeSpan? timeout = ParseTimeout(arguments);
 		bool verbose = arguments.GetFlag("verbose");
+		bool issues = arguments.GetFlag("issues");
 		string? server = arguments.GetString("server");
 		bool json = arguments.GetFlag("json");
 		if (timeout is not null && !wait)
@@ -1466,8 +1489,140 @@ public sealed class HordeJobCommand : HordeCommandBase
 			HordeServer found = ResolveServer(server);
 			HordeOpenMode open = wait ? ResolveOpen(noOpen) : HordeOpenMode.Never;
 			await using IHordeApi? api = await ConnectAsync(context, found, login, json ? TextWriter.Null : Output, cancellationToken).ConfigureAwait(false);
-			return api is null ? HordeExitCodes.NotLoggedIn : await ReportJobAsync(context, api, jobId, wait, timeout, verbose, json, open, cancellationToken).ConfigureAwait(false);
+			return api is null ? HordeExitCodes.NotLoggedIn : await ReportJobAsync(context, api, jobId, wait, timeout, verbose, json, open, cancellationToken, issues: issues ? new HordeLogOptions() : null).ConfigureAwait(false);
 		};
+	}
+}
+
+/// <summary><c>uak horde log</c>: a job's errors and warnings from its steps' log events, short enough for an agent to read.</summary>
+public sealed class HordeLogCommand : HordeCommandBase
+{
+	/// <inheritdoc/>
+	public override string Name => "horde log";
+
+	/// <inheritdoc/>
+	public override string Summary => "Print a Horde job's errors and warnings (from its steps' log events), de-duplicated and capped, without reading whole logs.";
+
+	/// <inheritdoc/>
+	public override string Usage =>
+		"uak horde log -job=<job> [-step=<id or name>] [-errors | -warnings] [-max=<n>] [-context=<n>] [-save]\n" +
+		"              [-login-timeout=<seconds> | -no-login] [-server=<url>] [-json]\n" +
+		"  Reads the events Horde found in the steps' logs (each has a severity: error or warning), not the log's text, and\n" +
+		"  prints per step one line (outcome, counts, the log's URL), then each distinct event: its line number, how often it\n" +
+		"  occurred, its lines (\"N>\") and the log lines before it (\"N|\"). Errors come first. An event an earlier step\n" +
+		"  already showed is only counted. Without -step: the failed steps, then those with warnings.\n" +
+		"  -step=     a step id, or a step name (exact, else every step whose name contains it; case is ignored).\n" +
+		"  -errors    only errors.  -warnings  only warnings.  (Default: both.)\n" +
+		"  -max=      distinct events shown per step (default 10).\n" +
+		"  -context=  log lines shown before each event (default 2 before errors, none before warnings).\n" +
+		"  -save      also save each step's whole log as text, and print where: <state folder>/Logs/horde/<job>/.\n" +
+		"             Read or search that file instead of asking again.\n" + LoginUsage +
+		"  Exit codes, as uak horde job (the job's result, not the log's): 0 succeeded, 1 failed or did not complete, 2 usage\n" +
+		"  error, 3 still running, 4 not signed in, 5 another error (no such job or step, 403 not allowed...), 7 succeeded\n" +
+		"  with warnings.";
+
+	internal override Func<UakContext, CancellationToken, Task<int>> Parse(UakArguments arguments)
+	{
+		string jobId = arguments.GetRequiredString("job");
+		if (jobId.Any(character => !char.IsLetterOrDigit(character) && character != '-' && character != '_'))
+		{
+			throw new UakUsageException($"'{jobId}' is not a Horde job id.");
+		}
+		string? stepArgument = arguments.GetString("step");
+		if (stepArgument is not null && string.IsNullOrWhiteSpace(stepArgument))
+		{
+			throw new UakUsageException("-step= needs a step id or name.");
+		}
+		bool errors = arguments.GetFlag("errors");
+		bool warnings = arguments.GetFlag("warnings");
+		if (errors && warnings)
+		{
+			throw new UakUsageException("-errors and -warnings don't go together: leave both out for both.");
+		}
+		int max = arguments.GetInt("max", 1, 1000) ?? HordeLogOptions.DefaultMax;
+		int? context = arguments.GetInt("context", 0, 50);
+		bool save = arguments.GetFlag("save");
+		string? server = arguments.GetString("server");
+		bool json = arguments.GetFlag("json");
+		LoginOptions login = LoginOptions.Parse(arguments);
+		HordeLogOptions options = new(!warnings, !errors, max, context ?? HordeLogOptions.DefaultErrorContext, context ?? 0);
+
+		return async (uakContext, cancellationToken) =>
+		{
+			HordeServer found = ResolveServer(server);
+			await using IHordeApi? api = await ConnectAsync(uakContext, found, login, json ? TextWriter.Null : Output, cancellationToken).ConfigureAwait(false);
+			if (api is null)
+			{
+				return HordeExitCodes.NotLoggedIn;
+			}
+			HordeJob job = await api.GetJobAsync(jobId, null, cancellationToken).ConfigureAwait(false)
+				?? throw new HordeApiException(404, $"Horde returned nothing for job {jobId}.");
+			IReadOnlyList<HordeStep> latest = job.LatestSteps;
+			List<HordeStep> steps;
+			if (stepArgument is not null)
+			{
+				steps = FindSteps(latest, stepArgument);
+				if (steps.Count == 0)
+				{
+					uakContext.Logger.LogError("{Message}", $"Job {job.Id} has no step '{stepArgument}'. Its steps: {string.Join(", ", latest.Select(step => $"{step.Name} ({step.Id})"))}.");
+					return HordeExitCodes.Error;
+				}
+			}
+			else
+			{
+				bool Is(HordeStep step, string outcome) => step.Outcome.Equals(outcome, StringComparison.OrdinalIgnoreCase);
+				steps = [.. latest.Where(step => Is(step, "Failure")), .. options.Warnings ? latest.Where(step => Is(step, "Warnings")) : []];
+			}
+
+			string LogPath(HordeStep step) => Path.Combine(uakContext.StateDirectory.FullName, "Logs", "horde", job.Id, $"{FileName(step.Name)}-{step.Id}.log");
+			IReadOnlyList<HordeStepIssues> issues = await LogReader.ReadAsync(api, steps, options, save ? LogPath : null, cancellationToken).ConfigureAwait(false);
+			HordeJobResult result = job.Result;
+			int exitCode = HordeExitCodes.For(result);
+			Uri url = api.ServerUrl;
+			if (json)
+			{
+				await WriteNodeAsync(new JsonObject
+				{
+					["id"] = job.Id,
+					["name"] = job.Name,
+					["url"] = JobUrl(url, job.Id),
+					["state"] = job.State,
+					["result"] = result.ToString(),
+					["steps"] = HordeLogReader.ToJson(url, job.Id, issues),
+				}).ConfigureAwait(false);
+				return exitCode;
+			}
+			await Output.WriteLineAsync(result == HordeJobResult.Running ? $"Still running ({job.State}): {job.Name}" : $"Result: {result}: {job.Name}").ConfigureAwait(false);
+			await Output.WriteLineAsync("  " + JobUrl(url, job.Id)).ConfigureAwait(false);
+			if (steps.Count == 0)
+			{
+				string what = options.Warnings ? "failed or has warnings" : "failed";
+				await Output.WriteLineAsync($"No step {what}" + (result == HordeJobResult.Running ? " so far." : ".")).ConfigureAwait(false);
+				return exitCode;
+			}
+			await HordeLogReader.WriteTextAsync(Output, url, issues).ConfigureAwait(false);
+			return exitCode;
+		};
+	}
+
+	/// <summary>The steps a -step= names: the step with that id; else those with that name; else those whose name contains it.</summary>
+	internal static List<HordeStep> FindSteps(IReadOnlyList<HordeStep> steps, string text)
+	{
+		List<HordeStep> byId = steps.Where(step => step.Id.Equals(text, StringComparison.OrdinalIgnoreCase)).ToList();
+		if (byId.Count > 0)
+		{
+			return byId;
+		}
+		List<HordeStep> byName = steps.Where(step => step.Name.Equals(text, StringComparison.OrdinalIgnoreCase)).ToList();
+		return byName.Count > 0 ? byName : steps.Where(step => step.Name.Contains(text, StringComparison.OrdinalIgnoreCase)).ToList();
+	}
+
+	/// <summary>A step name as a file name: letters, digits, '-', '_' and '.', anything else as '_', at most 80 characters.</summary>
+	internal static string FileName(string name)
+	{
+		string clean = new([.. name.Select(character => char.IsAsciiLetterOrDigit(character) || character is '-' or '_' or '.' ? character : '_')]);
+		clean = clean.Trim('.', '_');
+		return clean.Length == 0 ? "step" : clean.Length > 80 ? clean[..80] : clean;
 	}
 }
 
