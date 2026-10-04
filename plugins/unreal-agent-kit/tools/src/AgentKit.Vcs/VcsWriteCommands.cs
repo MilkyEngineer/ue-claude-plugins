@@ -160,19 +160,23 @@ public sealed class VcsShelveCommand : PerforceCommandBase
 
 	/// <inheritdoc/>
 	public override string Usage =>
-		"uak vcs shelve -c=<changelist> [-replace [-drop-unopened]] [-json]\n" +
+		"uak vcs shelve -c=<changelist> [-keep-unopened] [-json]\n" +
 		"uak vcs shelve <file>... [-description=<text>] [-force] [-json]\n" +
-		"  -c=           shelve every file opened in this pending changelist of this client (p4 shelve -f: files already\n" +
-		"                shelved are overwritten, other shelved files stay). Files whose shelved content or action changed\n" +
-		"                are listed, and so are shelved files kept although they are no longer opened (a submit of the shelf\n" +
-		"                would include them). Refused while an auto-submit Horde preflight of the changelist runs, when a\n" +
-		"                Horde server is configured: Horde submits the changelist's current shelf when the preflight\n" +
-		"                succeeds. When Horde can't be asked, uak warns and shelves.\n" +
-		"  -replace      p4 shelve -r instead: the shelf becomes exactly the opened files. CAREFUL: shelved files that are not\n" +
-		"                opened in the changelist are DELETED from the shelf, and a shelf may be the only copy of that work.\n" +
-		"                So uak refuses when the shelf holds such files, and lists them, unless -drop-unopened is given.\n" +
-		"                Every file the shelf loses is printed; a file that left the changelist while uak shelved (so p4\n" +
-		"                deleted it from the shelf unasked) fails the command (exit 1), naming it.\n" +
+		"  -c=           shelve every file opened in this pending changelist of this client, replacing its shelf (p4 shelve\n" +
+		"                -r): the shelf becomes exactly the opened files. Shelved files that are no longer opened in the\n" +
+		"                changelist (reverted, or moved to another changelist) are DELETED from the shelf, so a preflight\n" +
+		"                doesn't build them and a submit of the shelf doesn't include them; each is printed (\"REMOVED from\n" +
+		"                the shelf\"). Files whose shelved content or action changed are listed too. Refused when nothing is\n" +
+		"                opened in the changelist (that would empty the shelf). A file that left the changelist while uak\n" +
+		"                shelved (so p4 deleted it from the shelf although uak hadn't seen it go) fails the command (exit 1),\n" +
+		"                naming it. Refused while an auto-submit Horde preflight of the changelist runs, when a Horde server\n" +
+		"                is configured: Horde submits the changelist's current shelf when the preflight succeeds. When Horde\n" +
+		"                can't be asked, uak warns and shelves.\n" +
+		"  -keep-unopened  p4 shelve -f instead (the behaviour before 0.3.3): opened files are shelved over their shelved\n" +
+		"                copies, and shelved files that are no longer opened STAY on the shelf (listed as kept: a preflight\n" +
+		"                builds them and a submit of the shelf would include them). Use it when the shelf is the only copy of\n" +
+		"                work that is no longer opened.\n" +
+		"  -replace, -drop-unopened  accepted and ignored, so older scripts keep working: replacing the shelf is the default.\n" +
 		"  <file>...     files already opened in this client: creates a new changelist, moves them into it (p4 reopen), shelves\n" +
 		"                it, and prints its number, with each file's original changelist. Fails before changing anything when\n" +
 		"                a file is not opened, when a file is in a numbered changelist (it would leave that changelist; -force\n" +
@@ -188,13 +192,16 @@ public sealed class VcsShelveCommand : PerforceCommandBase
 	internal override Func<PerforceVersionControl, CancellationToken, Task<int>> Parse(UakArguments arguments)
 	{
 		int? change = ParseChange(arguments, required: false, allowDefault: false);
+		// -replace and -drop-unopened were how 0.3.2 and earlier asked for p4 shelve -r; it is the default now, so they are
+		// read (an unread flag is an error) and ignored.
 		bool replace = arguments.GetFlag("replace");
 		bool dropUnopened = arguments.GetFlag("drop-unopened");
+		bool keepUnopened = arguments.GetFlag("keep-unopened");
 		bool force = arguments.GetFlag("force");
 		string? description = arguments.GetString("description");
-		if (dropUnopened && !replace)
+		if (keepUnopened && (replace || dropUnopened))
 		{
-			throw new UakUsageException("-drop-unopened goes with -replace.");
+			throw new UakUsageException("-keep-unopened keeps shelved files that are not opened; -replace and -drop-unopened ask for the opposite. Give one or the other.");
 		}
 		if (change is not null)
 		{
@@ -210,16 +217,16 @@ public sealed class VcsShelveCommand : PerforceCommandBase
 			{
 				throw new UakUsageException("-force goes with files, not -c=.");
 			}
-			ShelveMode mode = replace ? ShelveMode.Replace : ShelveMode.Update;
-			return (p4, token) => ShelveChangeAsync(p4, change.Value, mode, dropUnopened, created: false, null, token);
+			ShelveMode mode = keepUnopened ? ShelveMode.Update : ShelveMode.Replace;
+			return (p4, token) => ShelveChangeAsync(p4, change.Value, mode, created: false, null, token);
 		}
 		if (arguments.Positional.Count == 0)
 		{
 			throw new UakUsageException("Give -c=<changelist>, or the opened files to shelve in a new changelist.");
 		}
-		if (replace)
+		if (keepUnopened || replace || dropUnopened)
 		{
-			throw new UakUsageException("-replace needs -c=<changelist>: a new changelist has no shelf to replace.");
+			throw new UakUsageException("-keep-unopened, -replace and -drop-unopened go with -c=<changelist>: a new changelist has no shelf yet.");
 		}
 		List<string> files = RequireFiles(arguments);
 		return (p4, token) => ShelveFilesAsync(p4, files, description ?? DefaultDescription, force, token);
@@ -258,7 +265,7 @@ public sealed class VcsShelveCommand : PerforceCommandBase
 				throw new VcsException("These files could not be moved into the new changelist, so nothing was shelved: " +
 					string.Join("; ", failed.Select(result => $"{result.Path}: {result.Message}")) + ".");
 			}
-			return await ShelveChangeAsync(p4, change, ShelveMode.Update, dropUnopened: false, created: true, originalChanges, cancellationToken).ConfigureAwait(false);
+			return await ShelveChangeAsync(p4, change, ShelveMode.Replace, created: true, originalChanges, cancellationToken).ConfigureAwait(false);
 		}
 		catch (VcsException exception)
 		{
@@ -308,13 +315,15 @@ public sealed class VcsShelveCommand : PerforceCommandBase
 		}
 	}
 
-	async Task<int> ShelveChangeAsync(PerforceVersionControl p4, int change, ShelveMode mode, bool dropUnopened, bool created, IReadOnlyDictionary<string, string?>? originalChanges, CancellationToken cancellationToken)
+	async Task<int> ShelveChangeAsync(PerforceVersionControl p4, int change, ShelveMode mode, bool created, IReadOnlyDictionary<string, string?>? originalChanges, CancellationToken cancellationToken)
 	{
 		if (!created)
 		{
 			await CheckGuardsAsync(change, cancellationToken).ConfigureAwait(false);
 		}
-		PerforceShelveResult result = await p4.ShelveAsync(change, mode, dropUnopened, cancellationToken).ConfigureAwait(false);
+		// Replacing drops the shelved files that uak sees are not opened (each is printed); one that leaves the changelist
+		// while uak shelves still fails (see PerforceVersionControl.ShelveAsync).
+		PerforceShelveResult result = await p4.ShelveAsync(change, mode, dropUnopened: mode == ShelveMode.Replace, cancellationToken).ConfigureAwait(false);
 		string? Original(string depotFile) => originalChanges is not null && originalChanges.TryGetValue(depotFile, out string? original) ? original : null;
 		if (Json)
 		{

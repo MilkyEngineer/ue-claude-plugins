@@ -66,15 +66,18 @@ public sealed record PerforceShelveResult(IReadOnlyList<PerforceShelvedFile> She
 /// <param name="Released">Files p4 pulled in from the default changelist (moved out of the changelist meanwhile) that uak moved back out.</param>
 public sealed record PerforceDescriptionUpdate(IReadOnlyList<string> Restored, IReadOnlyList<string> Released);
 
-/// <summary>How <c>uak vcs shelve -c=</c> updates a changelist's shelf.</summary>
+/// <summary>How <c>uak vcs shelve -c=</c> and <c>uak horde preflight -shelve</c> update a changelist's shelf.</summary>
 public enum ShelveMode
 {
-	/// <summary><c>p4 shelve -f</c>: shelve every opened file, overwriting those already shelved; other shelved files stay.</summary>
+	/// <summary>
+	/// <c>p4 shelve -f</c> (the commands' <c>-keep-unopened</c>): shelve every opened file, overwriting those already shelved;
+	/// other shelved files stay, so a preflight builds them and a submit of the shelf includes them.
+	/// </summary>
 	Update,
 
 	/// <summary>
-	/// <c>p4 shelve -r</c>: the shelf becomes exactly the opened files; shelved files that are no longer opened are removed from
-	/// it, which uak refuses unless asked (see <see cref="PerforceVersionControl.ShelveAsync"/>).
+	/// <c>p4 shelve -r</c> (the commands' default): the shelf becomes exactly the opened files; shelved files that are no longer
+	/// opened are removed from it, which <see cref="PerforceVersionControl.ShelveAsync"/> refuses unless its caller allows it.
 	/// </summary>
 	Replace,
 }
@@ -212,8 +215,8 @@ public sealed partial class PerforceVersionControl
 		List<string> shelvedOnly = before.Select(file => file.DepotFile).Where(file => !opened.Contains(file)).ToList();
 		if (mode == ShelveMode.Replace && !dropUnopened && shelvedOnly.Count > 0)
 		{
-			throw new VcsException($"Change {number}'s shelf holds files that are not opened in it, and -replace (p4 shelve -r) would delete them from the shelf: " +
-				string.Join(", ", shelvedOnly) + ". Nothing was shelved. Shelve without -replace to keep them, or pass -drop-unopened to delete them from the shelf.");
+			throw new VcsException($"Change {number}'s shelf holds files that are not opened in it, and p4 shelve -r would delete them from the shelf: " +
+				string.Join(", ", shelvedOnly) + ". Nothing was shelved. Shelve with -keep-unopened (p4 shelve -f) to keep them.");
 		}
 		string flag = mode == ShelveMode.Replace ? "-r" : "-f";
 		IPerforceConnection connection = _connection is P4ProcessConnection process && process.Timeout < ShelveTimeout ? process.WithTimeout(ShelveTimeout) : _connection;

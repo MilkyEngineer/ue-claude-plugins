@@ -139,12 +139,18 @@ public sealed class VcsWriteCommandTests
 	public async Task AReplaceThatLostAFileUnaskedExitsOneAndNamesIt()
 	{
 		using TempDirectory root = new();
-		FakePerforceConnection connection = new FakePerforceConnection(root.Path).On("change", "change-o-pending").On("shelve", "shelve").OnEach("describe", "describe-s-pending", "describe-s-one");
+		// Replacing is the default, and -replace is still accepted: either way a file the shelf lost that uak had not seen
+		// shelved and unopened fails the command.
+		foreach (string[] flags in new[] { Array.Empty<string>(), new[] { "-replace" } })
+		{
+			FakePerforceConnection connection = new FakePerforceConnection(root.Path).On("change", "change-o-pending").On("shelve", "shelve").OnEach("describe", "describe-s-pending", "describe-s-one");
 
-		(int exitCode, _, _, List<string> log) = await RunCapturedAsync(new VcsShelveCommand(), root, connection, Token, "-c=12346", "-replace");
+			(int exitCode, _, _, List<string> log) = await RunCapturedAsync(new VcsShelveCommand(), root, connection, Token, ["-c=12346", .. flags]);
 
-		Assert.AreEqual(UakExitCodes.Failure, exitCode);
-		StringAssert.Contains(log.Single(line => line.StartsWith("Error: ", StringComparison.Ordinal)), "//Game/main/Config/Removed.ini");
+			Assert.AreEqual(UakExitCodes.Failure, exitCode);
+			StringAssert.Contains(log.Single(line => line.StartsWith("Error: ", StringComparison.Ordinal)), "//Game/main/Config/Removed.ini");
+			CollectionAssert.AreEqual(new[] { "-r", "-c12346" }, connection.Calls.Single(call => call.Command == "shelve").Arguments.ToArray());
+		}
 	}
 
 	[TestMethod]
@@ -153,11 +159,12 @@ public sealed class VcsWriteCommandTests
 		using TempDirectory root = new();
 		FakePerforceConnection connection = new FakePerforceConnection(root.Path).On("change", "change-o-pending").On("shelve", "shelve").On("describe", "describe-s-shelved-only");
 
-		(int exitCode, string output) = await RunAsync(new VcsShelveCommand(), root, connection, Token, "-c=12346");
+		(int exitCode, string output) = await RunAsync(new VcsShelveCommand(), root, connection, Token, "-c=12346", "-keep-unopened");
 		Assert.AreEqual(UakExitCodes.Success, exitCode, output);
 		StringAssert.Contains(output, "kept on the shelf, but no longer opened in change 12346 (a submit of the shelf would include it): //Game/main/Source/Game/ShelvedOnly.cpp");
+		Assert.IsTrue(connection.Calls.Where(call => call.Command == "shelve").All(call => call.Arguments[0] == "-f"), "-keep-unopened is p4 shelve -f");
 
-		(int jsonExit, string json) = await RunAsync(new VcsShelveCommand(), root, connection, Token, "-c=12346", "-json");
+		(int jsonExit, string json) = await RunAsync(new VcsShelveCommand(), root, connection, Token, "-c=12346", "-keep-unopened", "-json");
 		Assert.AreEqual(UakExitCodes.Success, jsonExit);
 		using JsonDocument document = JsonDocument.Parse(json);
 		Assert.AreEqual("//Game/main/Source/Game/ShelvedOnly.cpp", document.RootElement.GetProperty("kept")[0].GetString());
@@ -181,9 +188,9 @@ public sealed class VcsWriteCommandTests
 		Assert.AreEqual(UakExitCodes.Success, exitCode, output);
 		StringAssert.Contains(output, "Created change 12350.");
 		StringAssert.Contains(output, "shelved edit         //Game/main/Source/Game/Game.cpp  (was in change default)");
-		StringAssert.Contains(output, "Shelved 2 file(s) in change 12350 (p4 shelve -f).");
+		StringAssert.Contains(output, "Shelved 2 file(s) in change 12350 (p4 shelve -r: the shelf is now exactly these files).");
 		CollectionAssert.AreEqual(new[] { "fstat", "change", "change", "fstat", "reopen", "fstat", "change", "describe", "shelve", "describe" }, connection.Calls.Select(call => call.Command).ToArray());
-		CollectionAssert.AreEqual(new[] { "-f", "-c12350" }, connection.Calls.Single(call => call.Command == "shelve").Arguments.ToArray());
+		CollectionAssert.AreEqual(new[] { "-r", "-c12350" }, connection.Calls.Single(call => call.Command == "shelve").Arguments.ToArray());
 		Assert.IsFalse(connection.Calls.Any(call => call.Command is "revert" or "submit"));
 	}
 
@@ -224,20 +231,47 @@ public sealed class VcsWriteCommandTests
 	}
 
 	[TestMethod]
-	public async Task ReplacingAShelfWithShelvedOnlyFilesNeedsDropUnopened()
+	public async Task ShelvingAChangeDropsShelvedOnlyFilesUnlessKeepUnopened()
 	{
 		using TempDirectory root = new();
-		FakePerforceConnection refused = new FakePerforceConnection(root.Path).On("change", "change-o-pending").On("describe", "describe-s-shelved-only");
-		(int exitCode, _) = await RunAsync(new VcsShelveCommand(), root, refused, Token, "-c=12346", "-replace");
-		Assert.AreEqual(UakExitCodes.Failure, exitCode);
-		Assert.IsFalse(refused.Calls.Any(call => call.Command == "shelve"));
+		// The default, and the old -replace and -drop-unopened (accepted, and ignored): p4 shelve -r, and the shelved file that
+		// is not opened is deleted from the shelf and printed.
+		foreach (string[] flags in new[] { Array.Empty<string>(), new[] { "-replace" }, new[] { "-replace", "-drop-unopened" }, new[] { "-drop-unopened" } })
+		{
+			FakePerforceConnection dropping = new FakePerforceConnection(root.Path).On("change", "change-o-pending").On("shelve", "shelve").OnEach("describe", "describe-s-shelved-only", "describe-s-pending");
+			(int dropped, string output) = await RunAsync(new VcsShelveCommand(), root, dropping, Token, ["-c=12346", .. flags]);
+			Assert.AreEqual(UakExitCodes.Success, dropped, output);
+			CollectionAssert.AreEqual(new[] { "-r", "-c12346" }, dropping.Calls.Single(call => call.Command == "shelve").Arguments.ToArray(), string.Join(' ', flags));
+			StringAssert.Contains(output, "REMOVED from the shelf: //Game/main/Source/Game/ShelvedOnly.cpp");
+			StringAssert.Contains(output, "1 file(s) removed from the shelf.");
+		}
 
-		FakePerforceConnection dropping = new FakePerforceConnection(root.Path).On("change", "change-o-pending").On("shelve", "shelve").OnEach("describe", "describe-s-shelved-only", "describe-s-pending");
-		(int dropped, string output) = await RunAsync(new VcsShelveCommand(), root, dropping, Token, "-c=12346", "-replace", "-drop-unopened");
-		Assert.AreEqual(UakExitCodes.Success, dropped, output);
-		StringAssert.Contains(output, "REMOVED from the shelf: //Game/main/Source/Game/ShelvedOnly.cpp");
-		StringAssert.Contains(output, "1 file(s) removed from the shelf.");
-		await Assert.ThrowsExactlyAsync<UakUsageException>(() => RunAsync(new VcsShelveCommand(), root, dropping, Token, "-c=12346", "-drop-unopened"));
+		// -keep-unopened: p4 shelve -f, and the file stays, listed as kept.
+		FakePerforceConnection keeping = new FakePerforceConnection(root.Path).On("change", "change-o-pending").On("shelve", "shelve").On("describe", "describe-s-shelved-only");
+		(int kept, string keptOutput) = await RunAsync(new VcsShelveCommand(), root, keeping, Token, "-c=12346", "-keep-unopened");
+		Assert.AreEqual(UakExitCodes.Success, kept, keptOutput);
+		CollectionAssert.AreEqual(new[] { "-f", "-c12346" }, keeping.Calls.Single(call => call.Command == "shelve").Arguments.ToArray());
+		StringAssert.Contains(keptOutput, "kept on the shelf, but no longer opened in change 12346");
+		Assert.DoesNotContain("REMOVED", keptOutput);
+
+		// -keep-unopened with the old flags that asked for the opposite is a usage error.
+		await Assert.ThrowsExactlyAsync<UakUsageException>(() => RunAsync(new VcsShelveCommand(), root, keeping, Token, "-c=12346", "-keep-unopened", "-replace"));
+		await Assert.ThrowsExactlyAsync<UakUsageException>(() => RunAsync(new VcsShelveCommand(), root, keeping, Token, "-c=12346", "-keep-unopened", "-drop-unopened"));
+	}
+
+	[TestMethod]
+	public async Task ShelvingAChangeWithNothingOpenedIsRefusedInBothModes()
+	{
+		using TempDirectory root = new();
+		// p4 shelve -r with nothing opened would empty the shelf.
+		foreach (string[] flags in new[] { Array.Empty<string>(), new[] { "-keep-unopened" } })
+		{
+			FakePerforceConnection connection = new FakePerforceConnection(root.Path).On("change", "change-o-empty").On("shelve", "shelve").On("describe", "describe-s-pending");
+			(int exitCode, _, _, List<string> log) = await RunCapturedAsync(new VcsShelveCommand(), root, connection, Token, ["-c=12350", .. flags]);
+			Assert.AreEqual(UakExitCodes.Failure, exitCode);
+			StringAssert.Contains(log.Single(line => line.StartsWith("Error: ", StringComparison.Ordinal)), "has no opened files to shelve");
+			Assert.IsFalse(connection.Calls.Any(call => call.Command == "shelve"), "nothing was shelved");
+		}
 	}
 
 	[TestMethod]
@@ -260,7 +294,7 @@ public sealed class VcsWriteCommandTests
 		using TempDirectory root = new();
 		FakePerforceConnection connection = new FakePerforceConnection(root.Path).On("change", "change-o-pending").On("shelve", "shelve").On("describe", "describe-s-pending");
 
-		(int exitCode, string json) = await RunAsync(new VcsShelveCommand(), root, connection, Token, "-c=12346", "-replace", "-json");
+		(int exitCode, string json) = await RunAsync(new VcsShelveCommand(), root, connection, Token, "-c=12346", "-json");
 
 		Assert.AreEqual(UakExitCodes.Success, exitCode);
 		using JsonDocument document = JsonDocument.Parse(json);
@@ -269,6 +303,13 @@ public sealed class VcsWriteCommandTests
 		Assert.AreEqual(2, document.RootElement.GetProperty("files").GetArrayLength());
 		Assert.AreEqual(0, document.RootElement.GetProperty("removed").GetArrayLength());
 		CollectionAssert.AreEqual(new[] { "-r", "-c12346" }, connection.Calls.Single(call => call.Command == "shelve").Arguments.ToArray());
+
+		FakePerforceConnection updating = new FakePerforceConnection(root.Path).On("change", "change-o-pending").On("shelve", "shelve").On("describe", "describe-s-pending");
+		(int updateExit, string updateJson) = await RunAsync(new VcsShelveCommand(), root, updating, Token, "-c=12346", "-keep-unopened", "-json");
+		Assert.AreEqual(UakExitCodes.Success, updateExit);
+		using JsonDocument updateDocument = JsonDocument.Parse(updateJson);
+		Assert.AreEqual("update", updateDocument.RootElement.GetProperty("mode").GetString());
+		CollectionAssert.AreEqual(new[] { "-f", "-c12346" }, updating.Calls.Single(call => call.Command == "shelve").Arguments.ToArray());
 	}
 
 	[TestMethod]
@@ -281,6 +322,7 @@ public sealed class VcsWriteCommandTests
 		await Assert.ThrowsExactlyAsync<UakUsageException>(() => RunAsync(new VcsShelveCommand(), root, connection, Token));
 		await Assert.ThrowsExactlyAsync<UakUsageException>(() => RunAsync(new VcsShelveCommand(), root, connection, Token, "-c=12346", file));
 		await Assert.ThrowsExactlyAsync<UakUsageException>(() => RunAsync(new VcsShelveCommand(), root, connection, Token, file, "-replace"));
+		await Assert.ThrowsExactlyAsync<UakUsageException>(() => RunAsync(new VcsShelveCommand(), root, connection, Token, file, "-keep-unopened"));
 		await Assert.ThrowsExactlyAsync<UakUsageException>(() => RunAsync(new VcsShelveCommand(), root, connection, Token, "-c=default"));
 		await Assert.ThrowsExactlyAsync<UakUsageException>(() => RunAsync(new VcsShelveCommand(), root, connection, Token, "-c=-5"));
 		await Assert.ThrowsExactlyAsync<UakUsageException>(() => RunAsync(new VcsShelveCommand(), root, connection, Token, "-c=12346", "-description=x"));

@@ -18,8 +18,12 @@ public interface IPreflightWorkspace : IDisposable
 	/// <summary>The client's stream, then its parents up to the first stream that isn't virtual.</summary>
 	Task<IReadOnlyList<PerforceStreamLink>> GetStreamChainAsync(CancellationToken cancellationToken);
 
-	/// <summary>Shelves every file opened in a pending change of this client (<c>p4 shelve -f</c>).</summary>
-	Task<PerforceShelveResult> ShelveAsync(int change, CancellationToken cancellationToken);
+	/// <summary>
+	/// Shelves every file opened in a pending change of this client: <see cref="ShelveMode.Replace"/> (<c>p4 shelve -r</c>)
+	/// makes the shelf exactly the opened files, dropping shelved files that are not opened; <see cref="ShelveMode.Update"/>
+	/// (<c>p4 shelve -f</c>) keeps them.
+	/// </summary>
+	Task<PerforceShelveResult> ShelveAsync(int change, ShelveMode mode, CancellationToken cancellationToken);
 
 	/// <summary>When the change's files were last shelved, or null when it has no shelf or the time can't be placed.</summary>
 	Task<DateTimeOffset?> GetShelveTimeAsync(int change, CancellationToken cancellationToken);
@@ -91,7 +95,8 @@ public sealed class PerforcePreflightWorkspace : IPreflightWorkspace
 	}
 
 	/// <inheritdoc/>
-	public Task<PerforceShelveResult> ShelveAsync(int change, CancellationToken cancellationToken) => _p4.ShelveAsync(change, ShelveMode.Update, dropUnopened: false, cancellationToken);
+	public Task<PerforceShelveResult> ShelveAsync(int change, ShelveMode mode, CancellationToken cancellationToken)
+		=> _p4.ShelveAsync(change, mode, dropUnopened: mode == ShelveMode.Replace, cancellationToken);
 
 	/// <inheritdoc/>
 	public Task<DateTimeOffset?> GetShelveTimeAsync(int change, CancellationToken cancellationToken) => _p4.GetShelveTimeAsync(change, cancellationToken);
@@ -497,7 +502,7 @@ public abstract class HordeCommandBase : IUakCommand
 			// -timeout passed before any poll got an answer (Horde unreachable all along): the job's state is unknown, so wait again.
 			if (json)
 			{
-				await WriteJsonAsync(new { id = jobId, url = JobUrl(api.ServerUrl, jobId), result = "Unknown", timedOut = true, shelved = ShelvedFiles(shelved), replaced = shelved?.Replaced, kept = shelved?.Kept }).ConfigureAwait(false);
+				await WriteJsonAsync(new { id = jobId, url = JobUrl(api.ServerUrl, jobId), result = "Unknown", timedOut = true, shelved = ShelvedFiles(shelved), replaced = shelved?.Replaced, removed = shelved?.Removed, kept = shelved?.Kept }).ConfigureAwait(false);
 			}
 			else
 			{
@@ -556,6 +561,7 @@ public abstract class HordeCommandBase : IUakCommand
 				steps = verbose ? latest.Select(Step) : null,
 				shelved = ShelvedFiles(shelved),
 				replaced = shelved?.Replaced,
+				removed = shelved?.Removed,
 				kept = shelved?.Kept,
 				issues = issues is null ? null : HordeLogReader.ToJson(server, job.Id, stepIssues ?? []),
 			}).ConfigureAwait(false);
@@ -1029,7 +1035,7 @@ public sealed class HordePreflightCommand : HordeCommandBase
 	/// <inheritdoc/>
 	public override string Usage =>
 		"uak horde preflight -c=<shelved change> [-template=<id or name>] [-param:<id>=<value> ...] [-use-template-defaults]\n" +
-		"                    [-stream=<id>] [-shelve] [-force] [-autosubmit [-allow-shelved-only]]\n" +
+		"                    [-stream=<id>] [-shelve [-keep-unopened]] [-force] [-autosubmit [-allow-shelved-only]]\n" +
 		"                    [-wait [-timeout=<seconds>] [-verbose] [-issues] [-no-open]]\n" +
 		"                    [-login-timeout=<seconds> | -no-login] [-server=<url>] [-json]\n" +
 		"  Builds with the stream's saved build settings (template and parameters, see uak horde config). With none saved,\n" +
@@ -1045,11 +1051,15 @@ public sealed class HordePreflightCommand : HordeCommandBase
 		"               (comma-separated), text. uak horde templates lists them.\n" +
 		"  -use-template-defaults  skip the saved settings and the exit-6 check (CI): the template (-template=, else the\n" +
 		"               stream's default) with its default parameters.\n" +
-		"  -shelve      first shelve the change's opened files (p4 shelve -f; nothing is reverted), then start a new\n" +
-		"               preflight. Refused while an auto-submit preflight of the change is running (Horde submits the\n" +
-		"               change's CURRENT shelf when it succeeds), checked before shelving and again just before. Shelved\n" +
-		"               files whose content changed, and shelved files kept although not opened, are listed. Agents use it\n" +
-		"               only on changelists they created.\n" +
+		"  -shelve      first shelve the change's opened files, replacing its shelf (p4 shelve -r; nothing is reverted), then\n" +
+		"               start a new preflight. The shelf becomes exactly the opened files: shelved files that are no longer\n" +
+		"               opened in the change (reverted, or moved out) are deleted from it, so the preflight doesn't build them;\n" +
+		"               each is listed (\"removed from the shelf\"), and so are shelved files whose content changed. Refused\n" +
+		"               when nothing is opened in the change, and while an auto-submit preflight of the change is running\n" +
+		"               (Horde submits the change's CURRENT shelf when it succeeds), checked before shelving and again just\n" +
+		"               before. Agents use it only on changelists they created.\n" +
+		"  -keep-unopened  with -shelve: p4 shelve -f instead (the behaviour before 0.3.3): shelved files that are no longer\n" +
+		"               opened STAY on the shelf, listed as kept; the preflight builds them, and a submit would include them.\n" +
 		"  -force       start a new preflight even when an equal one is still running. By default (without -shelve) uak\n" +
 		"               reports a still-running preflight of this change instead (\"reused: <job>\") only when uak started it\n" +
 		"               (it keeps a record of each), with the same stream, template, parameters and auto-submit setting and\n" +
@@ -1057,9 +1067,11 @@ public sealed class HordePreflightCommand : HordeCommandBase
 		"               is still the one uak recorded then.\n" +
 		"  -autosubmit  ONLY when the user asked for it: if the preflight succeeds, Horde edits the change's description and\n" +
 		"               SUBMITS the change's shelf. Off by default; uak never turns it on by itself. Refused while another\n" +
-		"               auto-submit preflight of the change is running (unless it is reused). With -shelve, also refused\n" +
-		"               when the shelf holds files that are not opened in the change (Horde would submit them too).\n" +
-		"  -allow-shelved-only  with -shelve -autosubmit: go ahead although the shelf holds files not opened in the change.\n" +
+		"               auto-submit preflight of the change is running (unless it is reused). With -shelve -keep-unopened,\n" +
+		"               also refused when the shelf holds files that are not opened in the change (Horde would submit them\n" +
+		"               too); plain -shelve deletes those files from the shelf instead.\n" +
+		"  -allow-shelved-only  with -shelve -keep-unopened -autosubmit: go ahead although the shelf holds files not opened\n" +
+		"               in the change, and submit them too.\n" +
 		"  -wait        wait quietly for the result, then print a short summary (failing steps with their URLs).\n" +
 		"  -timeout=    with -wait: stop waiting after this many seconds (exit 3); wait again with uak horde job -wait.\n" +
 		"  -verbose     with -wait: every step in the summary.\n" +
@@ -1101,11 +1113,24 @@ public sealed class HordePreflightCommand : HordeCommandBase
 		}
 		LoginOptions login = LoginOptions.Parse(arguments);
 		bool noOpen = arguments.GetFlag("no-open");
+		bool keepUnopened = arguments.GetFlag("keep-unopened");
+		if (keepUnopened && !shelve)
+		{
+			throw new UakUsageException("-keep-unopened goes with -shelve.");
+		}
 		bool allowShelvedOnly = arguments.GetFlag("allow-shelved-only");
 		if (allowShelvedOnly && !(shelve && autoSubmit))
 		{
-			throw new UakUsageException("-allow-shelved-only goes with -shelve -autosubmit.");
+			throw new UakUsageException("-allow-shelved-only goes with -shelve -keep-unopened -autosubmit.");
 		}
+		// Since 0.3.3, -shelve replaces the shelf and so deletes the files -allow-shelved-only would submit: a script that asks
+		// for them to be submitted must say it wants them kept, rather than see them go.
+		if (allowShelvedOnly && !keepUnopened)
+		{
+			throw new UakUsageException("-allow-shelved-only needs -keep-unopened: -shelve now replaces the shelf (p4 shelve -r), which deletes shelved files that are not opened in the change. " +
+				"Add -keep-unopened to keep them and submit them too, or drop -allow-shelved-only to let them go.");
+		}
+		ShelveMode shelveMode = keepUnopened ? ShelveMode.Update : ShelveMode.Replace;
 
 		return async (context, cancellationToken) =>
 		{
@@ -1155,14 +1180,15 @@ public sealed class HordePreflightCommand : HordeCommandBase
 				HordeTemplate chosen = build.Template;
 				IReadOnlyDictionary<string, string> sent = HordeBuildParameters.ToHorde(chosen, build.Parameters);
 
-				// With -shelve -autosubmit, shelved files that aren't opened in the change would be submitted with it: p4 shelve -f
-				// keeps them on the shelf, and Horde submits the whole shelf.
-				if (shelve && autoSubmit && !allowShelvedOnly)
+				// With -shelve -keep-unopened -autosubmit, shelved files that aren't opened in the change would be submitted with
+				// it: p4 shelve -f keeps them on the shelf, and Horde submits the whole shelf. (Plain -shelve, p4 shelve -r, deletes
+				// them from the shelf; a file that p4 keeps anyway is caught after shelving.)
+				if (shelve && shelveMode == ShelveMode.Update && autoSubmit && !allowShelvedOnly)
 				{
 					IReadOnlyList<string> shelvedOnly = await workspace!.GetShelvedNotOpenedAsync(change, cancellationToken).ConfigureAwait(false);
 					if (shelvedOnly.Count > 0)
 					{
-						throw new HordeRefusedException(ShelvedOnlyRefusal(change, shelvedOnly, shelved: false));
+						throw new HordeRefusedException(ShelvedOnlyRefusal(change, shelvedOnly, shelved: false, shelveMode));
 					}
 				}
 
@@ -1213,11 +1239,16 @@ public sealed class HordePreflightCommand : HordeCommandBase
 					{
 						throw new HordeRefusedException(ShelveRefusal(found.Url, change, late));
 					}
-					shelved = await workspace!.ShelveAsync(change, cancellationToken).ConfigureAwait(false);
-					await notices.WriteLineAsync($"Shelved {shelved.Shelved.Count} file(s) in change {change}.").ConfigureAwait(false);
+					shelved = await workspace!.ShelveAsync(change, shelveMode, cancellationToken).ConfigureAwait(false);
+					string how = shelveMode == ShelveMode.Replace ? "p4 shelve -r: the shelf is now exactly the opened files" : "p4 shelve -f";
+					await notices.WriteLineAsync($"Shelved {shelved.Shelved.Count} file(s) in change {change} ({how}).").ConfigureAwait(false);
 					foreach (string file in shelved.Replaced)
 					{
 						await notices.WriteLineAsync($"  replaced on the shelf (its shelved content or action changed): {file}").ConfigureAwait(false);
+					}
+					foreach (string file in shelved.Removed)
+					{
+						await notices.WriteLineAsync($"  removed from the shelf (no longer opened in change {change}): {file}").ConfigureAwait(false);
 					}
 					foreach (string file in shelved.Kept)
 					{
@@ -1226,7 +1257,7 @@ public sealed class HordePreflightCommand : HordeCommandBase
 					shelf = shelved.Shelf;
 					if (autoSubmit && !allowShelvedOnly && shelved.Kept.Count > 0)
 					{
-						throw new HordeRefusedException(ShelvedOnlyRefusal(change, shelved.Kept, shelved: true));
+						throw new HordeRefusedException(ShelvedOnlyRefusal(change, shelved.Kept, shelved: true, shelveMode));
 					}
 				}
 
@@ -1279,6 +1310,7 @@ public sealed class HordePreflightCommand : HordeCommandBase
 							reused = reused is not null,
 							shelved = ShelvedFiles(shelved),
 							replaced = shelved?.Replaced,
+							removed = shelved?.Removed,
 							kept = shelved?.Kept,
 						}).ConfigureAwait(false);
 					}
@@ -1319,10 +1351,11 @@ public sealed class HordePreflightCommand : HordeCommandBase
 			"CURRENT shelf, so the change is not shelved again: that would change what Horde submits. Nothing was shelved or started. Wait for it to finish, or ask the user.";
 
 	/// <summary>The refusal to auto-submit a shelf that holds files not opened in the change.</summary>
-	static string ShelvedOnlyRefusal(int change, IReadOnlyList<string> files, bool shelved)
+	static string ShelvedOnlyRefusal(int change, IReadOnlyList<string> files, bool shelved, ShelveMode mode)
 		=> $"Change {change}'s shelf holds files that are not opened in it, and an auto-submit would submit them too: {string.Join(", ", files)}. " +
 			(shelved ? "The change was shelved; no preflight was started. " : "Nothing was shelved or started. ") +
-			"Delete them from the shelf (uak vcs shelve -c=<change> -replace -drop-unopened, only if that work isn't needed), or pass -allow-shelved-only when the user wants them submitted.";
+			(mode == ShelveMode.Update ? "Drop -keep-unopened to delete them from the shelf when shelving (only if that work isn't needed), or pass -allow-shelved-only when the user wants them submitted."
+				: "p4 shelve -r should have deleted them; check the shelf with p4 describe -S, and ask the user.");
 
 	/// <summary>Whether a running preflight is the same request: stream, template, auto-submit, every parameter value, and no other arguments or targets.</summary>
 	internal static bool IsSameRequest(HordeJobSummary job, string streamId, string templateId, IReadOnlyDictionary<string, string> expected, bool autoSubmit)

@@ -208,15 +208,24 @@ internal sealed class FakeWorkspace : IPreflightWorkspace
 	/// <summary>Shelved files that are not opened in the change.</summary>
 	public List<string> ShelvedNotOpened { get; } = [];
 
-	/// <summary>What ShelveAsync returns; by default it shelved Notes.md and the shelf is <see cref="Shelf"/>.</summary>
+	/// <summary>The mode of each shelve, in order.</summary>
+	public List<ShelveMode> Modes { get; } = [];
+
+	/// <summary>
+	/// What ShelveAsync returns; by default it shelved Notes.md, the shelf is <see cref="Shelf"/>, and <see cref="ShelvedNotOpened"/>
+	/// were removed (<see cref="ShelveMode.Replace"/>) or kept (<see cref="ShelveMode.Update"/>), as p4 shelve -r and -f do.
+	/// </summary>
 	public PerforceShelveResult? ShelveResult { get; set; }
 
 	public Task<IReadOnlyList<PerforceStreamLink>> GetStreamChainAsync(CancellationToken cancellationToken) => Task.FromResult<IReadOnlyList<PerforceStreamLink>>(Chain);
 
-	public Task<PerforceShelveResult> ShelveAsync(int change, CancellationToken cancellationToken)
+	public Task<PerforceShelveResult> ShelveAsync(int change, ShelveMode mode, CancellationToken cancellationToken)
 	{
 		Shelved.Add(change);
-		return Task.FromResult(ShelveResult ?? new PerforceShelveResult([new PerforceShelvedFile("//Project/Main/Docs/Notes.md", "edit")], [], [], []) { Shelf = Shelf ?? [] });
+		Modes.Add(mode);
+		List<string> removed = mode == ShelveMode.Replace ? [.. ShelvedNotOpened] : [];
+		List<string> kept = mode == ShelveMode.Update ? [.. ShelvedNotOpened] : [];
+		return Task.FromResult(ShelveResult ?? new PerforceShelveResult([new PerforceShelvedFile("//Project/Main/Docs/Notes.md", "edit")], [], removed, kept) { Shelf = Shelf ?? [] });
 	}
 
 	public Task<DateTimeOffset?> GetShelveTimeAsync(int change, CancellationToken cancellationToken) => Task.FromResult(ShelveTime);

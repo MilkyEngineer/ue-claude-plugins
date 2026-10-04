@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.3.3
+
+### Changed
+
+- **Shelving replaces the shelf by default.** `uak vcs shelve -c=<N>` and `uak horde preflight -shelve` now run `p4 shelve -r`, so the shelf becomes exactly the files opened in the changelist. Before, they ran `p4 shelve -f`, which left files that were reverted or moved out of the changelist on the shelf: a preflight built them, and a Horde auto-submit would have submitted them.
+  - Every file the shelf loses is printed ("REMOVED from the shelf"; `removed` in the JSON, now also in `uak horde preflight -json`).
+  - Shelving a changelist with nothing opened is still refused: `-r` would empty the shelf.
+  - A file that leaves the changelist while uak shelves still fails the command, naming it.
+- **`-keep-unopened`** on both commands brings back `p4 shelve -f`: shelved files that are no longer opened stay on the shelf, listed as kept. Use it when the shelf is the only copy of that work.
+- **`-replace` and `-drop-unopened`** on `uak vcs shelve` are accepted and do nothing, so older scripts keep working.
+- **`-allow-shelved-only`** on `uak horde preflight` now needs `-shelve -keep-unopened -autosubmit`. Without `-keep-unopened` the files it would let Horde submit are deleted from the shelf instead, so the old `-shelve -autosubmit -allow-shelved-only` is a usage error rather than a silent change. The refusal to auto-submit shelved files that aren't opened applies only with `-keep-unopened`.
+
 ## 0.3.2
 
 ### Added

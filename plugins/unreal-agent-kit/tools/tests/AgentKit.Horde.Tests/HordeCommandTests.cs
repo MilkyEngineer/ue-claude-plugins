@@ -3,6 +3,7 @@
 using System.Net.Http;
 using System.Text.Json;
 using AgentKit.Core;
+using AgentKit.Vcs;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace AgentKit.Horde.Tests;
@@ -460,53 +461,94 @@ public sealed class HordeCommandTests
 	}
 
 	[TestMethod]
-	public async Task ShelveAutoSubmitRefusesShelvedFilesThatAreNotOpened()
+	public async Task ShelveReplacesTheShelfAndDropsFilesThatAreNotOpened()
 	{
-		// Before shelving: the shelf holds a file that isn't opened, which an auto-submit would submit too.
+		// The shelf holds a file that isn't opened in the change: plain -shelve (p4 shelve -r) deletes it from the shelf, so an
+		// auto-submit preflight goes ahead without it, and the output names it.
+		FakeWorkspace workspace = new();
+		workspace.ShelvedNotOpened.Add("//Project/Main/Docs/Old.md");
+		FakeHordeApi api = WithStreams();
+		using StringWriter output = new();
+		Assert.AreEqual(0, await Setup(new HordePreflightCommand(), api, workspace, output).RunAsync(s_context, ["-c=12345", "-shelve", "-autosubmit"], Token));
+		CollectionAssert.AreEqual(new[] { ShelveMode.Replace }, workspace.Modes);
+		Assert.IsTrue(api.Created.Single().AutoSubmit);
+		StringAssert.Contains(output.ToString(), "Shelved 1 file(s) in change 12345 (p4 shelve -r: the shelf is now exactly the opened files).");
+		StringAssert.Contains(output.ToString(), "removed from the shelf (no longer opened in change 12345): //Project/Main/Docs/Old.md");
+		Assert.DoesNotContain("kept on the shelf", output.ToString());
+
+		// -keep-unopened is p4 shelve -f; without -autosubmit it goes ahead, listing the file as kept.
+		FakeWorkspace keeping = new();
+		keeping.ShelvedNotOpened.Add("//Project/Main/Docs/Old.md");
+		using StringWriter keptOutput = new();
+		Assert.AreEqual(0, await Setup(new HordePreflightCommand(), WithStreams(), keeping, keptOutput).RunAsync(s_context, ["-c=12345", "-shelve", "-keep-unopened"], Token));
+		CollectionAssert.AreEqual(new[] { ShelveMode.Update }, keeping.Modes);
+		StringAssert.Contains(keptOutput.ToString(), "(p4 shelve -f).");
+		StringAssert.Contains(keptOutput.ToString(), "kept on the shelf, but not opened in change 12345 (the preflight builds it, and a submit would include it): //Project/Main/Docs/Old.md");
+	}
+
+	[TestMethod]
+	public async Task KeepUnopenedAutoSubmitRefusesShelvedFilesThatAreNotOpened()
+	{
+		// Before shelving: the shelf holds a file that isn't opened, which p4 shelve -f keeps and an auto-submit would submit too.
 		FakeWorkspace kept = new();
 		kept.ShelvedNotOpened.Add("//Project/Main/Docs/Old.md");
 		FakeHordeApi api = WithStreams();
 		using StringWriter output = new();
-		Assert.AreEqual(HordeExitCodes.Error, await Setup(new HordePreflightCommand(), api, kept, output).RunAsync(Logged(out CapturingLogger logger), ["-c=12345", "-shelve", "-autosubmit"], Token));
-		StringAssert.Contains(logger.Lines.Single(line => line.StartsWith("Error:", StringComparison.Ordinal)), "//Project/Main/Docs/Old.md");
+		Assert.AreEqual(HordeExitCodes.Error, await Setup(new HordePreflightCommand(), api, kept, output).RunAsync(Logged(out CapturingLogger logger), ["-c=12345", "-shelve", "-keep-unopened", "-autosubmit"], Token));
+		string refusal = logger.Lines.Single(line => line.StartsWith("Error:", StringComparison.Ordinal));
+		StringAssert.Contains(refusal, "//Project/Main/Docs/Old.md");
+		StringAssert.Contains(refusal, "Drop -keep-unopened");
 		Assert.IsEmpty(kept.Shelved);
 		Assert.IsEmpty(api.Created);
 
-		// Without -autosubmit, or with -allow-shelved-only, it goes ahead.
-		Assert.AreEqual(0, await Setup(new HordePreflightCommand(), WithStreams(), kept, output).RunAsync(s_context, ["-c=12345", "-shelve"], Token));
+		// With -allow-shelved-only, it goes ahead and keeps them.
 		FakeHordeApi allowed = WithStreams();
-		Assert.AreEqual(0, await Setup(new HordePreflightCommand(), allowed, kept, output).RunAsync(s_context, ["-c=12345", "-shelve", "-autosubmit", "-allow-shelved-only"], Token));
+		Assert.AreEqual(0, await Setup(new HordePreflightCommand(), allowed, kept, output).RunAsync(s_context, ["-c=12345", "-shelve", "-keep-unopened", "-autosubmit", "-allow-shelved-only"], Token));
 		Assert.IsTrue(allowed.Created.Single().AutoSubmit);
+		CollectionAssert.AreEqual(new[] { ShelveMode.Update }, kept.Modes);
 
-		// After shelving: the shelve kept such a file (it left the change meanwhile). Shelved, but nothing started.
-		FakeWorkspace keptLate = new() { ShelveResult = new([new("//Project/Main/Docs/Notes.md", "edit")], [], [], ["//Project/Main/Docs/Late.md"]) };
-		FakeHordeApi refused = WithStreams();
-		using StringWriter shelvedOutput = new();
-		Assert.AreEqual(HordeExitCodes.Error, await Setup(new HordePreflightCommand(), refused, keptLate, shelvedOutput).RunAsync(Logged(out CapturingLogger lateLogger), ["-c=12345", "-shelve", "-autosubmit"], Token));
-		StringAssert.Contains(lateLogger.Lines.Single(line => line.StartsWith("Error:", StringComparison.Ordinal)), "The change was shelved; no preflight was started.");
-		StringAssert.Contains(shelvedOutput.ToString(), "kept on the shelf, but not opened in change 12345");
-		CollectionAssert.AreEqual(new[] { 12345 }, keptLate.Shelved);
-		Assert.IsEmpty(refused.Created);
+		// After shelving: the shelve kept such a file (it left the change meanwhile). Shelved, but nothing started, in either mode.
+		foreach (string[] mode in new[] { new[] { "-keep-unopened" }, Array.Empty<string>() })
+		{
+			FakeWorkspace keptLate = new() { ShelveResult = new([new("//Project/Main/Docs/Notes.md", "edit")], [], [], ["//Project/Main/Docs/Late.md"]) };
+			FakeHordeApi refused = WithStreams();
+			using StringWriter shelvedOutput = new();
+			Assert.AreEqual(HordeExitCodes.Error, await Setup(new HordePreflightCommand(), refused, keptLate, shelvedOutput).RunAsync(Logged(out CapturingLogger lateLogger), ["-c=12345", "-shelve", "-autosubmit", .. mode], Token));
+			StringAssert.Contains(lateLogger.Lines.Single(line => line.StartsWith("Error:", StringComparison.Ordinal)), "The change was shelved; no preflight was started.");
+			StringAssert.Contains(shelvedOutput.ToString(), "kept on the shelf, but not opened in change 12345");
+			CollectionAssert.AreEqual(new[] { 12345 }, keptLate.Shelved);
+			Assert.IsEmpty(refused.Created);
+		}
 
-		await Assert.ThrowsExactlyAsync<UakUsageException>(() => Setup(new HordePreflightCommand(), WithStreams(), kept, output).RunAsync(s_context, ["-c=12345", "-shelve", "-allow-shelved-only"], Token));
+		// -allow-shelved-only needs -shelve -keep-unopened -autosubmit: without -keep-unopened the files would be deleted, not
+		// submitted. -keep-unopened needs -shelve.
+		FakeWorkspace untouched = new();
+		await Assert.ThrowsExactlyAsync<UakUsageException>(() => Setup(new HordePreflightCommand(), WithStreams(), untouched, output).RunAsync(s_context, ["-c=12345", "-shelve", "-allow-shelved-only"], Token));
+		await Assert.ThrowsExactlyAsync<UakUsageException>(() => Setup(new HordePreflightCommand(), WithStreams(), untouched, output).RunAsync(s_context, ["-c=12345", "-shelve", "-keep-unopened", "-allow-shelved-only"], Token));
+		UakUsageException withoutKeep = await Assert.ThrowsExactlyAsync<UakUsageException>(() => Setup(new HordePreflightCommand(), WithStreams(), untouched, output).RunAsync(s_context, ["-c=12345", "-shelve", "-autosubmit", "-allow-shelved-only"], Token));
+		StringAssert.Contains(withoutKeep.Message, "-keep-unopened");
+		await Assert.ThrowsExactlyAsync<UakUsageException>(() => Setup(new HordePreflightCommand(), WithStreams(), untouched, output).RunAsync(s_context, ["-c=12345", "-keep-unopened"], Token));
+		Assert.IsEmpty(untouched.Shelved);
 	}
 
 	[TestMethod]
 	public async Task UnderJsonTheShelveIsReportedOnStandardErrorAndInTheJson()
 	{
 		// E2: the files whose shelved content changed went nowhere under -json.
-		FakeWorkspace workspace = new() { ShelveResult = new([new("//Project/Main/Docs/Notes.md", "edit")], ["//Project/Main/Docs/Notes.md"], [], ["//Project/Main/Docs/Old.md"]) };
+		FakeWorkspace workspace = new() { ShelveResult = new([new("//Project/Main/Docs/Notes.md", "edit")], ["//Project/Main/Docs/Notes.md"], ["//Project/Main/Docs/Gone.md"], ["//Project/Main/Docs/Old.md"]) };
 		FakeHordeApi api = WithStreams();
 		using StringWriter output = new();
 		using StringWriter errors = new();
 		Assert.AreEqual(0, await Setup(new HordePreflightCommand(), api, workspace, output, errors: errors).RunAsync(s_context, ["-c=12345", "-shelve", "-json"], Token));
 
-		StringAssert.Contains(errors.ToString(), "Shelved 1 file(s) in change 12345.");
+		StringAssert.Contains(errors.ToString(), "Shelved 1 file(s) in change 12345 (p4 shelve -r: the shelf is now exactly the opened files).");
+		StringAssert.Contains(errors.ToString(), "removed from the shelf (no longer opened in change 12345): //Project/Main/Docs/Gone.md");
 		StringAssert.Contains(errors.ToString(), "replaced on the shelf (its shelved content or action changed): //Project/Main/Docs/Notes.md");
 		StringAssert.Contains(errors.ToString(), "kept on the shelf, but not opened in change 12345");
 		using JsonDocument document = JsonDocument.Parse(output.ToString());
 		Assert.AreEqual("//Project/Main/Docs/Notes.md", document.RootElement.GetProperty("shelved")[0].GetProperty("depotFile").GetString());
 		Assert.AreEqual("//Project/Main/Docs/Notes.md", document.RootElement.GetProperty("replaced")[0].GetString());
+		Assert.AreEqual("//Project/Main/Docs/Gone.md", document.RootElement.GetProperty("removed")[0].GetString());
 		Assert.AreEqual("//Project/Main/Docs/Old.md", document.RootElement.GetProperty("kept")[0].GetString());
 
 		// With -wait, the job's JSON carries them too.
@@ -515,6 +557,7 @@ public sealed class HordeCommandTests
 		using StringWriter waitOutput = new();
 		Assert.AreEqual(0, await Setup(new HordePreflightCommand(), waited, workspace, waitOutput).RunAsync(s_context, ["-c=12345", "-shelve", "-wait", "-json"], Token));
 		using JsonDocument waitDocument = JsonDocument.Parse(waitOutput.ToString());
+		Assert.AreEqual("//Project/Main/Docs/Gone.md", waitDocument.RootElement.GetProperty("removed")[0].GetString());
 		Assert.AreEqual("//Project/Main/Docs/Old.md", waitDocument.RootElement.GetProperty("kept")[0].GetString());
 	}
 
@@ -809,7 +852,8 @@ public sealed class HordeCommandTests
 
 		Assert.AreEqual(HordeExitCodes.Failure, result);
 		CollectionAssert.AreEqual(new[] { 12345 }, workspace.Shelved);
-		StringAssert.Contains(output.ToString(), "Shelved 1 file(s) in change 12345.");
+		CollectionAssert.AreEqual(new[] { ShelveMode.Replace }, workspace.Modes, "-shelve replaces the shelf by default");
+		StringAssert.Contains(output.ToString(), "Shelved 1 file(s) in change 12345 (p4 shelve -r");
 		StringAssert.Contains(output.ToString(), "Result: Failure");
 	}
 

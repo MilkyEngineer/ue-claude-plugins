@@ -206,7 +206,7 @@ public sealed class PerforceWriteTests
 
 		VcsException refused = await Assert.ThrowsExactlyAsync<VcsException>(() => p4.ShelveAsync(12346, ShelveMode.Replace, cancellationToken: Token));
 		StringAssert.Contains(refused.Message, "//Game/main/Source/Game/ShelvedOnly.cpp");
-		StringAssert.Contains(refused.Message, "-drop-unopened");
+		StringAssert.Contains(refused.Message, "-keep-unopened");
 		Assert.IsFalse(connection.Calls.Any(call => call.Command == "shelve"), "nothing was shelved");
 
 		// -f keeps them, so it goes ahead.
@@ -280,7 +280,7 @@ public sealed class PerforceWriteTests
 		StringAssert.Contains(exception.Message, "not told to drop");
 		Assert.IsTrue(connection.Calls.Any(call => call.Command == "shelve"), "the shelve happened; the failure says what it cost");
 
-		// -drop-unopened covers only the files uak saw shelved and not opened, not one that left the change afterwards.
+		// Dropping (dropUnopened, the commands' default) covers only the files uak saw shelved and not opened, not one that left the change afterwards.
 		FakePerforceConnection dropping = Fake(root).On("change", "change-o-pending").On("shelve", "shelve").OnEach("describe", "describe-s-shelved-only", "describe-s-one");
 		using PerforceVersionControl dropper = new(dropping, root.Directory);
 		VcsException dropped = await Assert.ThrowsExactlyAsync<VcsException>(() => dropper.ShelveAsync(12346, ShelveMode.Replace, dropUnopened: true, Token));

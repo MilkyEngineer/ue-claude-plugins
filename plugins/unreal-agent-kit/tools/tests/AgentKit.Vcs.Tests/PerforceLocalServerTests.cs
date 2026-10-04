@@ -163,4 +163,70 @@ public sealed class PerforceLocalServerTests
 		StringAssert.StartsWith(server.P4(null, "changes", "-s", "submitted").Trim(), "Change 1 ");
 		await Assert.ThrowsExactlyAsync<VcsException>(() => p4.UpdateDescriptionAsync(1, "Rewrite history", Token));
 	}
+
+	/// <summary>Runs <c>uak vcs shelve</c> against the server, with no shelve guards; returns its exit code and output.</summary>
+	async Task<(int ExitCode, string Output)> ShelveCommandAsync(LocalServer server, params string[] arguments)
+	{
+		using StringWriter output = new();
+		VcsShelveCommand command = new()
+		{
+			Output = output,
+			ErrorOutput = output,
+			Guards = () => [],
+			Detect = (_, _, _) => Task.FromResult(new VcsDetection(server.Connect(), "test")),
+		};
+		AgentKit.Core.UakContext context = new()
+		{
+			ProjectFile = new FileInfo(server.Write("Game.uproject", "{}\n")),
+			StateDirectory = new DirectoryInfo(Path.Combine(server.Root, "Saved", "AgentKit")),
+			Logger = NullLogger.Instance,
+		};
+		int exitCode = await command.RunAsync(context, arguments, Token);
+		return (exitCode, output.ToString());
+	}
+
+	[TestMethod]
+	public async Task TheShelveCommandReplacesTheShelfUnlessKeepUnopened()
+	{
+		using LocalServer? server = StartServer();
+		if (server is null)
+		{
+			return;
+		}
+		string a = Path.Combine(server.Root, "Source", "A.cpp");
+		string b = Path.Combine(server.Root, "Source", "B.cpp");
+		server.P4(null, "edit", "Source/A.cpp", "Source/B.cpp");
+
+		// Files into a new changelist: shelved with -r, which works on a changelist with no shelf yet.
+		(int created, string createdOutput) = await ShelveCommandAsync(server, a, b);
+		Assert.AreEqual(0, created, createdOutput);
+		string number = System.Text.RegularExpressions.Regex.Match(createdOutput, "Created change (\\d+)\\.").Groups[1].Value;
+		StringAssert.Contains(createdOutput, $"Shelved 2 file(s) in change {number} (p4 shelve -r");
+		string Shelf() => server.P4(null, "describe", "-S", "-s", number);
+		StringAssert.Contains(Shelf(), "//depot/Source/B.cpp#1 edit");
+
+		// B leaves the change: the default shelve deletes it from the shelf, and says so.
+		server.P4(null, "reopen", "-c", "default", "Source/B.cpp");
+		(int replaced, string replacedOutput) = await ShelveCommandAsync(server, "-c=" + number);
+		Assert.AreEqual(0, replaced, replacedOutput);
+		StringAssert.Contains(replacedOutput, "REMOVED from the shelf: //depot/Source/B.cpp");
+		Assert.DoesNotContain("B.cpp", Shelf());
+		StringAssert.Contains(Shelf(), "//depot/Source/A.cpp#1 edit");
+
+		// Shelve B again, move it out again: -keep-unopened (p4 shelve -f) keeps it, and says so.
+		server.P4(null, "reopen", "-c", number, "Source/B.cpp");
+		Assert.AreEqual(0, (await ShelveCommandAsync(server, "-c=" + number)).ExitCode);
+		server.P4(null, "reopen", "-c", "default", "Source/B.cpp");
+		(int kept, string keptOutput) = await ShelveCommandAsync(server, "-c=" + number, "-keep-unopened");
+		Assert.AreEqual(0, kept, keptOutput);
+		StringAssert.Contains(keptOutput, "kept on the shelf, but no longer opened in change " + number + " (a submit of the shelf would include it): //depot/Source/B.cpp");
+		StringAssert.Contains(Shelf(), "//depot/Source/B.cpp#1 edit");
+
+		// Nothing opened in the change: refused in both modes, and the shelf keeps both files.
+		server.P4(null, "reopen", "-c", "default", "Source/A.cpp");
+		Assert.AreEqual(1, (await ShelveCommandAsync(server, "-c=" + number)).ExitCode);
+		Assert.AreEqual(1, (await ShelveCommandAsync(server, "-c=" + number, "-keep-unopened")).ExitCode);
+		StringAssert.Contains(Shelf(), "//depot/Source/A.cpp#1 edit");
+		StringAssert.Contains(Shelf(), "//depot/Source/B.cpp#1 edit");
+	}
 }

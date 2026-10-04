@@ -1,6 +1,6 @@
 {
   "name": "unreal-agent-kit",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "description": "Multi-agent workflow for Unreal Engine projects (tiered workers, a runner, a read-only researcher and reviewer, an architect for plans and briefs, epic briefs, delegation) plus uak, a CLI for a queued editor lock, detached runs, single-file compile checks, build and test wrappers, Perforce shelving and Horde preflights",
   "author": {
     "name": "Alex Stevens",
