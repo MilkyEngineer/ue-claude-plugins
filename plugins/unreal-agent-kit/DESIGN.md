@@ -288,11 +288,12 @@ Writes are Perforce only, on the side (`PerforceVersionControl`, not `IVersionCo
 
 - **Agents** (named `unreal-agent-kit:<name>` in Claude Code; before 0.3.0 they were `ue-<name>`, see CHANGELOG.md):
   - `low`, running on Sonnet;
-  - `medium`, `high` and `xhigh`;
+  - `medium` and `high`, on the lead's model, and `xhigh`, on Opus;
   - `runner`, on Sonnet at low effort, which cannot edit: it runs a given list and reports, so a verification never changes what it verifies;
-  - `research`, read-only at high effort, for engine investigations answered with `file:line` evidence. Its reading never conflicts with workers' edits, but its experiments queue like any run: `uak test` takes the editor lock, and `uak compile` waits for UBT's mutex. `uak compile` only compiles files inside a module, so an experiment compiles existing project files only; one that needs new code asks the lead, and a worker writes it (a file a researcher added to a module would be picked up by other agents' builds);
-  - `review`, read-only;
-  - `architect`, at high effort, which drafts a milestone's plan, briefs README and epic briefs from the skill's templates, writing only the draft files the lead names; it runs nothing and never edits code.
+  - `research`, read-only, on Opus at high effort (the lead raises it to extra-high for an engine fact the design depends on), for engine investigations answered with `file:line` evidence. Its reading never conflicts with workers' edits, but its experiments queue like any run: `uak test` takes the editor lock, and `uak compile` waits for UBT's mutex. `uak compile` only compiles files inside a module, so an experiment compiles existing project files only; one that needs new code asks the lead, and a worker writes it (a file a researcher added to a module would be picked up by other agents' builds);
+  - `review`, read-only, on Opus at extra-high effort;
+  - `architect`, on Opus at extra-high effort, which drafts a milestone's plan, briefs README and epic briefs from the skill's templates, writing only the draft files the lead names; it has no shell (`Bash` and `PowerShell` are disallowed), so it runs nothing, and it never edits code;
+  - Opus is pinned for `xhigh`, `research`, `review` and `architect`, whose output the others act on without re-checking, so a lead on a cheaper model doesn't lower them; `medium` and `high` inherit the lead's model.
 - **Their ground rules:**
   - never spawn agents (`disallowedTools: Agent`);
   - never kill processes or commit unless told;

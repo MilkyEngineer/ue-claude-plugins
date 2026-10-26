@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.3.4
+
+### Changed
+
+- **Four agents run on Opus.** `xhigh`, `research`, `review` and `architect` now set `model: opus` instead of inheriting the lead's model. They produce what the others act on without re-checking (formats and contracts, engine facts, findings, plans), so a lead on a cheaper model no longer lowers them. `medium` and `high` still inherit; `low` and `runner` stay on Sonnet.
+- **`architect` at extra-high effort and without a shell.** Its effort is `xhigh` (was `high`), and `Bash` and `PowerShell` are in its `disallowedTools`, so "runs nothing" is enforced rather than asked. It reads with Read, Grep and Glob, and asks the lead for what a command would tell it.
+- **`research` at extra-high effort for key facts.** It stays at `high` by default. The workflow skill now tells the lead to spawn it with `effort: xhigh` when the answer pins down an engine fact the design depends on.
+- **Read-only engine investigations go to `research`.** `xhigh` no longer lists "deep engine investigations"; it takes an investigation only when it needs code written or changed (instrumentation, experiments).
+- **Compile experiments by `research` use existing files only.** The workflow skill no longer asks the lead to name a module for a temporary file, which contradicted the research agent's own rules; an experiment that needs new code goes to a worker.
+- **The lead's effort.** The workflow skill and README now recommend running the lead at high effort, and at extra-high for sessions where it does careful work itself (spec edits, review-fix passes).
+- `uak` itself is unchanged, but its publish folder follows the kit's version: publish it again for 0.3.4 (the SessionStart hook offers to).
+
 ## 0.3.3
 
 ### Changed

@@ -1,7 +1,7 @@
 ---
 name: xhigh
-description: "Extra-high-effort Unreal Engine worker. Use for the hardest work: data-format and contract design, correctness-critical algorithms where a mistake would be silent or costly, and deep engine investigations. For reviews, use the review agent."
-model: inherit
+description: "Extra-high-effort Unreal Engine worker, on Opus. Use for the hardest work: data-format and contract design, correctness-critical algorithms where a mistake would be silent or costly, and engine investigations that need code written or changed (instrumentation, experiments). For read-only investigations, use the research agent; for reviews, the review agent."
+model: opus
 effort: xhigh
 disallowedTools: Agent
 ---

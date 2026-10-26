@@ -7,11 +7,11 @@ One lead agent plans a milestone, splits it into epics and delegates each to a w
 ## What's in it
 
 - **Agents** (`agents/`):
-  - `low` (Sonnet), `medium`, `high` and `xhigh`: workers at rising effort. None can spawn agents.
+  - `low` (Sonnet), `medium` and `high` (the lead's model), and `xhigh` (Opus): workers at rising effort. None can spawn agents.
   - `runner` (Sonnet, cannot edit): runs a given list of builds, tests and verifications and reports with evidence, so a verification never changes what it verifies.
-  - `research` (read-only): engine and codebase investigations, answered with `file:line` evidence. Its reading never conflicts with the workers' edits; its compile and test experiments queue on the lock like any run.
-  - `review`: a read-only adversarial reviewer. It cannot edit files, so it reports findings instead of hiding them in fixes.
-  - `architect`: drafts a milestone's plan and epic briefs from the skill's templates (ownership map, contracts, tiers, risks with their tests), citing `file:line` for engine behaviour. It writes only those drafts, never code, and runs nothing.
+  - `research` (Opus, read-only): engine and codebase investigations, answered with `file:line` evidence. Its reading never conflicts with the workers' edits; its compile and test experiments queue on the lock like any run.
+  - `review` (Opus): a read-only adversarial reviewer. It cannot edit files, so it reports findings instead of hiding them in fixes.
+  - `architect` (Opus): drafts a milestone's plan and epic briefs from the skill's templates (ownership map, contracts, tiers, risks with their tests), citing `file:line` for engine behaviour. It writes only those drafts, never code, and has no shell, so it runs nothing.
   - Claude Code shows them as `unreal-agent-kit:<name>`, for example `unreal-agent-kit:review`. Before 0.3.0 they were named `ue-<name>`: see [CHANGELOG.md](CHANGELOG.md).
   - They share ground rules: take the lock for editor and build runs, detach long runs, ask the lead rather than spawn, keep epic briefs current, never kill processes or commit unless told, and surface permission denials.
 - **The `unreal-agent-workflow` skill** (`skills/`): how the lead runs it all. It covers effort tiers and caps, milestone plans with epic briefs (templates included), delegation, when to resume an agent and when to respawn it from its brief, adversarial reviews, keeping a spec doc in sync, recovery after restarts, an opt-in usage-limit watchdog, and an optional "pass, then commit, then continue" loop.
@@ -55,6 +55,8 @@ Main TODOs:
 Ask the lead to plan a milestone with the workflow skill, or name it: "Use unreal-agent-workflow to plan M1 as epics". Spawn prompts stay short, because the rules live in the agent definitions and the task lives in the brief:
 
 > You are E2. Read `Plans/M1/README.md`, then `Plans/M1/E2.md`, and do its next step.
+
+Run the lead (your own session) at high effort, and at extra-high for sessions where it edits the spec or applies review fixes itself. Each agent sets its own effort; those that inherit take only the lead's model.
 
 Workers run builds and editor runs through `uak`. `uak build` and `uak test -filter=<prefix> -name=<unique>` take the editor lock themselves. Any other editor run goes through `uak lock run -name=<unique> -- <command...>`, and a run that may take over an hour through `uak runs start -name=<unique> -owner=<E#> -- <command...>`, followed by one background `uak runs wait -name=<unique> -timeout=<seconds>`.
 
