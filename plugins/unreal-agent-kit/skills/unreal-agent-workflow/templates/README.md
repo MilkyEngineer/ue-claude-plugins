@@ -35,7 +35,7 @@ Each <Milestone> epic has one brief here: `E1.md` to `E<n>.md`. A brief holds ev
 ## Shared facts
 
 - **Test data:** <maps, worlds, fixtures, and how they are generated>.
-- **Verification:** <the end-to-end command, for example `uak test -filter=<Project>.<Area>`, or a verification script run through `uak runs start`>.
+- **Verification:** <the end-to-end command, for example `uak test -filter=<Project>.<Area> -expect=<file>`, `uak test -cooked -filter=<Project>. -expect=<file>`, or a verification script run through `uak runs start`>.
 - **Versions now:** <each cache, format or data version and its current value>. Whoever bumps a version records it in their brief.
 - **Parallelism cap:** <for example `UAK_MAX_PARALLEL_ACTIONS=3` on a 16 GB machine>.
 
@@ -43,7 +43,7 @@ Each <Milestone> epic has one brief here: `E1.md` to `E<n>.md`. A brief holds ev
 
 All runs go through `uak`. See `uak help` and the kit's docs.
 
-- `uak build`, `uak test -filter=<prefix> [-gpu | -windowed] -name=<unique>`: they take the editor lock themselves. More UBT or editor arguments go after `--`.
+- `uak build`, `uak test -filter=<prefix> [-gpu | -windowed | -cooked] [-expect=<file>] -name=<unique>`: they take the editor lock themselves. `-cooked` runs the tests in a cooked game (UAT BuildCookRun; `-skipbuild -skipcook` reuse the staged build). `-expect=<file>` lists the tests that must pass. More UBT, editor or game arguments go after `--`.
 - `uak lock run -name=<unique> -- <command...>`: any other editor, commandlet or game run, one invocation at a time. `uak lock status` shows the holder and the queue.
 - `uak runs start -name=<unique> -owner=<E#> -- <command...>`: runs that may take over an hour, so they outlive a shell (which dies after two hours, and on a restart). `uak runs list [-all]` lists them.
 - `uak runs wait -name=<name> -timeout=<seconds>`: waits for a detached run to end. Run it in a background shell whose own time limit is longer than `-timeout` and within the shell's two-hour limit. Exit 0: the run exited 0. Exit 1: it failed, or ended with no exit code. Exit 3: `-timeout` passed with the run still going; start another wait.
@@ -55,7 +55,7 @@ All runs go through `uak`. See `uak help` and the kit's docs.
 - **Never wrap a long run in `timeout`.** It kills runs that are waiting on the lock.
 - **Background shells die when Claude Code restarts, and after two hours.** Use `uak runs start` for anything that may run over an hour.
 - **Never poll a run by hand.** Wait with one background `uak runs wait`; `uak runs list` hides finished runs and exits 0 either way.
-- **A crash in one test ends the whole run** and hides every later test. `uak test` then fails, because fewer tests completed than were found: read the editor log (`<Project>/Saved/Logs/<name>.log`).
+- **A crash in one test ends the whole run** and hides every later test. `uak test` then fails, because fewer tests completed than were found: read the editor log (`<Project>/Saved/Logs/<name>.log`), or a cooked run's game log (`<Project>/Saved/Logs/<name>/Client.log`). A found test that never completed without a crash (one that needs more participants than the run has, for example) is listed as `NotRun` and counted as skipped.
 - **A green run without `-gpu` says nothing about GPU tests.** They skip. Tests that need a real viewport or Slate windows need `-windowed`.
 - **After editing a header that another module includes,** compile-check it through those modules (`uak compile <header> -dependents`). A clean build of your own module says nothing about the others.
 - **A build can fail in another epic's file mid-edit.** Wait and retry, as the agent rules say.

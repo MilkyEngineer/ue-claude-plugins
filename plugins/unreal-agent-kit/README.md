@@ -19,7 +19,7 @@ One lead agent plans a milestone, splits it into epics and delegates each to a w
   - `uak lock run|status`: a fair, queued editor lock that is released when its holder dies.
   - `uak runs start|list|wait|adopt`: detached, tracked runs that outlive shells and restarts, and a wait that ends when a run does.
   - `uak compile`: single-file compile checks through UBT `-SingleFile`, without the lock.
-  - `uak build` and `uak test`: builds and automation tests that take the lock themselves, with pass, fail and count checks. Tests run headless, or in a window with `-windowed`. More UBT or editor arguments go after `--`.
+  - `uak build` and `uak test`: builds and automation tests that take the lock themselves, with pass, fail and count checks. Tests run headless, in a window with `-windowed`, or in a cooked game with `-cooked` (UAT BuildCookRun builds, cooks and stages it, or `-skipbuild -skipcook` reuse the staged build); `-expect=<file>` lists the tests a run must pass. More UBT, editor or game arguments go after `--`.
   - `uak vcs status|changed|revision`: version control (Git, Perforce or none).
   - `uak vcs edit|add|reopen|shelve` and `uak vcs change new|describe`: Perforce writes on this client's pending changelists, each checked afterwards. They never revert or submit.
   - `uak horde config|login|logout|streams|templates|preflight|job|log`: Horde preflights of shelved changes, with a quiet `-wait` for agents (exit codes for success, failure, warnings, still running and not signed in). `uak horde log` (or `-issues`) prints a job's errors and warnings from Horde's log events, de-duplicated and capped, instead of whole logs. The server is set once per user; a command opens the Horde sign-in page in the browser when it needs one (`-no-login` never does), and on Windows a sign-in is kept, encrypted, until the token expires. Build settings (template and parameters) are saved per stream: the first preflight exits 6 so the lead can ask the user.
@@ -58,7 +58,7 @@ Ask the lead to plan a milestone with the workflow skill, or name it: "Use unrea
 
 Run the lead (your own session) at high effort, and at extra-high for sessions where it edits the spec or applies review fixes itself. Each agent sets its own effort; those that inherit take only the lead's model.
 
-Workers run builds and editor runs through `uak`. `uak build` and `uak test -filter=<prefix> -name=<unique>` take the editor lock themselves. Any other editor run goes through `uak lock run -name=<unique> -- <command...>`, and a run that may take over an hour through `uak runs start -name=<unique> -owner=<E#> -- <command...>`, followed by one background `uak runs wait -name=<unique> -timeout=<seconds>`.
+Workers run builds and editor runs through `uak`. `uak build` and `uak test -filter=<prefix> -name=<unique>` (add `-cooked` to run the tests in a cooked game) take the editor lock themselves. Any other editor run goes through `uak lock run -name=<unique> -- <command...>`, and a run that may take over an hour through `uak runs start -name=<unique> -owner=<E#> -- <command...>`, followed by one background `uak runs wait -name=<unique> -timeout=<seconds>`.
 
 ## Design
 

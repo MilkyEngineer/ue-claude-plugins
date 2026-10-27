@@ -106,6 +106,101 @@ public sealed class AutomationLogParserTests
 		Assert.AreEqual(0, Summary.Passed);
 		Assert.AreEqual(2, Summary.Skipped);
 		Assert.AreEqual(0, Summary.Failed);
-		CollectionAssert.AreEqual(new[] { "NOTHING RAN: all 2 completed tests were skipped and none passed" }, Summary.Problems());
+		CollectionAssert.AreEqual(new[] { "NOTHING RAN: no test passed and 2 were skipped" }, Summary.Problems());
+	}
+
+	[TestMethod]
+	public void FoundTestsAreListedFromTheLog()
+	{
+		// A cooked game's Client.log (trimmed): the found tests follow the "Found N" line, each as <tab><full path>.
+		AutomationLogSummary Summary = AutomationLogParser.Parse(Fixtures.Lines("cooked-passed.log"));
+
+		Assert.AreEqual(1, Summary.FoundCount);
+		CollectionAssert.AreEqual(new[] { "Project.Scaffold.ModulesLoaded" }, Summary.FoundNames);
+		Assert.AreEqual(1, Summary.Passed);
+		Assert.AreEqual(0, Summary.Skipped);
+		Assert.IsEmpty(Summary.NotRunNames);
+		Assert.AreEqual(0, Summary.TestCompleteExitCode);
+		Assert.IsEmpty(Summary.Problems());
+	}
+
+	[TestMethod]
+	public void AFailedTestInACookedGameIsAFailure()
+	{
+		AutomationLogSummary Summary = AutomationLogParser.Parse(Fixtures.Lines("cooked-failed.log"));
+
+		Assert.AreEqual(1, Summary.Failed);
+		Assert.AreEqual(-1, Summary.TestCompleteExitCode);
+		Assert.AreEqual("Project.Verdict.Fails.Run", Summary.Tests[0].Path);
+		Assert.StartsWith("Project.Verdict.Fails always fails", Summary.Tests[0].Errors.Single());
+		CollectionAssert.AreEqual(new[] { "1 test failed" }, Summary.Problems());
+	}
+
+	[TestMethod]
+	public void AFoundTestWithoutACompletedLineWasSkipped()
+	{
+		// The controller skips a test that needs more participants than the run has without a "Test Completed" line; the
+		// queue still finishes with exit code 0.
+		AutomationLogSummary Summary = AutomationLogParser.Parse(Fixtures.Lines("cooked-skipped.log"));
+
+		Assert.AreEqual(1, Summary.FoundCount);
+		Assert.IsEmpty(Summary.Tests);
+		Assert.AreEqual(0, Summary.TestCompleteExitCode);
+		CollectionAssert.AreEqual(new[] { "Project.Verdict.Skipped.Run" }, Summary.NotRunNames);
+		Assert.AreEqual(1, Summary.NotRun);
+		Assert.AreEqual(1, Summary.Skipped);
+		CollectionAssert.AreEqual(new[] { "NOTHING RAN: no test passed and 1 was skipped", "found 1 automation tests but 0 completed" }, Summary.Problems());
+	}
+
+	[TestMethod]
+	public void FoundTestsThatNeverRanAreCountedWithoutAListing()
+	{
+		AutomationLogSummary Summary = AutomationLogParser.Parse(
+		[
+			"LogAutomationCommandLine: Display: Found 3 automation tests based on 'Game'",
+			"LogAutomationController: Display: Test Completed. Result={Success} Name={A} Path={Game.A}",
+			"LogAutomationCommandLine: Display: **** TEST COMPLETE. EXIT CODE: 0 ****",
+		]);
+
+		Assert.IsEmpty(Summary.FoundNames);
+		Assert.IsEmpty(Summary.NotRunNames);
+		Assert.AreEqual(2, Summary.NotRun);
+		Assert.AreEqual(2, Summary.Skipped);
+		CollectionAssert.AreEqual(new[] { "found 3 automation tests but 1 completed" }, Summary.Problems());
+	}
+
+	[TestMethod]
+	public void OnlyTheLinesAfterTheFoundLineListTests()
+	{
+		AutomationLogSummary Summary = AutomationLogParser.Parse(
+		[
+			"LogAutomationCommandLine: Display: \tBefore.Found",
+			"LogAutomationCommandLine: Display: Found 2 automation tests based on 'Game'",
+			"LogAutomationCommandLine: Display: \tGame.A",
+			"LogAutomationCommandLine: Display: \tGame.B",
+			"LogAutomationController: Sending StopTests to 0",
+			"LogAutomationCommandLine: Display: \tAfter.Listing",
+			"LogAutomationController: Display: Test Completed. Result={Success} Name={A} Path={Game.A}",
+			"LogAutomationCommandLine: Display: **** TEST COMPLETE. EXIT CODE: 0 ****",
+		]);
+
+		CollectionAssert.AreEqual(new[] { "Game.A", "Game.B" }, Summary.FoundNames);
+		CollectionAssert.AreEqual(new[] { "Game.B" }, Summary.NotRunNames);
+		Assert.AreEqual(1, Summary.Skipped);
+	}
+
+	[TestMethod]
+	public void TestsLostToACrashAreNotSkipped()
+	{
+		string[] Lines = Fixtures.Lines("cooked-passed.log");
+		int Cut = Array.FindIndex(Lines, Line => Line.Contains("Test Completed.", StringComparison.Ordinal));
+		AutomationLogSummary Summary = AutomationLogParser.Parse(Lines.Take(Cut));
+
+		Assert.AreEqual(0, Summary.NotRun);
+		Assert.AreEqual(0, Summary.Skipped);
+		List<string> Problems = Summary.Problems();
+		Assert.Contains("found 1 automation tests but 0 completed", Problems);
+		Assert.IsTrue(Problems.Any(Problem => Problem.Contains("never finished", StringComparison.Ordinal)));
+		Assert.IsFalse(Problems.Any(Problem => Problem.StartsWith("NOTHING RAN", StringComparison.Ordinal)));
 	}
 }

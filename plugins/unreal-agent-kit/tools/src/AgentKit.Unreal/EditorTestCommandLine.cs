@@ -62,10 +62,7 @@ public static class EditorTestCommandLine
 	public static ProcessInvocation Build(EditorLocation editor, string projectFile, string filter, EditorRendering rendering, string logFile, string reportDirectory,
 		IEnumerable<string>? extraArguments = null, int resX = DefaultResX, int resY = DefaultResY)
 	{
-		if (filter.Length == 0 || filter.Any(IsUnsafeFilterCharacter))
-		{
-			throw new UakUsageException($"-filter='{filter}' must be a test path prefix without spaces, quotes, ',', ';', '|' or '`'");
-		}
+		CheckFilter(filter);
 		List<string> Arguments =
 		[
 			Path.GetFullPath(projectFile),
@@ -110,6 +107,16 @@ public static class EditorTestCommandLine
 			}
 		}
 		return arguments;
+	}
+
+	/// <summary>Checks a test filter: not empty, and none of the characters that would break the editor's command (see <see cref="IsUnsafeFilterCharacter"/>).</summary>
+	/// <exception cref="UakUsageException">The filter is empty or holds such a character.</exception>
+	public static void CheckFilter(string filter)
+	{
+		if (filter.Length == 0 || filter.Any(IsUnsafeFilterCharacter))
+		{
+			throw new UakUsageException($"-filter='{filter}' must be a test path prefix without spaces, quotes, ',', ';', '|' or '`'");
+		}
 	}
 
 	/// <summary>

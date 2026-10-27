@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.3.5
+
+### Added
+
+- **`uak test -cooked`** runs automation tests in a cooked game: under the editor lock, UAT's BuildCookRun (the engine's `RunUAT` script) builds the game, cooks, stages and paks the project, and runs the game with `-nullrhi -RunAutomationTest=<filter>` until the test queue empties. `-skipbuild` reuses the game's binaries and `-skipcook` the staged build; `-map=` names the maps to cook (the first is opened), `-config=` the configuration (Debug, DebugGame, Development or Test), `-timeout=` the run's limit (default 1800 s). Game arguments after `--` go through `-addcmdline` (`-ExecCmds`, `-testexit`, `-abslog`, `-ReportExportPath`, quotes and `% ! & | < > ^` are rejected). The game's log is `<Project>/Saved/Logs/<name>/Client.log` and UAT's output `<Project>/Saved/Logs/<name>.log`, both printed first. A cooked run passes only when UAT exited 0, `Client.log` ends its queue with `EXIT CODE: 0`, no test failed, every found test completed, at least one passed, and the run didn't time out; the game's own exit code is printed, not judged.
+- **`uak test -expect=<file>`** (editor and cooked runs) lists the tests a run must pass, one full test name per line (blank lines and `#` comments ignored). A run expects the listed names its `-filter` matches, matched as the engine matches filters (`StartsWith:`, `^`, `$`, `+`; `Group:` is rejected), and passes only when each of them passed and no other test completed. Missing and unexpected tests are printed one per line.
+
+### Fixed
+
+- **A found test that never completed is listed and counted as skipped.** The engine skips a test that needs more participants than the run has without a `Test Completed` line, and still ends the queue with exit code 0. `uak test` failed such a run (found 1, completed 0) but reported 0 skipped. It now lists the test as `NotRun <name>` (from the found tests the engine logs after `Found N automation tests`) and counts it as skipped, so a run whose only test never ran is NOTHING RAN. The result file has the names in `NotRun`.
+
+### Changed
+
+- `uak test`'s result file has `Mode` (`editor` or `cooked`), `NotRun` and `Expect`.
+- The worker and runner agents' definitions show `-cooked` and `-expect=<file>` in their `uak test` usage, with the `MSYS_NO_PATHCONV=1` note for `-map=/Game/...` from Git Bash.
+- Publish `uak` again for 0.3.5 (the SessionStart hook offers to).
+
 ## 0.3.4
 
 ### Changed

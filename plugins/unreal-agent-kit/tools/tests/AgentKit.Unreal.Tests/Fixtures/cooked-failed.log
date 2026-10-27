@@ -1,0 +1,38 @@
+[2026.10.26-22.48.17:285][  0]LogInit: Display: Engine is initialized. Leaving FEngineLoop::Init()
+[2026.10.26-22.48.17:287][  0]Automation: RunTests='Project.Verdict.Fails' Queued.
+[2026.10.26-22.48.17:287][  0]Automation: SoftQuit Command Queued.
+[2026.10.26-22.48.17:289][  2]LogAutomationCommandLine: Display: Ready to start automation
+[2026.10.26-22.48.22:292][417]LogAutomationWorker: Received FindWorkersMessage from 00000000000000000000000000001000
+[2026.10.26-22.48.22:292][418]LogAutomationController: Received FindWorkersResponseMessage from 00000000000000000000000000001001
+[2026.10.26-22.48.22:292][418]LogAutomationController: Requesting test list from 00000000000000000000000000001001
+[2026.10.26-22.48.22:293][418]LogAutomationWorker: Received RequestTestsMessage from 00000000000000000000000000001000
+[2026.10.26-22.48.22:301][418]LogAutomationWorker: Set 1461 tests to 00000000000000000000000000001000
+[2026.10.26-22.48.22:301][419]LogAutomationController: Received RequestTestsReplyCompleteMessage from 00000000000000000000000000001001
+[2026.10.26-22.48.22:303][419]LogAutomationController: 1461 tests available on 00000000000000000000000000001001
+[2026.10.26-22.48.22:310][419]LogAutomationCommandLine: Display: Found 1 automation tests based on 'Project.Verdict.Fails'
+[2026.10.26-22.48.22:310][419]LogAutomationCommandLine: Display: 	Project.Verdict.Fails.Run
+[2026.10.26-22.48.22:310][419]LogAutomationController: Sending StopTests to 00000000000000000000000000001001
+[2026.10.26-22.48.22:311][419]LogAutomationController: Sending StartTestSession to 00000000000000000000000000001001
+[2026.10.26-22.48.22:312][419]LogAutomationWorker: Received StopTests from 00000000000000000000000000001000
+[2026.10.26-22.48.22:312][419]LogAutomationWorker: Received StartTestSession from 00000000000000000000000000001000
+[2026.10.26-22.48.22:312][420]LogAutomationController: Sending RunTest Run to 00000000000000000000000000001001
+[2026.10.26-22.48.22:312][420]LogAutomationController: Display: Test Started. Name={Run} Path={Project.Verdict.Fails.Run}
+[2026.10.26-22.48.22:312][420]LogAutomationWorker: Received RunTests Run from 00000000000000000000000000001000
+[2026.10.26-22.48.22:409][422]LogAutomationController: Error: Test Completed. Result={Fail} Name={Run} Path={Project.Verdict.Fails.Run}
+[2026.10.26-22.48.22:409][422]LogAutomationController: BeginEvents: Project.Verdict.Fails.Run
+[2026.10.26-22.48.22:409][422]LogAutomationController: Error: Project.Verdict.Fails always fails [C:\Work\MyGame\Plugins\MyPlugin\Source\MyPluginTests\Private\VerdictTests.cpp(59)]
+[2026.10.26-22.48.22:409][422]LogAutomationController: EndEvents: Project.Verdict.Fails.Run
+[2026.10.26-22.48.22:409][422]LogAutomationController: Sending StopTestSession to 00000000000000000000000000001001
+[2026.10.26-22.48.22:410][423]LogAutomationWorker: Received StopTestSession from 00000000000000000000000000001000
+[2026.10.26-22.48.22:410][423]LogAutomationCommandLine: Display: Setting GIsCriticalError due to test failures (will cause non-zero exit code).
+[2026.10.26-22.48.22:410][423]LogAutomationCommandLine: Shutting down. GIsCriticalError=1
+[2026.10.26-22.48.22:410][424]LogAutomationCommandLine: Display: **** TEST COMPLETE. EXIT CODE: -1 ****
+[2026.10.26-22.48.22:410][424]LogWindows: FPlatformMisc::RequestExitWithStatus(0, 255, <NoCallSiteInfo>)
+[2026.10.26-22.48.22:410][424]LogCore: Engine exit requested (reason: Win RequestExit)
+[2026.10.26-22.48.22:410][424]LogAutomationCommandLine: Display: ...Automation Test Queue Empty 1 tests performed.
+[2026.10.26-22.48.22:410][424]LogCore: Engine exit requested (reason: EngineExit() was called; note: exit was already requested)
+[2026.10.26-22.48.23:387][424]LogExit: Preparing to exit.
+[2026.10.26-22.48.23:394][424]LogExit: Game engine shut down
+[2026.10.26-22.48.23:419][424]LogExit: Object subsystem successfully closed.
+[2026.10.26-22.48.23:441][424]LogExit: Exiting.
+[2026.10.26-22.48.23:450][424]Log file closed, 10/27/26 08:48:23

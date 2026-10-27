@@ -1,0 +1,36 @@
+[2026.10.26-22.44.47:096][  0]LogInit: Display: Engine is initialized. Leaving FEngineLoop::Init()
+[2026.10.26-22.44.47:100][  0]Automation: RunTests='StartsWith:Project.' Queued.
+[2026.10.26-22.44.47:100][  0]Automation: SoftQuit Command Queued.
+[2026.10.26-22.44.47:107][  2]LogAutomationCommandLine: Display: Ready to start automation
+[2026.10.26-22.44.52:110][814]LogAutomationWorker: Received FindWorkersMessage from 00000000000000000000000000001004
+[2026.10.26-22.44.52:110][815]LogAutomationController: Received FindWorkersResponseMessage from 00000000000000000000000000001005
+[2026.10.26-22.44.52:110][815]LogAutomationController: Requesting test list from 00000000000000000000000000001005
+[2026.10.26-22.44.52:111][815]LogAutomationWorker: Received RequestTestsMessage from 00000000000000000000000000001004
+[2026.10.26-22.44.52:119][815]LogAutomationWorker: Set 1459 tests to 00000000000000000000000000001004
+[2026.10.26-22.44.52:119][816]LogAutomationController: Received RequestTestsReplyCompleteMessage from 00000000000000000000000000001005
+[2026.10.26-22.44.52:120][816]LogAutomationController: 1459 tests available on 00000000000000000000000000001005
+[2026.10.26-22.44.52:129][816]LogAutomationCommandLine: Display: Found 1 automation tests based on 'StartsWith:Project.'
+[2026.10.26-22.44.52:129][816]LogAutomationCommandLine: Display: 	Project.Scaffold.ModulesLoaded
+[2026.10.26-22.44.52:129][816]LogAutomationController: Sending StopTests to 00000000000000000000000000001005
+[2026.10.26-22.44.52:130][816]LogAutomationController: Sending StartTestSession to 00000000000000000000000000001005
+[2026.10.26-22.44.52:131][816]LogAutomationWorker: Received StopTests from 00000000000000000000000000001004
+[2026.10.26-22.44.52:131][816]LogAutomationWorker: Received StartTestSession from 00000000000000000000000000001004
+[2026.10.26-22.44.52:131][817]LogAutomationController: Sending RunTest ModulesLoaded to 00000000000000000000000000001005
+[2026.10.26-22.44.52:131][817]LogAutomationController: Display: Test Started. Name={ModulesLoaded} Path={Project.Scaffold.ModulesLoaded}
+[2026.10.26-22.44.52:132][817]LogAutomationWorker: Received RunTests ModulesLoaded from 00000000000000000000000000001004
+[2026.10.26-22.44.52:132][819]LogAutomationController: Display: Test Completed. Result={Success} Name={ModulesLoaded} Path={Project.Scaffold.ModulesLoaded}
+[2026.10.26-22.44.52:132][819]LogAutomationController: BeginEvents: Project.Scaffold.ModulesLoaded
+[2026.10.26-22.44.52:132][819]LogAutomationController: EndEvents: Project.Scaffold.ModulesLoaded
+[2026.10.26-22.44.52:134][820]LogAutomationController: Sending StopTestSession to 00000000000000000000000000001005
+[2026.10.26-22.44.52:134][820]LogAutomationWorker: Received StopTestSession from 00000000000000000000000000001004
+[2026.10.26-22.44.52:134][821]LogAutomationCommandLine: Shutting down. GIsCriticalError=0
+[2026.10.26-22.44.52:134][821]LogAutomationCommandLine: Display: **** TEST COMPLETE. EXIT CODE: 0 ****
+[2026.10.26-22.44.52:134][821]LogWindows: FPlatformMisc::RequestExitWithStatus(0, 0, <NoCallSiteInfo>)
+[2026.10.26-22.44.52:134][821]LogCore: Engine exit requested (reason: Win RequestExit)
+[2026.10.26-22.44.52:134][821]LogAutomationCommandLine: Display: ...Automation Test Queue Empty 1 tests performed.
+[2026.10.26-22.44.52:134][821]LogCore: Engine exit requested (reason: EngineExit() was called; note: exit was already requested)
+[2026.10.26-22.44.52:377][821]LogExit: Preparing to exit.
+[2026.10.26-22.44.52:401][821]LogExit: Game engine shut down
+[2026.10.26-22.44.52:436][821]LogExit: Object subsystem successfully closed.
+[2026.10.26-22.44.52:447][821]LogExit: Exiting.
+[2026.10.26-22.44.52:455][821]Log file closed, 10/27/26 08:44:52

@@ -1,0 +1,30 @@
+[2026.10.26-22.48.52:046][  0]LogInit: Display: Engine is initialized. Leaving FEngineLoop::Init()
+[2026.10.26-22.48.52:050][  0]Automation: RunTests='Project.Verdict.Skipped' Queued.
+[2026.10.26-22.48.52:050][  0]Automation: SoftQuit Command Queued.
+[2026.10.26-22.48.52:058][  2]LogAutomationCommandLine: Display: Ready to start automation
+[2026.10.26-22.48.57:061][635]LogAutomationWorker: Received FindWorkersMessage from 00000000000000000000000000001002
+[2026.10.26-22.48.57:061][636]LogAutomationController: Received FindWorkersResponseMessage from 00000000000000000000000000001003
+[2026.10.26-22.48.57:061][636]LogAutomationController: Requesting test list from 00000000000000000000000000001003
+[2026.10.26-22.48.57:061][636]LogAutomationWorker: Received RequestTestsMessage from 00000000000000000000000000001002
+[2026.10.26-22.48.57:070][636]LogAutomationWorker: Set 1461 tests to 00000000000000000000000000001002
+[2026.10.26-22.48.57:071][637]LogAutomationController: Received RequestTestsReplyCompleteMessage from 00000000000000000000000000001003
+[2026.10.26-22.48.57:071][637]LogAutomationController: 1461 tests available on 00000000000000000000000000001003
+[2026.10.26-22.48.57:080][637]LogAutomationCommandLine: Display: Found 1 automation tests based on 'Project.Verdict.Skipped'
+[2026.10.26-22.48.57:080][637]LogAutomationCommandLine: Display: 	Project.Verdict.Skipped.Run
+[2026.10.26-22.48.57:080][637]LogAutomationController: Sending StopTests to 00000000000000000000000000001003
+[2026.10.26-22.48.57:081][637]LogAutomationController: Sending StartTestSession to 00000000000000000000000000001003
+[2026.10.26-22.48.57:082][637]LogAutomationWorker: Received StopTests from 00000000000000000000000000001002
+[2026.10.26-22.48.57:082][637]LogAutomationWorker: Received StartTestSession from 00000000000000000000000000001002
+[2026.10.26-22.48.57:083][638]LogAutomationController: Sending StopTestSession to 00000000000000000000000000001003
+[2026.10.26-22.48.57:083][639]LogAutomationWorker: Received StopTestSession from 00000000000000000000000000001002
+[2026.10.26-22.48.57:083][639]LogAutomationCommandLine: Shutting down. GIsCriticalError=0
+[2026.10.26-22.48.57:083][640]LogAutomationCommandLine: Display: **** TEST COMPLETE. EXIT CODE: 0 ****
+[2026.10.26-22.48.57:083][640]LogWindows: FPlatformMisc::RequestExitWithStatus(0, 0, <NoCallSiteInfo>)
+[2026.10.26-22.48.57:083][640]LogCore: Engine exit requested (reason: Win RequestExit)
+[2026.10.26-22.48.57:083][640]LogAutomationCommandLine: Display: ...Automation Test Queue Empty 1 tests performed.
+[2026.10.26-22.48.57:083][640]LogCore: Engine exit requested (reason: EngineExit() was called; note: exit was already requested)
+[2026.10.26-22.48.57:175][640]LogExit: Preparing to exit.
+[2026.10.26-22.48.57:189][640]LogExit: Game engine shut down
+[2026.10.26-22.48.57:226][640]LogExit: Object subsystem successfully closed.
+[2026.10.26-22.48.57:237][640]LogExit: Exiting.
+[2026.10.26-22.48.57:253][640]Log file closed, 10/27/26 08:48:57

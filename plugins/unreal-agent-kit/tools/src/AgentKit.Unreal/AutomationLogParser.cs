@@ -21,11 +21,17 @@ public sealed record AutomationTestResult(string Result, string Name, string Pat
 	public bool Skipped => Result.Equals("Skipped", StringComparison.OrdinalIgnoreCase);
 }
 
-/// <summary>What an editor automation run's log says.</summary>
+/// <summary>What an automation run's log says (the editor's, or a cooked game's Client.log).</summary>
 public sealed class AutomationLogSummary
 {
 	/// <summary>N of "Found N automation tests based on '...'", or null when the line is missing (the run never started).</summary>
 	public int? FoundCount { get; set; }
+
+	/// <summary>
+	/// The tests the "Found N automation tests" line lists after it, one per line (AutomationCommandline.cpp logs each as
+	/// &lt;tab&gt;&lt;full path&gt;), in order; empty when the log has none.
+	/// </summary>
+	public List<string> FoundNames { get; } = [];
 
 	/// <summary>The filter a "No automation tests matched '...'" line names, or null.</summary>
 	public string? NoMatchFilter { get; set; }
@@ -42,8 +48,33 @@ public sealed class AutomationLogSummary
 	/// <summary>Tests that passed.</summary>
 	public int Passed => Tests.Count(Test => Test.Passed);
 
-	/// <summary>Tests that were skipped.</summary>
-	public int Skipped => Tests.Count(Test => Test.Skipped);
+	/// <summary>
+	/// Found tests that never completed although the queue finished ("TEST COMPLETE"): the controller marks a test that needs
+	/// more devices than the run has as skipped without a "Test Completed" line (AutomationControllerManager.cpp, the
+	/// participants check after a pass; only ReportAutomationResult logs that line). Their paths when the log lists the found
+	/// tests, else <see cref="NotRun"/> counts them without names. Empty while the queue never finished: then they were lost
+	/// to a crash, not skipped.
+	/// </summary>
+	public List<string> NotRunNames
+	{
+		get
+		{
+			if (TestCompleteExitCode is null)
+			{
+				return [];
+			}
+			HashSet<string> Completed = new(Tests.Select(Test => Test.Path), StringComparer.Ordinal);
+			return FoundNames.Where(Name => !Completed.Contains(Name)).Distinct(StringComparer.Ordinal).ToList();
+		}
+	}
+
+	/// <summary>How many found tests never completed although the queue finished (see <see cref="NotRunNames"/>).</summary>
+	public int NotRun => TestCompleteExitCode is null || FoundCount is not int Found
+		? 0
+		: FoundNames.Count == Found ? NotRunNames.Count : Math.Max(0, Found - Tests.Count);
+
+	/// <summary>Tests that were skipped: those that completed as Skipped, and those that never ran (<see cref="NotRun"/>).</summary>
+	public int Skipped => Tests.Count(Test => Test.Skipped) + NotRun;
 
 	/// <summary>Tests that neither passed nor were skipped.</summary>
 	public int Failed => Tests.Count(Test => !Test.Passed && !Test.Skipped);
@@ -55,10 +86,10 @@ public sealed class AutomationLogSummary
 	public List<string> Problems()
 	{
 		List<string> Result = [];
-		// Every completed test skipped means nothing was checked: that must never read as a pass.
+		// Every test skipped (or never run) means nothing was checked: that must never read as a pass.
 		if (Passed == 0 && Skipped > 0)
 		{
-			Result.Add($"NOTHING RAN: all {Skipped} completed test{(Skipped == 1 ? " was" : "s were")} skipped and none passed");
+			Result.Add($"NOTHING RAN: no test passed and {Skipped} {(Skipped == 1 ? "was" : "were")} skipped");
 		}
 		if (NoMatchFilter is not null)
 		{
@@ -66,7 +97,7 @@ public sealed class AutomationLogSummary
 		}
 		else if (FoundCount is null)
 		{
-			Result.Add("the log has no \"Found N automation tests\" line: the editor did not start the tests");
+			Result.Add("the log has no \"Found N automation tests\" line: the editor or game did not start the tests");
 		}
 		else if (FoundCount == 0)
 		{
@@ -82,7 +113,7 @@ public sealed class AutomationLogSummary
 		}
 		if (FoundCount > 0 && TestCompleteExitCode is null)
 		{
-			Result.Add("the test queue never finished (no \"TEST COMPLETE\" line): the editor crashed or was stopped");
+			Result.Add("the test queue never finished (no \"TEST COMPLETE\" line): the editor or game crashed or was stopped");
 		}
 		else if (TestCompleteExitCode is int Code && Code != 0 && Failed == 0 && NoMatchFilter is null)
 		{
@@ -100,9 +131,16 @@ public static partial class AutomationLogParser
 	{
 		AutomationLogSummary Summary = new();
 		AutomationTestResult? Last = null;
+		bool ListingFound = false;
 		foreach (string Line in lines)
 		{
 			Match M;
+			if (ListingFound && (M = FoundNamePattern().Match(Line)).Success)
+			{
+				Summary.FoundNames.Add(M.Groups["name"].Value.TrimEnd());
+				continue;
+			}
+			ListingFound = false;
 			if ((M = CompletedPattern().Match(Line)).Success)
 			{
 				Last = new AutomationTestResult(M.Groups["result"].Value, M.Groups["name"].Value, M.Groups["path"].Value);
@@ -115,6 +153,7 @@ public static partial class AutomationLogParser
 			else if ((M = FoundPattern().Match(Line)).Success)
 			{
 				// Only the first: a later RunTests in the same session would restart the count.
+				ListingFound = Summary.FoundCount is null;
 				Summary.FoundCount ??= int.Parse(M.Groups["count"].Value, CultureInfo.InvariantCulture);
 			}
 			else if ((M = NoMatchPattern().Match(Line)).Success)
@@ -137,6 +176,9 @@ public static partial class AutomationLogParser
 
 	[GeneratedRegex(@"Found (?<count>\d+) automation tests? based on '")]
 	private static partial Regex FoundPattern();
+
+	[GeneratedRegex(@"LogAutomationCommandLine: Display: \t(?<name>\S.*)$")]
+	private static partial Regex FoundNamePattern();
 
 	[GeneratedRegex(@"No automation tests matched '(?<filter>[^']*)'")]
 	private static partial Regex NoMatchPattern();
