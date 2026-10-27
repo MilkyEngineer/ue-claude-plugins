@@ -10,6 +10,11 @@
       "name": "unreal-agent-kit",
       "source": "./plugins/unreal-agent-kit",
       "description": "Multi-agent workflow for Unreal Engine projects (tiered workers, a runner, a read-only researcher and reviewer, an architect for plans and briefs, epic briefs, delegation) plus uak, a CLI for a queued editor lock, detached runs, single-file compile checks, build and test wrappers, Perforce shelving and Horde preflights"
+    },
+    {
+      "name": "ue-codestyle",
+      "source": "./plugins/ue-codestyle",
+      "description": "An Unreal Engine C++ code style as a skill: file and include layout, naming, class layout, comments, blank lines that give code breathing room, line breaking, lambdas, logging and column-aligned field blocks"
     }
   ]
 }

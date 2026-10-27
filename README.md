@@ -7,6 +7,7 @@ Claude Code plugins for Unreal Engine development.
 ```
 /plugin marketplace add MilkyEngineer/ue-claude-plugins
 /plugin install unreal-agent-kit@ue-claude-plugins
+/plugin install ue-codestyle@ue-claude-plugins
 ```
 
 Or from a shell: `claude plugin marketplace add MilkyEngineer/ue-claude-plugins`, then `claude plugin install <plugin>@ue-claude-plugins`.
@@ -34,6 +35,12 @@ A multi-agent workflow for Unreal Engine projects, and `uak`, the CLI it runs on
 - **`uak`:** a queued editor lock that is released when its holder dies; detached runs that survive shells and restarts; single-file compile checks through UBT; build and automation-test wrappers with count checks; Git and Perforce status; Perforce edit, add, reopen, changelists and shelving; Horde preflights and job watching.
 
 **Requirements:** an Unreal Engine install (UE 5.8 or 5.7). `uak` is published once, as a self-contained program, with the engine's bundled .NET SDK: see [INSTALL.md](plugins/unreal-agent-kit/docs/INSTALL.md). Windows is tested; the Linux and Mac code is untested.
+
+### ue-codestyle
+
+An Unreal Engine C++ code style, as a skill that Claude follows when it writes, edits or reviews UE C++ and Build.cs files. It covers file and include layout, naming, class layout, reflection macros, comments, line breaking, lambdas and logging. It also covers blank lines that split a function into readable steps, and column-aligned field blocks.
+
+A project's own style guide, `.editorconfig` or `.clang-format` wins over it, and so does the style of a file being edited.
 
 ## License
 

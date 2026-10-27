@@ -1,0 +1,12 @@
+{
+  "name": "ue-codestyle",
+  "version": "0.1.0",
+  "description": "An Unreal Engine C++ code style as a skill: file and include layout, naming, class layout, comments, blank lines that give code breathing room, line breaking, lambdas, logging and column-aligned field blocks",
+  "author": {
+    "name": "Alex Stevens",
+    "url": "https://github.com/MilkyEngineer"
+  },
+  "repository": "https://github.com/MilkyEngineer/ue-claude-plugins",
+  "license": "MIT",
+  "keywords": ["unreal", "unreal-engine", "ue5", "c++", "code-style", "style-guide"]
+}
