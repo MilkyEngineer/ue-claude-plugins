@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.7
+
+### Fixed
+
+- **Compactions alone are not a loop.** 0.3.6 told the lead that more than one or two compactions an hour meant a loop. An agent that reads a lot can compact every ten minutes and still progress, so the workflow skill now calls it a loop only when several compactions pass with no change to the agent's files and no build or test between them. It also notes that an agent may edit through a script, so its progress shows in its files' modification times, not only in its Edit calls.
+- `uak` itself is unchanged, but its publish folder follows the kit's version: publish it again for 0.3.7 (the SessionStart hook offers to).
+
 ## 0.3.6
 
 ### Added
