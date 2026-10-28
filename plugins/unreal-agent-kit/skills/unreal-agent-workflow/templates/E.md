@@ -31,7 +31,7 @@ Must not touch without the lead:
 
 ## Current state
 
-<Owned by the epic's agent. Rewritten at every hand-back.>
+<Owned by the epic's agent. Rewritten at every hand-back. Keep it short: what is done and verified, what is half done, what is running. The history belongs in version control.>
 
 Not started.
 

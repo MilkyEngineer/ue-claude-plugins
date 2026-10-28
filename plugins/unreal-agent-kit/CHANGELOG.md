@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.3.6
+
+### Added
+
+- **Compaction loops.** An agent whose context fills compacts and carries on; if it then reads the same large files again, it fills again soon after, and can loop for hours without editing, running or handing back. The workflow skill's "Resume or respawn" section now tells the lead how to check an agent that runs long (count `compact_boundary` entries in its transcript, and see when its files last changed and when it last built or tested), how to stop a loop (the agent writes its brief and splits the rest of its step; each part is respawned as its own agent), and how to prevent one (steps sized to one context, short briefs, sections named in the spawn prompt).
+- **Read large files in parts.** The worker definitions (`low`, `medium`, `high`, `xhigh`) and `research`, `review` and `architect` read long files by section (Grep, then `offset` and `limit`), grep logs rather than read them whole, and re-read only what the next action needs after a compaction. A worker whose task won't fit in one context finishes and verifies a first part, writes down the rest, and hands back.
+
+### Changed
+
+- The brief template's Current state asks to keep it short; the history belongs in version control.
+- `uak` itself is unchanged, but its publish folder follows the kit's version: publish it again for 0.3.6 (the SessionStart hook offers to).
+
 ## 0.3.5
 
 ### Added

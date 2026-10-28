@@ -318,8 +318,9 @@ Writes are Perforce only, on the side (`PerforceVersionControl`, not `IVersionCo
   - ask the lead with SendMessage to "main";
   - ask for a runner for long, low-judgment work;
   - follow epic briefs, and rewrite their Current state and Next step at every hand-back, so the lead can respawn a fresh agent from the brief instead of resuming a large context;
+  - read large files in parts (Grep, then line ranges), and after a compaction re-read only what the next action needs, so the context doesn't fill again at once (since 0.3.6, after an agent looped for hours re-reading a long brief and large sources after each compaction);
   - no new batch or shell scripts: tools go in `uak`.
-- **The workflow skill:** briefs (a README plus E#.md per milestone), caps, effort tiers, delegation (runner and research requests), when to resume an agent and when to respawn it from its brief, reviews, spec-doc sync, and an opt-in usage-limit watchdog (only if the project's owner allows auto-resume).
+- **The workflow skill:** briefs (a README plus E#.md per milestone), caps, effort tiers, delegation (runner and research requests), when to resume an agent and when to respawn it from its brief, how to spot and stop an agent stuck in a compaction loop, reviews, spec-doc sync, and an opt-in usage-limit watchdog (only if the project's owner allows auto-resume).
 - **Docs:**
   - the install steps;
   - recommended settings: `CLAUDE_CODE_DISABLE_BG_SHELL_PRESSURE_REAP=1`, the auto-compact window;
