@@ -15,7 +15,9 @@ In Claude Code:
 
 Or from a shell: `claude plugin marketplace add MilkyEngineer/ue-claude-plugins`, then `claude plugin install unreal-agent-kit@ue-claude-plugins`.
 
-This adds the agents (`runner`, `low`, `medium`, `high`, `xhigh`, `research`, `review`, `architect`; Claude Code shows them as `unreal-agent-kit:<name>`) and the `unreal-agent-workflow` skill. Restart Claude Code, or run `/agents`, to see them.
+This adds the agents (`runner`, `low`, `medium`, `high`, `xhigh`, `research`, `review`, `review-diff`, `architect`; Claude Code shows them as `unreal-agent-kit:<name>`) and the `unreal-agent-workflow` skill. Restart Claude Code, or run `/agents`, to see them.
+
+**A second Claude config profile.** Plugins are installed and enabled per Claude config folder. If you also run Claude Code with another one (for example a work profile through `CLAUDE_CONFIG_DIR`), add the marketplace and install and enable the plugin there too: otherwise the kit's agent types are missing in that profile, and spawning `unreal-agent-kit:high` or the others fails. `uak` itself is shared: one publish serves every profile.
 
 ## 2. Get the source for `uak`
 
@@ -54,7 +56,7 @@ Below, `<dotnet>` means that program. Running the engine's own `dotnet` is enoug
 ```
 
 - **What it makes.** A self-contained `uak` for this machine's platform. It runs with no installed .NET and no `DOTNET_ROOT`.
-- **Where it goes.** `$UAK_HOME/<kit version>/`, where `UAK_HOME` defaults to `~/.unreal-agent-kit`. The kit version is the `version` in `<kit>/.claude-plugin/plugin.json`. For kit version 0.3.7 that is `~/.unreal-agent-kit/0.3.7/uak.exe` on Windows, and `~/.unreal-agent-kit/0.3.7/uak` on Linux and Mac. The examples below use 0.3.7: use your kit's version.
+- **Where it goes.** `$UAK_HOME/<kit version>/`, where `UAK_HOME` defaults to `~/.unreal-agent-kit`. The kit version is the `version` in `<kit>/.claude-plugin/plugin.json`. For kit version 0.4.0 that is `~/.unreal-agent-kit/0.4.0/uak.exe` on Windows, and `~/.unreal-agent-kit/0.4.0/uak` on Linux and Mac. The examples below use 0.4.0: use your kit's version.
   - The folder is outside the plugin, which Claude Code replaces on every update.
   - Each kit version gets its own folder, so publishing a new version never overwrites a `uak` that is running.
   - Republishing the same version over itself can fail while a detached run is going, because the run's wrapper keeps that folder's files open. Wait until `uak runs list` shows nothing running.
@@ -89,10 +91,10 @@ engine="$HOME/UnrealEngine"   # your engine root
 
 **Outside Claude Code** (a terminal, CI, a scheduled task), add the publish folder to `PATH` in your user environment, or call `uak` by its full path:
 
-- **Windows:** add `%USERPROFILE%\.unreal-agent-kit\0.3.7` to your user `Path` (Settings, System, About, Advanced system settings, Environment Variables), or from PowerShell:
+- **Windows:** add `%USERPROFILE%\.unreal-agent-kit\0.4.0` to your user `Path` (Settings, System, About, Advanced system settings, Environment Variables), or from PowerShell:
 
   ```powershell
-  $dir = "$env:USERPROFILE\.unreal-agent-kit\0.3.7"
+  $dir = "$env:USERPROFILE\.unreal-agent-kit\0.4.0"
   $key = Get-Item "HKCU:\Environment"
   # Read the raw value, so entries such as %USERPROFILE%\bin stay unexpanded.
   $path = $key.GetValue("Path", "", [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
@@ -106,9 +108,9 @@ engine="$HOME/UnrealEngine"   # your engine root
 
   This writes the user `Path` only, keeps its existing entries as they were (including unexpanded ones like `%USERPROFILE%\bin`), and does nothing if the folder is already there. Programs started before the change keep the old `Path`: open a new terminal, and restart Claude Code from it, to pick it up.
 
-  By full path: `& "$env:USERPROFILE\.unreal-agent-kit\0.3.7\uak.exe" env` in PowerShell, or `~/.unreal-agent-kit/0.3.7/uak.exe env` in Git Bash.
-- **Linux:** add `export PATH="$HOME/.unreal-agent-kit/0.3.7:$PATH"` to `~/.profile` (or your shell's profile). By full path: `~/.unreal-agent-kit/0.3.7/uak env`.
-- **Mac:** add the same line to `~/.zprofile`. By full path: `~/.unreal-agent-kit/0.3.7/uak env`.
+  By full path: `& "$env:USERPROFILE\.unreal-agent-kit\0.4.0\uak.exe" env` in PowerShell, or `~/.unreal-agent-kit/0.4.0/uak.exe env` in Git Bash.
+- **Linux:** add `export PATH="$HOME/.unreal-agent-kit/0.4.0:$PATH"` to `~/.profile` (or your shell's profile). By full path: `~/.unreal-agent-kit/0.4.0/uak env`.
+- **Mac:** add the same line to `~/.zprofile`. By full path: `~/.unreal-agent-kit/0.4.0/uak env`.
 
 Restart Claude Code afterwards, so it sees the new `PATH`. When you publish a new kit version, point `PATH` (or CLAUDE.md) at the new version's folder. Then check:
 
@@ -142,7 +144,7 @@ Usually nothing is needed. `uak` finds the project by walking up from the curren
 | `UAK_PROJECT` | the `.uproject` file, or a folder holding exactly one |
 | `UAK_ENGINE` | the engine root (or its `Engine` folder) |
 | `UAK_VCS` | forces `git`, `perforce` (or `p4`) or `none` |
-| `UAK_MAX_PARALLEL_ACTIONS` | caps UBT's parallel actions for `uak build` and `uak compile`, for machines short of RAM |
+| `UAK_MAX_PARALLEL_ACTIONS` | caps UBT's parallel actions for `uak build` and `uak compile`, for machines short of RAM (`uak compile -dependents` lowers it further, to one action per 1.5 GiB of free memory, the limit UBT applies only to its own default) |
 | `UAK_HOME` | the kit's own folder, holding the versioned installs and the fallback `State/` folder (default `~/.unreal-agent-kit`) |
 | `UAK_PROJECT_COMMANDS` | `1` (or `true`) loads project commands from `<Project>/.uak/commands/` (see below); off by default |
 | `UAK_COMMAND_PATHS` | extra folders of project commands (see below), separated by `;` on Windows and `:` elsewhere; absolute folders only |
@@ -150,6 +152,7 @@ Usually nothing is needed. `uak` finds the project by walking up from the curren
 | `UAK_GIT_TIMEOUT` | seconds each `git` command may take before it is stopped (default 30) |
 | `UAK_LOCK_PRIORITY` | the default lock priority, `High` or `Normal`; `uak runs start -priority=` sets it for a run |
 | `UAK_LOCK_NAME` | set by `uak runs start` to the run's name, so the run's lock requests show as `<run>/<name>` |
+| `UAK_RUN_NAME` | set by `uak runs start` to the run's name, so the run's `uak build`, `uak test` and `uak mutate` record their summaries under it for `uak runs show` |
 
 The global options `-project=`, `-engine=` and `-vcs=` beat the variables. They go before the command, for example `uak -project=MyGame.uproject env`. `-verbose` prints more detail. `uak help <command>`, or `uak <command> -help`, shows a command's options.
 
@@ -157,7 +160,7 @@ Per-project values fit best in the project's `.claude/settings.local.json` under
 
 ## Where `uak` keeps its state
 
-The lock queue, run records, logs and test reports go in the first of these folders that can be written:
+The lock queue, run records, logs, test reports, run summaries (`Summaries/`, for `uak runs show`), mutation journals (`Mutations/`, for `uak mutate`, written whole in `MutationsPending/` first; those `uak mutate -restore -accept` or `-force` set aside go to `DiscardedMutations/`, which you may delete once you have checked them) and the project's own settings (`config.json`, which `uak test config` writes) go in the first of these folders that can be written:
 1. `<Project>/Saved/AgentKit`;
 2. `<Engine root>/Engine/Saved/AgentKit/Projects/<project key>`, or `<Engine root>/Engine/Saved/AgentKit` when there is no project;
 3. `$UAK_HOME/State/<project key>`, or `$UAK_HOME/State/<engine key>` when there is no project.
@@ -182,7 +185,7 @@ Loading a command runs its code, so `uak` loads these folders lazily: only to ru
 - **git and p4 come from `PATH` only.** `uak` never runs a `git` or `p4` found in the project or current folder.
 - **Perforce detection.** `uak` finds a Perforce workspace through a `P4CONFIG` file at or above the project. Global settings alone (a `P4PORT` or `P4CLIENT` set machine-wide, with no `P4CONFIG` file) are not used, and `uak` does not run `p4` then, so it never contacts a server just because one is set machine-wide. To use those global settings, pass `-vcs=p4` (or set `UAK_VCS=p4`).
 - **Timeout.** Each `p4` command may take `UAK_P4_TIMEOUT` seconds (default 15). After that `p4` is stopped, so an unreachable server cannot hang a command. Each `git` command may take `UAK_GIT_TIMEOUT` seconds (default 30), for the same reason.
-- **Perforce writes.** `uak vcs edit|add|reopen <file>... [-c=<changelist>|default]`, `uak vcs change new -description=<text>`, `uak vcs change describe -c=<changelist> -description=<text>` and `uak vcs shelve -c=<changelist> [-keep-unopened]` (or `uak vcs shelve <file>... [-description=]`, which moves opened files into a new changelist and shelves it) work on this client's pending changelists only, and check each file afterwards. A shelve replaces the shelf (p4 shelve -r): the shelf becomes exactly the opened files, so shelved files that were reverted or moved out of the changelist are deleted from it, and uak prints every file the shelf loses. `-keep-unopened` (p4 shelve -f, the default before 0.3.3) keeps them instead; use it when the shelf is the only copy of that work. `-replace` and `-drop-unopened` are still accepted, and do nothing. Shelving files that sit in a numbered changelist needs `-force`, and half of a move is refused. They never revert or submit. `reopen` and `edit` refuse wildcards and directories unless `-folders` is given, because a directory also takes every other file opened under it. A shelve may run up to 30 minutes, since it sends file contents. Git workspaces get a clear "Perforce only" error.
+- **Perforce writes.** `uak vcs edit|add|reopen <file>... [-c=<changelist>|default]`, `uak vcs change new -description=<text>`, `uak vcs change describe -c=<changelist> -description=<text>` and `uak vcs shelve -c=<changelist> [-keep-unopened]` (or `uak vcs shelve <file>... [-description=]`, which moves opened files into a new changelist and shelves it) work on this client's pending changelists only, and check each file afterwards. A shelve replaces the shelf (p4 shelve -r): the shelf becomes exactly the opened files, so shelved files that were reverted or moved out of the changelist are deleted from it, and uak prints every file the shelf loses. `-keep-unopened` (p4 shelve -f, the default before 0.3.3) keeps them instead; use it when the shelf is the only copy of that work. `-replace` and `-drop-unopened` are still accepted, and do nothing. Shelving files that sit in a numbered changelist needs `-force`, and half of a move is refused. They never revert or submit. `reopen` and `edit` refuse wildcards and directories unless `-folders` is given, because a directory also takes every other file opened under it. A shelve may run up to 30 minutes, since it sends file contents. A shelve is refused while a `uak mutate` journal is left (`uak mutate -status`): a mutation check's patch may be in the files, and `uak vcs status` and `uak vcs changed` warn then. Git workspaces get a clear "Perforce only" error.
 
 ## Horde
 
@@ -192,7 +195,7 @@ Loading a command runs its code, so `uak` loads these folders lazily: only to ru
 2. **Sign-in.** Each horde command first uses Horde's cached token, refreshed silently. When that fails, it prints "Opening the Horde sign-in page in your browser...", opens the page and waits up to 600 s (`-login-timeout=<seconds>`), then exits 4 if nobody signed in. `-no-login` never opens the page (CI, scripts). `uak horde login` signs in ahead of time. `uak -verbose horde ...` shows Horde's own messages, which say why a cached token was refused.
    - If your identity provider rejects the silent refresh (for example Entra ID's AADSTS90009), every new process would sign in again: ask your Horde admin to check the server's OIDC scope. Until then, uak's token cache (below) lets commands share one sign-in until the token expires.
    - **uak's token cache.** On Windows, after a sign-in uak keeps the access token and its expiry (from the token's `exp` claim) in `$UAK_HOME/horde/<server>/token.bin`, encrypted with DPAPI for the current user, with the server's URL as extra entropy. Commands use it while it has more than 5 minutes left. When the server refuses it, it is deleted, and the command signs in again and retries only the refused request. A token from `UE_HORDE_TOKEN` is used as it is, never cached. `uak horde logout` deletes it. Elsewhere nothing is cached. uak never prints or logs the token.
-3. **Preflight.** `uak horde preflight -c=<shelved changelist>` finds the Horde stream from the workspace's stream (walking up virtual streams), starts the job with the stream's saved build settings, and prints its URL. `-shelve` shelves first, replacing the shelf as `uak vcs shelve -c=` does (`-keep-unopened` keeps shelved files that aren't opened), and always starts a new preflight; it is refused while an auto-submit preflight of the change runs. `-stream=` and `-template=` choose, and `-wait [-timeout=<seconds>]` waits quietly for the result. `uak horde streams` lists the streams and templates. Without `-shelve`, a preflight that uak started and that is still running with the same stream, template, parameters and auto-submit setting, created after the change was last shelved and on the same shelf (uak records each preflight it starts, with the shelf, in `$UAK_HOME/horde/<server>/preflights/`), is reported ("reused: <job>") instead of started again (`-force` starts another).
+3. **Preflight.** `uak horde preflight -c=<shelved changelist>` finds the Horde stream from the workspace's stream (walking up virtual streams), starts the job with the stream's saved build settings, and prints its URL. `-shelve` shelves first, replacing the shelf as `uak vcs shelve -c=` does (`-keep-unopened` keeps shelved files that aren't opened), and always starts a new preflight; it is refused while an auto-submit preflight of the change runs, and while a `uak mutate` journal is left (`uak mutate -status`), as `uak vcs shelve` is: a mutation check's patch may be in the files. `-stream=` and `-template=` choose, and `-wait [-timeout=<seconds>]` waits quietly for the result. `uak horde streams` lists the streams and templates. Without `-shelve`, a preflight that uak started and that is still running with the same stream, template, parameters and auto-submit setting, created after the change was last shelved and on the same shelf (uak records each preflight it starts, with the shelf, in `$UAK_HOME/horde/<server>/preflights/`), is reported ("reused: <job>") instead of started again (`-force` starts another).
 4. **Build settings.** Each stream's template and parameter values are saved per user and server in `$UAK_HOME/horde/<server>/<stream>/templates.json`. With none saved, a preflight starts nothing and exits 6, printing the templates and parameters; in Claude Code the lead then asks you and saves your answers. `uak horde templates` lists them; `uak horde config -template=<id> -param:<id>=<value>` saves (checked against the server first), `uak horde config -show` shows, and `uak horde config -reset-build` forgets. On a preflight, `-template=` and `-param:<id>=` change one run, and `-use-template-defaults` (CI) uses the template's defaults.
 5. **Auto-submit is opt-in.** `-autosubmit` tells Horde to edit the change's description and submit it when the preflight succeeds. It is off unless you pass it. Horde submits the change's current shelf, so uak refuses (exit 5) to start a second auto-submit preflight of a change, to shelve a change again while one runs (`-shelve`, and `uak vcs shelve -c=` when a Horde server is configured), and, with `-shelve -keep-unopened -autosubmit`, to auto-submit shelved files that aren't opened in the change (`-allow-shelved-only` accepts them). Plain `-shelve` deletes such files from the shelf, so they are neither built nor submitted.
 

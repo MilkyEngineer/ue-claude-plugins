@@ -19,6 +19,15 @@ public sealed record AutomationTestResult(string Result, string Name, string Pat
 
 	/// <summary>Whether the test was skipped, which is neither a pass nor a failure.</summary>
 	public bool Skipped => Result.Equals("Skipped", StringComparison.OrdinalIgnoreCase);
+
+	/// <summary>
+	/// Whether the test completed with a failure (Result Fail). Unlike "not passed", this excludes a skip and any other state
+	/// (NotRun, InProcess): a mutation check counts only this as its tests catching the mutation.
+	/// </summary>
+	public bool IsFailure => IsFailureResult(Result);
+
+	/// <summary>Whether a result word is a failure ("Fail").</summary>
+	public static bool IsFailureResult(string? result) => string.Equals(result, "Fail", StringComparison.OrdinalIgnoreCase);
 }
 
 /// <summary>What an automation run's log says (the editor's, or a cooked game's Client.log).</summary>

@@ -130,12 +130,26 @@ internal sealed class FakeLock : IEditorLockProvider
 	/// <summary>Runs as the lock is released: what the next holder does first.</summary>
 	public Action? OnRelease { get; set; }
 
+	/// <summary>Whether each quiet-aware request asked for a quiet hold.</summary>
+	public List<bool> Quiet { get; } = [];
+
+	/// <summary>How many others wait in line (CountWaiting).</summary>
+	public int Waiting { get; set; }
+
 	public Task<IAsyncDisposable> AcquireAsync(UakContext context, string name, CancellationToken cancellationToken)
 	{
 		Names.Add(name);
 		Held++;
 		return Task.FromResult<IAsyncDisposable>(new Hold(this));
 	}
+
+	public Task<IAsyncDisposable> AcquireAsync(UakContext context, string name, bool quiet, CancellationToken cancellationToken)
+	{
+		Quiet.Add(quiet);
+		return AcquireAsync(context, name, cancellationToken);
+	}
+
+	public int CountWaiting(UakContext context) => Waiting;
 
 	sealed class Hold(FakeLock owner) : IAsyncDisposable
 	{
@@ -178,6 +192,13 @@ internal sealed class ListLogger : ILogger
 			Entries.Add((logLevel, formatter(state, exception)));
 		}
 	}
+}
+
+/// <summary>Tree states for <see cref="UnrealServices.CaptureTree"/>, so no test asks the real version control.</summary>
+internal static class TestSupportTrees
+{
+	public static Task<AgentKit.Vcs.VcsTreeState> None(UakContext context, CancellationToken cancellationToken) =>
+		Task.FromResult(new AgentKit.Vcs.VcsTreeState { Kind = "None" });
 }
 
 internal static class Fixtures

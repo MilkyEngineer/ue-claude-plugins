@@ -14,6 +14,7 @@ public sealed class CommandTests
 		Lock = lockProvider ?? new FakeLock(),
 		HostPlatform = UnrealPlatform.Win64,
 		GetEnvironmentVariable = Name => environment is not null && environment.TryGetValue(Name, out string? Value) ? Value : null,
+		CaptureTree = TestSupportTrees.None,
 	};
 
 	[TestMethod]

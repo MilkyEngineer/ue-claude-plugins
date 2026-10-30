@@ -47,6 +47,8 @@ public static class RunWrapper
 		record.Detach = detach;
 		record.OutputFile = outputFile;
 		StateFiles.WriteJson(recordFile, record);
+		// A run that reuses a name (-force) starts with no summaries: the old run's are not this one's.
+		RunSummaries.Clear(new DirectoryInfo(Path.GetDirectoryName(Path.GetDirectoryName(Path.GetFullPath(recordFile))!)!), record.Name);
 		output.WriteLine($"{RunRegistry.WrapperLinePrefix}{record.Name}' (owner {record.Owner}) started {UakJson.FormatTime(DateTime.UtcNow)}: {record.CommandLine}");
 
 		int exitCode;
@@ -129,6 +131,8 @@ public static class RunWrapper
 		// A run outlives whatever lock its starter held: its own lock requests must queue, not join a hold that has ended.
 		startInfo.Environment.Remove(EditorLock.HeldVariable);
 		startInfo.Environment[EditorLock.NameVariable] = record.Name;
+		// uak build, test and mutate record their summaries under the run's name too, for `uak runs show`.
+		startInfo.Environment[RunSummaries.RunNameVariable] = record.Name;
 		if (record.Priority is LockPriority priority)
 		{
 			startInfo.Environment[EditorLock.PriorityVariable] = priority.ToString();

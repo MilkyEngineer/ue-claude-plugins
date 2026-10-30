@@ -102,7 +102,8 @@ public sealed class ExpectTests
 		CollectionAssert.AreEqual(new[] { "Project.Math.Add (completed: Fail)", "Project.Math.Sub (did not complete)" },
 			Bad.Missing.Select(Missing => Missing.ToString()).ToArray());
 		CollectionAssert.AreEqual(new[] { "Project.Math.Mul" }, Bad.Unexpected.ToArray());
-		CollectionAssert.AreEqual(new[] { "2 expected tests did not pass", "1 test completed that was not expected" }, Bad.Problems());
+		// An unexpected test is not a problem in itself: uak test reports it apart (exit code 3), and a failed one fails the run anyway.
+		CollectionAssert.AreEqual(new[] { "2 expected tests did not pass" }, Bad.Problems());
 	}
 
 	[TestMethod]

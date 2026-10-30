@@ -30,6 +30,8 @@ public sealed class LockRunCommand : IUakCommand
 		  anything it leaves running when it exits is stopped before the lock is released (a detached run, started with
 		  `uak runs start`, is not). Lock requests inside the command for the same lock join this hold ($UAK_LOCK_HELD);
 		  requests for another lock fail at once.
+		  It refuses (exit 2) while a stopped `uak mutate` run has left its patch in the tree or its binaries (`uak mutate
+		  -restore`, run on its own: inside `uak lock run` it is refused too).
 		""";
 
 	/// <inheritdoc />
@@ -55,6 +57,8 @@ public sealed class LockRunCommand : IUakCommand
 
 		// AcquireAsync logs the scope it holds ("Holding the editor lock for project <dir> ..."), or the hold it joins.
 		await using EditorLockHold hold = await EditorLock.AcquireAsync(context, name, priority, lockOptions, cancellationToken).ConfigureAwait(false);
+		// A stopped uak mutate run may have left its patch in the tree: the command would build or run the mutant.
+		MutationJournal.ThrowIfUnfinished(context);
 		try
 		{
 			// A nested hold records nothing (the outer holder's command is the one that matters), so its job needs no name.

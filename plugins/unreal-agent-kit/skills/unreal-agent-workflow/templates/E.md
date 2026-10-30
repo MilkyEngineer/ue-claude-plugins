@@ -1,6 +1,6 @@
 # E<n>: <title>
 
-<Phase or order, and what depends on this epic.> Suggested tier: ue-<low|medium|high|xhigh>.
+<Phase or order, and what depends on this epic.> Suggested tier: <low|medium|high|xhigh>.
 
 ## Scope
 

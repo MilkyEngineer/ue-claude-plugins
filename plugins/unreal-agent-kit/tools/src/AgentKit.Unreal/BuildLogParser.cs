@@ -145,8 +145,11 @@ public sealed partial class BuildLogParser
 
 	static int? ParseInt(Group group) => group.Success ? int.Parse(group.Value, CultureInfo.InvariantCulture) : null;
 
-	// "[3/30] Compile [x64] Foo.cpp", "[6/30] Link [x64] UnrealEditor-Foo.dll", "[1/1] Compile Foo.cpp" (clang hosts).
-	[GeneratedRegex(@"^\[\d+/\d+\]\s+(?<kind>\S+)\s+(?:\[[^\]]*\]\s+)?(?<item>.+)$")]
+	// "[3/30] Compile [x64] Foo.cpp", "[6/30] Link [x64] UnrealEditor-Foo.dll", "[1/1] Compile Foo.cpp" (clang hosts). UE 5.8's
+	// UBT may add the target ("[3/30][FooEditor Win64 Development] ...", bPrintActionTargetNames) and times ("[3/30] (Wall:
+	// 1.20s CPU: 1.10s) ...", bShowPerActionCompilationTimes) after the count, and where the action ran after the item
+	// (" [Cache]", " [NoUba]", " [RemoteExecutor: host]", ActionLogger's AdditionalDescription), none of them part of it.
+	[GeneratedRegex(@"^\[\d+/\d+\](?:\[[^\]]*\])?(?:\s+\(Wall:[^)]*\))?\s+(?<kind>\S+)\s+(?:\[[^\]]*\]\s+)?(?<item>.+?)(?:\s+\[[^\]]*\])?$")]
 	private static partial Regex ActionPattern();
 
 	// "C:\x\Foo.cpp(337,63): error C2440: ...", clang-cl "Foo.cpp(12,5): error: ...", UHT "Foo.h(12): Error: ...".

@@ -73,7 +73,8 @@ public sealed class BuildLogParserTests
 		Assert.IsTrue(Summary.Succeeded);
 		Assert.IsEmpty(Summary.Errors);
 		Assert.Contains(new UbtAction("Compile", "MyActor.cpp"), Summary.Actions);
-		Assert.Contains(new UbtAction("WriteMetadata", "MyGameEditor.target [NoUba]"), Summary.Actions);
+		// Where an action ran (" [NoUba]") is no part of its item.
+		Assert.Contains(new UbtAction("WriteMetadata", "MyGameEditor.target"), Summary.Actions);
 		Assert.AreEqual(72.59, Summary.TotalSeconds);
 		// "Warning: Visual Studio compiler ... is not a preferred version" and the ISPC banner are not diagnostics.
 		Assert.IsTrue(Summary.Warnings.All(Warning => Warning.Code == "C4996"));
@@ -138,5 +139,25 @@ public sealed class BuildLogParserTests
 		Assert.IsEmpty(Summary.Errors);
 		Assert.IsEmpty(Summary.Warnings);
 		Assert.IsNull(Summary.Result);
+	}
+
+	[TestMethod]
+	public void AnActionsItemLeavesOutWhereItRanAndTheTargetAndTimesUbtMayAdd()
+	{
+		// UE 5.8 UBT (ActionLogger, UBAExecutor) adds where an action ran after its item, and, when configured, the target
+		// and the action's times after the count: none of them is part of the item a mutation check matches by name.
+		BuildLogSummary Summary = BuildLogParser.Parse(
+		[
+			"[1/6] Compile [x64] Foo.cpp [RemoteExecutor: build-agent-7]",
+			"[2/6] Compile [x64] Module.Game.cpp [Cache]",
+			"[3/6] Compile [x64] Bar.cpp [NoUba]",
+			"[4/6][GameEditor Win64 Development] Compile [x64] Baz.cpp",
+			"[5/6] (Wall: 1.20s CPU: 1.10s Mem: 512 MB) Compile [x64] Qux.cpp",
+			"[6/6] Link [x64] UnrealEditor-Game.dll",
+		]);
+
+		CollectionAssert.AreEqual(new[] { "Foo.cpp", "Module.Game.cpp", "Bar.cpp", "Baz.cpp", "Qux.cpp", "UnrealEditor-Game.dll" },
+			Summary.Actions.Select(Action => Action.Item).ToArray());
+		CollectionAssert.AreEqual(new[] { "Compile", "Compile", "Compile", "Compile", "Compile", "Link" }, Summary.Actions.Select(Action => Action.Kind).ToArray());
 	}
 }

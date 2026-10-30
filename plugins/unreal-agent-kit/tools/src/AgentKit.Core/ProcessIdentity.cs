@@ -81,6 +81,22 @@ public readonly record struct ProcessIdentity(int Pid, DateTime? StartTimeUtc)
 		return running is not null && StartTimesMatch(StartTimeUtc, running.Value.StartTimeUtc);
 	}
 
+	/// <summary>
+	/// Whether this process surely still runs: a process with <see cref="Pid"/> runs, and both start times are known and match
+	/// within <see cref="StartTimeTolerance"/>. Unlike <see cref="IsAlive"/>, an unknown start time on either side counts as
+	/// gone, so a protected process (whose start time can't be read) that reuses the ID is never taken for this one. For
+	/// records whose owner, taken for alive by mistake, would let a check pass that must not (a mutation journal, a quiet hold).
+	/// </summary>
+	public bool IsSurelyAlive()
+	{
+		if (StartTimeUtc is null)
+		{
+			return false;
+		}
+		ProcessIdentity? running = TryGet(Pid);
+		return running?.StartTimeUtc is DateTime start && StartTimesMatch(StartTimeUtc, start);
+	}
+
 	/// <summary>Whether two start times name the same process start: either is unknown, or they are within <see cref="StartTimeTolerance"/>.</summary>
 	public static bool StartTimesMatch(DateTime? a, DateTime? b)
 	{

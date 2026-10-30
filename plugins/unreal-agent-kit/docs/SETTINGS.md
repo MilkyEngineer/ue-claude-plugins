@@ -75,7 +75,7 @@ See [INSTALL.md](INSTALL.md) for what each one means. `UAK_COMMAND_PATHS` takes 
 
 `UAK_PROJECT_COMMANDS=1` makes `uak` load the command DLLs in `<Project>/.uak/commands/`, which then run with your rights. Set it only in `settings.local.json`, and only for a project whose `.uak/commands/` you trust: a checked-in `settings.json` would turn it on for everyone who clones the project.
 
-Leave `UAK_LOCK_NAME` and `UAK_LOCK_PRIORITY` unset here: `uak runs start` sets them for each run, and `-priority=` sets the priority per call.
+Leave `UAK_LOCK_NAME`, `UAK_LOCK_PRIORITY` and `UAK_RUN_NAME` unset here: `uak runs start` sets them for each run, and `-priority=` sets the priority per call.
 
 ## What a plugin cannot set
 

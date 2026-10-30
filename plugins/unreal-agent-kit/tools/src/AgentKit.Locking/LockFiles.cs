@@ -100,6 +100,12 @@ public sealed class LockHolderInfo
 	/// </summary>
 	public string? CommandJob { get; set; }
 
+	/// <summary>
+	/// Addition: a quiet hold (<c>uak test -quiet</c>, for benchmarks): while its holder lives, <c>uak compile</c>, which
+	/// otherwise needs no lock, waits for it too.
+	/// </summary>
+	public bool Quiet { get; set; }
+
 	/// <summary>The holding process as an identity.</summary>
 	[JsonIgnore]
 	public ProcessIdentity Process => new(Pid, ProcessStart);
@@ -117,6 +123,7 @@ internal sealed class LockPaths
 		LockDirectory = Path.Combine(stateDirectory.FullName, "Lock");
 		QueueDirectory = Path.Combine(LockDirectory, "Queue");
 		HolderFile = Path.Combine(LockDirectory, "holder.json");
+		CompilesDirectory = Path.Combine(LockDirectory, "Compiles");
 	}
 
 	/// <summary>&lt;State&gt;/Lock.</summary>
@@ -127,6 +134,9 @@ internal sealed class LockPaths
 
 	/// <summary>&lt;State&gt;/Lock/holder.json.</summary>
 	public string HolderFile { get; }
+
+	/// <summary>&lt;State&gt;/Lock/Compiles: one marker per running <c>uak compile</c>, which a quiet hold waits for.</summary>
+	public string CompilesDirectory { get; }
 }
 
 /// <summary>The queue's tickets: naming, listing (with dead tickets removed) and creating.</summary>

@@ -14,6 +14,7 @@ public sealed class CookedTestTests
 		Lock = lockProvider ?? new FakeLock(),
 		HostPlatform = UnrealPlatform.Win64,
 		GetEnvironmentVariable = _ => null,
+		CaptureTree = TestSupportTrees.None,
 	};
 
 	/// <summary>A sandbox with the engine's RunUAT script.</summary>
@@ -430,8 +431,8 @@ public sealed class CookedTestTests
 		Assert.Contains("missing: Project.Scaffold.Other (did not complete)", Box.Logger.Text);
 		Assert.Contains("unexpected: Project.Scaffold.ModulesLoaded", Box.Logger.Text);
 		Assert.Contains("problem: 1 expected test did not pass", Box.Logger.Text);
-		Assert.Contains("problem: 1 test completed that was not expected", Box.Logger.Text);
-		Assert.Contains("test: FAILED: 1 of 1 passed", Box.Logger.Text);
+		Assert.DoesNotContain("not expected", Box.Logger.Text);
+		Assert.Contains("test: FAILED: 0 of 1 listed passed; 1 unexpected (1 passed); 1 of 1 passed", Box.Logger.Text);
 		using JsonDocument Result = JsonDocument.Parse(File.ReadAllText(ResultFile));
 		JsonElement Missing = Result.RootElement.GetProperty("Expect").GetProperty("Missing")[0];
 		Assert.AreEqual("Project.Scaffold.Other", Missing.GetProperty("Name").GetString());
@@ -456,10 +457,15 @@ public sealed class CookedTestTests
 		Assert.AreEqual(0, await Command.RunAsync(Box.Context(), ["-filter=Project.Math", "-expect=" + All], CancellationToken.None), Box.Logger.Text);
 		Assert.Contains("expect: 17 of 17 expected tests passed, 0 unexpected (18 listed in", Box.Logger.Text);
 
+		// Every listed test passed, and others completed too: reported apart from a failure, with its own exit code.
 		string One = ExpectFile(Box, "Project.Math.Clamp");
-		Assert.AreEqual(1, await Command.RunAsync(Box.Context(), ["-filter=Project.Math", "-expect=" + One], CancellationToken.None));
+		Assert.AreEqual(TestCommand.UnexpectedTestsExitCode, await Command.RunAsync(Box.Context(), ["-filter=Project.Math", "-expect=" + One], CancellationToken.None));
 		Assert.Contains("unexpected: Project.Math.Lerp", Box.Logger.Text);
-		Assert.Contains("problem: 16 tests completed that were not expected", Box.Logger.Text);
+		Assert.Contains("test: PASSED: 1 of 1 listed passed; 16 unexpected (16 passed); 17 of 17 passed, 0 failed, 0 skipped; found 17.", Box.Logger.Text);
+		Assert.Contains("unexpected: 16 tests the -expect file doesn't list completed: exit code 3 (-allow-unexpected accepts them)", Box.Logger.Text);
+		Assert.AreEqual(0, await Command.RunAsync(Box.Context(), ["-filter=Project.Math", "-expect=" + One, "-allow-unexpected"], CancellationToken.None));
+		Assert.Contains("accepted (-allow-unexpected)", Box.Logger.Text);
+		Assert.AreEqual(2, await Command.RunAsync(Box.Context(), ["-filter=Project.Math", "-allow-unexpected"], CancellationToken.None));
 	}
 
 	// ---- the editor's never-completed tests ----

@@ -31,6 +31,9 @@ public sealed class EditorLockOptions
 	/// before it goes ahead anyway, with a warning.
 	/// </summary>
 	public TimeSpan OrphanedCommandTimeout { get; init; } = TimeSpan.FromSeconds(30);
+
+	/// <summary>Take a quiet hold (<see cref="LockHolderInfo.Quiet"/>), which <c>uak compile</c> waits for too (<see cref="QuietRuns"/>).</summary>
+	public bool Quiet { get; init; }
 }
 
 /// <summary>
@@ -140,6 +143,7 @@ public static class EditorLock
 		EditorLockHold? nested = HeldMarkers.TryJoin(HeldMarkers.Inherited, mutexName, scope, paths, resolvedName, logger);
 		if (nested is not null)
 		{
+			CheckJoinable(nested, options, resolvedName);
 			return nested;
 		}
 
@@ -171,7 +175,7 @@ public static class EditorLock
 					try
 					{
 						await WaitForOrphanedCommandAsync(paths, scope, options.OrphanedCommandTimeout, poll, logger, cancellationToken).ConfigureAwait(false);
-						return EditorLockHold.Create(mutex, paths, mutexName, scope, resolvedName, resolvedPriority, self, queued, options.Command, logger);
+						return EditorLockHold.Create(mutex, paths, mutexName, scope, resolvedName, resolvedPriority, self, queued, options.Command, options.Quiet, logger);
 					}
 					catch
 					{
@@ -183,6 +187,21 @@ public static class EditorLock
 				continue;
 			}
 			await Task.Delay(poll, cancellationToken).ConfigureAwait(false);
+		}
+	}
+
+	/// <summary>
+	/// Refuses to join a hold that can't give what the request asks for: a quiet hold (<see cref="EditorLockOptions.Quiet"/>)
+	/// inside a hold that isn't quiet. The quiet flag is the holder's (holder.json), which a joined hold can't set, so
+	/// <c>uak compile</c> would not wait for it. A refusal: a usage error (exit 2), like the quiet run's other refusals.
+	/// </summary>
+	internal static void CheckJoinable(EditorLockHold nested, EditorLockOptions options, string name)
+	{
+		if (options.Quiet && !nested.Info.Quiet)
+		{
+			throw new UakUsageException(
+				$"'{name}' asks for a quiet hold (-quiet), but it runs inside the hold of '{nested.Info.Name}', which is not quiet, and a joined hold " +
+				"can't make it quiet: `uak compile` would not wait for it. Run the quiet command on its own, outside `uak lock run`.");
 		}
 	}
 
@@ -371,6 +390,32 @@ public static class EditorLock
 		return priority ?? LockPriorities.Parse(Environment.GetEnvironmentVariable(PriorityVariable)) ?? LockPriority.Normal;
 	}
 
+	/// <summary>
+	/// The holder of the hold of this context's lock that this process inherited (<see cref="HeldVariable"/>), when holder.json
+	/// still records that hold, on this machine; null when this process runs under no hold of this lock. It says nothing about
+	/// whether the holder still runs: check its <see cref="LockHolderInfo.Process"/>.
+	/// </summary>
+	public static LockHolderInfo? GetInheritedHolder(UakContext context)
+	{
+		return GetInheritedHolder(context, HeldMarkers.Inherited);
+	}
+
+	/// <summary>As <see cref="GetInheritedHolder(UakContext)"/>, for a given <see cref="HeldVariable"/> value (for tests).</summary>
+	public static LockHolderInfo? GetInheritedHolder(UakContext context, string? inherited)
+	{
+		ArgumentNullException.ThrowIfNull(context);
+		string mutexName = GetMutexName(context);
+		List<string> holdIds = [.. HeldMarkers.Parse(inherited)
+			.Where(marker => marker.HoldId.Length > 0 && string.Equals(marker.MutexName, mutexName, StringComparison.OrdinalIgnoreCase))
+			.Select(marker => marker.HoldId)];
+		if (holdIds.Count == 0)
+		{
+			return null;
+		}
+		LockHolderInfo? holder = StateFiles.ReadJson<LockHolderInfo>(new LockPaths(context.StateDirectory).HolderFile);
+		return holder is not null && !LockQueue.IsOtherMachine(holder.Machine) && holdIds.Contains(holder.HoldId, StringComparer.Ordinal) ? holder : null;
+	}
+
 	/// <summary>Who holds the lock and who waits, for status output. Removes dead tickets on the way.</summary>
 	public static EditorLockStatus GetStatus(UakContext context)
 	{
@@ -446,7 +491,7 @@ public sealed class EditorLockHold : IAsyncDisposable, IDisposable
 	}
 
 	internal static EditorLockHold Create(IDisposable mutex, LockPaths paths, string mutexName, EditorLockScope scope, string name, LockPriority priority,
-		ProcessIdentity self, DateTime queued, string? command, ILogger logger)
+		ProcessIdentity self, DateTime queued, string? command, bool quiet, ILogger logger)
 	{
 		DateTime now = DateTime.UtcNow;
 		LockHolderInfo info = new()
@@ -462,8 +507,13 @@ public sealed class EditorLockHold : IAsyncDisposable, IDisposable
 			HoldId = Guid.NewGuid().ToString("N"),
 			Scope = scope.ToString(),
 			ScopeKey = scope.Key,
+			Quiet = quiet,
 		};
-		WriteHolder(paths, info, logger);
+		if (!WriteHolder(paths, info, logger) && quiet)
+		{
+			// Compiles learn of a quiet hold from holder.json alone: without it the hold would measure among them, unnoticed.
+			throw new EditorLockException($"Could not write {paths.HolderFile}, which tells `uak compile` to wait for this quiet hold: the quiet run can't start.");
+		}
 		logger.LogInformation("Holding the editor lock for {Scope} as '{Name}' (waited {Waited:0.0} s).", scope, name, info.WaitedSeconds);
 		return new EditorLockHold(mutex, paths, info, mutexName, scope, logger);
 	}
@@ -474,16 +524,18 @@ public sealed class EditorLockHold : IAsyncDisposable, IDisposable
 		return new EditorLockHold(null, paths, outer, mutexName, scope, logger);
 	}
 
-	private static void WriteHolder(LockPaths paths, LockHolderInfo info, ILogger logger)
+	/// <summary>Writes holder.json; returns whether it did. A failure is a warning: the lock is held even without it.</summary>
+	private static bool WriteHolder(LockPaths paths, LockHolderInfo info, ILogger logger)
 	{
 		try
 		{
-			// For status only: the lock is held even if this fails.
 			StateFiles.WriteJson(paths.HolderFile, info);
+			return true;
 		}
 		catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
 		{
 			logger.LogWarning("Could not write {File}: {Message}", paths.HolderFile, exception.Message);
+			return false;
 		}
 	}
 
@@ -528,7 +580,7 @@ public sealed class EditorLockHold : IAsyncDisposable, IDisposable
 		Info.CommandPid = process.Pid;
 		Info.CommandProcessStart = process.StartTimeUtc;
 		Info.CommandJob = job;
-		WriteHolder(_paths, Info, _logger);
+		_ = WriteHolder(_paths, Info, _logger);
 	}
 
 	/// <summary>Releases the lock. Safe to call more than once.</summary>

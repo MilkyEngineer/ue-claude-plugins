@@ -18,17 +18,16 @@ public sealed record MissingTest(string Name, string? Result)
 /// <param name="Unexpected">Completed tests (any result) that were not expected.</param>
 public sealed record ExpectCheck(IReadOnlyList<MissingTest> Missing, IReadOnlyList<string> Unexpected)
 {
-	/// <summary>Why the run does not match what was expected, or an empty list when it does.</summary>
+	/// <summary>
+	/// Why the run fails what was expected: an expected test that did not pass. Empty when each passed. An unexpected test is
+	/// not a failure in itself (a failed one already fails the run): <c>uak test</c> reports it apart, with its own exit code.
+	/// </summary>
 	public List<string> Problems()
 	{
 		List<string> Result = [];
 		if (Missing.Count > 0)
 		{
 			Result.Add($"{Missing.Count} expected test{(Missing.Count == 1 ? "" : "s")} did not pass");
-		}
-		if (Unexpected.Count > 0)
-		{
-			Result.Add($"{Unexpected.Count} test{(Unexpected.Count == 1 ? "" : "s")} completed that {(Unexpected.Count == 1 ? "was" : "were")} not expected");
 		}
 		return Result;
 	}
@@ -96,8 +95,8 @@ public sealed class ExpectedTests
 	}
 
 	/// <summary>
-	/// Compares a run with the expected tests: each must have a "Test Completed. Result={Success}" line with its exact path,
-	/// and no other test may have a "Test Completed" line.
+	/// Compares a run with the expected tests: each must have a "Test Completed. Result={Success}" line with its exact path
+	/// (else it is missing), and any other test with a "Test Completed" line is unexpected.
 	/// </summary>
 	public ExpectCheck Check(AutomationLogSummary summary)
 	{

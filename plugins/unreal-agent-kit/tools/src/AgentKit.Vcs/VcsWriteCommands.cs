@@ -172,6 +172,9 @@ public sealed class VcsShelveCommand : PerforceCommandBase
 		"                naming it. Refused while an auto-submit Horde preflight of the changelist runs, when a Horde server\n" +
 		"                is configured: Horde submits the changelist's current shelf when the preflight succeeds. When Horde\n" +
 		"                can't be asked, uak warns and shelves.\n" +
+		"                Refused (exit 2) while a uak mutate journal is left (`uak mutate -status`): a mutation run may have its\n" +
+		"                patch in the files, and the shelf would ship it. Checked first, and again just before p4 shelves (then\n" +
+		"                exit 1, naming a changelist uak created).\n" +
 		"  -keep-unopened  p4 shelve -f instead (the behaviour before 0.3.3): opened files are shelved over their shelved\n" +
 		"                copies, and shelved files that are no longer opened STAY on the shelf (listed as kept: a preflight\n" +
 		"                builds them and a submit of the shelf would include them). Use it when the shelf is the only copy of\n" +
@@ -232,8 +235,27 @@ public sealed class VcsShelveCommand : PerforceCommandBase
 		return (p4, token) => ShelveFilesAsync(p4, files, description ?? DefaultDescription, force, token);
 	}
 
+	/// <summary>
+	/// Refuses while a <c>uak mutate</c> journal is left (<see cref="MutationFolders.DescribeLeft"/>): a mutation run's patch may be
+	/// in the files, and a shelf would ship it. First (nothing changed yet) a usage error; <paramref name="late"/>, just before
+	/// p4 shelves, a <see cref="VcsException"/>, so a changelist uak created is named. Without a project it can't see the
+	/// journals: the first check warns so (<see cref="MutationFolders.DescribeUnchecked"/>).
+	/// </summary>
+	void CheckNoMutation(bool late)
+	{
+		if (!late && MutationFolders.DescribeUnchecked(Context.ProjectFile, "shelve") is string blind)
+		{
+			Context.Logger.LogWarning("{Message}", blind);
+		}
+		if (MutationFolders.DescribeLeft(Context.StateDirectory, "shelve") is string refusal)
+		{
+			throw late ? new VcsException(refusal) : new UakUsageException(refusal);
+		}
+	}
+
 	async Task<int> ShelveFilesAsync(PerforceVersionControl p4, List<string> files, string description, bool force, CancellationToken cancellationToken)
 	{
+		CheckNoMutation(late: false);
 		// Every file must already be opened here, before anything changes.
 		IReadOnlyDictionary<string, PerforceFileResult> opened = await p4.GetOpenedAsync(files, cancellationToken).ConfigureAwait(false);
 		List<string> notOpened = files.Select(Path.GetFullPath).Where(path => !opened.ContainsKey(path)).ToList();
@@ -319,8 +341,11 @@ public sealed class VcsShelveCommand : PerforceCommandBase
 	{
 		if (!created)
 		{
+			CheckNoMutation(late: false);
 			await CheckGuardsAsync(change, cancellationToken).ConfigureAwait(false);
 		}
+		// Again just before p4 shelves: a mutation run may have started meanwhile.
+		CheckNoMutation(late: true);
 		// Replacing drops the shelved files that uak sees are not opened (each is printed); one that leaves the changelist
 		// while uak shelves still fails (see PerforceVersionControl.ShelveAsync).
 		PerforceShelveResult result = await p4.ShelveAsync(change, mode, dropUnopened: mode == ShelveMode.Replace, cancellationToken).ConfigureAwait(false);

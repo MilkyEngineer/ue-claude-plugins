@@ -53,6 +53,22 @@ public sealed class ProcessIdentityTests
 	}
 
 	[TestMethod]
+	public void SurelyAliveNeedsBothStartTimesKnown()
+	{
+		DateTime start = ProcessIdentity.Current.StartTimeUtc!.Value;
+		Assert.IsTrue(new ProcessIdentity(Environment.ProcessId, start).IsSurelyAlive());
+		Assert.IsFalse(new ProcessIdentity(Environment.ProcessId, null).IsSurelyAlive(), "An unknown recorded start never matches.");
+		Assert.IsFalse(new ProcessIdentity(Environment.ProcessId, start.AddMinutes(-5)).IsSurelyAlive());
+		Assert.IsFalse(new ProcessIdentity(int.MaxValue - 1, start).IsSurelyAlive());
+		if (OperatingSystem.IsWindows() && ProcessIdentity.TryGet(4) is { StartTimeUtc: null } system)
+		{
+			// The System process: it runs, but its start time can't be read, as for a protected process that reuses an ID.
+			Assert.IsTrue(new ProcessIdentity(system.Pid, start).IsAlive());
+			Assert.IsFalse(new ProcessIdentity(system.Pid, start).IsSurelyAlive());
+		}
+	}
+
+	[TestMethod]
 	public void InvalidIdsAreNotRunning()
 	{
 		Assert.IsNull(ProcessIdentity.TryGet(0));

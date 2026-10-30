@@ -468,4 +468,68 @@ public sealed class VcsWriteCommandTests
 		Assert.IsTrue(commands.All(command => !command.RequiresEngine));
 		Assert.IsTrue(commands.All(command => command.Usage.Contains("Perforce only", StringComparison.Ordinal)));
 	}
+
+	[TestMethod]
+	public async Task ShelveIsRefusedWhileAMutationJournalIsLeft()
+	{
+		using TempDirectory root = new();
+		string game = root.Write("Source/Game/Game.cpp");
+		root.Write("Saved/AgentKit/Mutations/M1/journal.json", "{ \"Name\": \"M1\", \"Files\": [ { \"Path\": \"" + game.Replace("\\", "\\\\", StringComparison.Ordinal) + "\" } ] }");
+		FakePerforceConnection connection = new FakePerforceConnection(root.Path).On("change", "change-o-pending").On("shelve", "shelve").On("describe", "describe-s-pending");
+
+		UakUsageException refused = await Assert.ThrowsExactlyAsync<UakUsageException>(() => RunAsync(new VcsShelveCommand { Guards = () => [] }, root, connection, Token, "-c=12346"));
+		StringAssert.Contains(refused.Message, "uak mutate journal is left");
+		StringAssert.Contains(refused.Message, game);
+		await Assert.ThrowsExactlyAsync<UakUsageException>(() => RunAsync(new VcsShelveCommand { Guards = () => [] }, root, connection, Token, game));
+		Assert.IsFalse(connection.Calls.Any(call => call.Command is "shelve" or "change" or "reopen"), "nothing was shelved, created or moved");
+
+		// A folder without a journal or copies changed nothing: it doesn't stop a shelve.
+		File.Delete(root.Combine("Saved/AgentKit/Mutations/M1/journal.json"));
+		Assert.AreEqual(UakExitCodes.Success, (await RunAsync(new VcsShelveCommand { Guards = () => [] }, root, connection, Token, "-c=12346")).ExitCode);
+	}
+
+	[TestMethod]
+	public async Task ShelveWarnsThatItCannotSeeMutationsWithoutAProject()
+	{
+		using TempDirectory root = new();
+		FakePerforceConnection connection = new FakePerforceConnection(root.Path).On("change", "change-o-pending").On("shelve", "shelve").On("describe", "describe-s-pending");
+		using StringWriter output = new();
+		VcsShelveCommand command = new()
+		{
+			Guards = () => [],
+			Output = output,
+			ErrorOutput = output,
+			Detect = (_, _, _) => Task.FromResult(new VcsDetection(new PerforceVersionControl(connection, root.Directory), "test")),
+		};
+		CapturingLogger logger = new();
+		// No project: the journals are in a project's state folder, which uak can't find from here.
+		UakContext context = new() { StateDirectory = new DirectoryInfo(root.Combine("Saved/AgentKit")), Logger = logger };
+
+		Assert.AreEqual(UakExitCodes.Success, await command.RunAsync(context, ["-c=12346"], Token));
+
+		StringAssert.Contains(logger.Lines.Single(line => line.Contains("No Unreal project was found", StringComparison.Ordinal)), "uak mutate -status");
+		(int exitCode, _, _, List<string> log) = await RunCapturedAsync(new VcsShelveCommand { Guards = () => [] }, root, connection, Token, "-c=12346");
+		Assert.AreEqual(UakExitCodes.Success, exitCode);
+		Assert.IsFalse(log.Any(line => line.Contains("No Unreal project", StringComparison.Ordinal)), "with a project, the guard sees its journals");
+	}
+
+	[TestMethod]
+	public void StatusAndChangedWarnWhileAMutationJournalIsLeft()
+	{
+		using TempDirectory root = new();
+		string game = root.Write("Source/Game/Game.cpp");
+		CapturingLogger logger = new();
+		UakContext context = new() { StateDirectory = new DirectoryInfo(root.Combine("Saved/AgentKit")), Logger = logger };
+		VcsCommandBase.WarnAboutMutations(context);
+		Assert.IsEmpty(logger.Lines);
+
+		root.Write("Saved/AgentKit/Mutations/M1/journal.json", "{ \"Name\": \"M1\", \"Files\": [ { \"Path\": \"" + game.Replace("\\", "\\\\", StringComparison.Ordinal) + "\" } ] }");
+		VcsCommandBase.WarnAboutMutations(context);
+
+		StringAssert.Contains(logger.Lines.Single(), game);
+		StringAssert.Contains(logger.Lines.Single(), "uak mutate -status");
+		Assert.IsTrue(new VcsStatusCommand().WarnsAboutMutations);
+		Assert.IsTrue(new VcsChangedCommand().WarnsAboutMutations);
+		Assert.IsFalse(new VcsRevisionCommand().WarnsAboutMutations);
+	}
 }

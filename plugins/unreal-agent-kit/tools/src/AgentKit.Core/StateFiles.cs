@@ -29,16 +29,40 @@ public static class StateFiles
 		WriteBytes(path, UakJson.SerializeToUtf8(value));
 	}
 
+	/// <summary>
+	/// As <see cref="WriteJson{T}(string, T)"/>; with <paramref name="durable"/>, the bytes reach the disk before the rename
+	/// (<see cref="WriteBytes(string, byte[], bool)"/>).
+	/// </summary>
+	public static void WriteJson<T>(string path, T value, bool durable)
+	{
+		WriteBytes(path, UakJson.SerializeToUtf8(value), durable);
+	}
+
 	/// <summary>Writes bytes whole (see <see cref="WriteText"/>): a temporary file, then a rename; the last writer wins.</summary>
 	public static void WriteBytes(string path, byte[] bytes)
 	{
+		WriteBytes(path, bytes, durable: false);
+	}
+
+	/// <summary>
+	/// Writes bytes whole (see <see cref="WriteText"/>). With <paramref name="durable"/>, the temporary file is flushed to
+	/// the disk before the rename, so a power loss or a crash of the machine never leaves the new name on an empty or
+	/// partial file: for records a later run must be able to trust (a mutation journal and its copies).
+	/// </summary>
+	public static void WriteBytes(string path, byte[] bytes, bool durable)
+	{
+		ArgumentNullException.ThrowIfNull(bytes);
 		string fullPath = Path.GetFullPath(path);
 		Directory.CreateDirectory(Path.GetDirectoryName(fullPath)!);
 		string temp = $"{fullPath}.{Environment.ProcessId}.{Guid.NewGuid():N}.tmp";
-		File.WriteAllBytes(temp, bytes);
-		DateTime deadline = DateTime.UtcNow + s_replaceTimeout;
 		try
 		{
+			using (FileStream stream = new(temp, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+			{
+				stream.Write(bytes);
+				stream.Flush(flushToDisk: durable);
+			}
+			DateTime deadline = DateTime.UtcNow + s_replaceTimeout;
 			while (true)
 			{
 				try

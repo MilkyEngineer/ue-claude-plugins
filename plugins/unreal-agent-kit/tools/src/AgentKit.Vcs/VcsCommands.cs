@@ -76,7 +76,12 @@ public abstract class VcsCommandBase : IUakCommand
 
 		try
 		{
-			return await RunAsync(detection, parsed, cancellationToken).ConfigureAwait(false);
+			int exitCode = await RunAsync(detection, parsed, cancellationToken).ConfigureAwait(false);
+			if (WarnsAboutMutations)
+			{
+				WarnAboutMutations(context);
+			}
+			return exitCode;
 		}
 		catch (VcsException exception)
 		{
@@ -86,6 +91,19 @@ public abstract class VcsCommandBase : IUakCommand
 		finally
 		{
 			detection.VersionControl.Dispose();
+		}
+	}
+
+	/// <summary>Whether the command warns (on the log, so -json stays clean) when a <c>uak mutate</c> journal is left: its files may hold a mutation.</summary>
+	internal virtual bool WarnsAboutMutations => false;
+
+	/// <summary>Warns for each <c>uak mutate</c> journal left (<see cref="MutationFolders.ListLeft"/>): its files may hold a mutation that a commit or shelve would ship.</summary>
+	internal static void WarnAboutMutations(UakContext context)
+	{
+		foreach (MutationFolder folder in MutationFolders.ListLeft(context.StateDirectory))
+		{
+			context.Logger.LogWarning("The uak mutate journal '{Name}' is left: {Files} may hold a mutation, so don't commit, shelve or preflight them until `uak mutate -status` exits 0.",
+				folder.Name, folder.Files.Count == 0 ? $"the files it lists (in {folder.Directory})" : string.Join(", ", folder.Files));
 		}
 	}
 
@@ -145,7 +163,10 @@ public sealed class VcsStatusCommand : VcsCommandBase
 		"  Without paths: the system, its root, the current revision and how it was detected.\n" +
 		"  With paths: one line per file: Unmodified, Modified, Added, Deleted, Renamed, Copied, TypeChanged, Conflicted, Untracked, Ignored or Unknown.\n" +
 		"  -vcs=     override detection (like the global -vcs= and UAK_VCS).\n" +
-		"  -json     print JSON instead of text.";
+		"  -json     print JSON instead of text.\n" +
+		"  A warning names each uak mutate journal left, and its files: they may hold a mutation (`uak mutate -status`).";
+
+	internal override bool WarnsAboutMutations => true;
 
 	internal override VcsArguments ParseArguments(IReadOnlyList<string> arguments) => VcsArguments.Parse(arguments, allowPaths: true, allowPathFilter: false);
 
@@ -196,7 +217,10 @@ public sealed class VcsChangedCommand : VcsCommandBase
 		"  One line per file: its state and absolute path. Ignored files are not listed.\n" +
 		"  -path=    limit to a file or directory.\n" +
 		"  -vcs=     override detection (like the global -vcs= and UAK_VCS).\n" +
-		"  -json     print JSON instead of text.";
+		"  -json     print JSON instead of text.\n" +
+		"  A warning names each uak mutate journal left, and its files: they may hold a mutation (`uak mutate -status`).";
+
+	internal override bool WarnsAboutMutations => true;
 
 	internal override VcsArguments ParseArguments(IReadOnlyList<string> arguments) => VcsArguments.Parse(arguments, allowPaths: false, allowPathFilter: true);
 

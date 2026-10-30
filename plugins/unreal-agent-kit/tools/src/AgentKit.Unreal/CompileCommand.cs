@@ -2,6 +2,7 @@
 
 using System.Diagnostics;
 using AgentKit.Core;
+using AgentKit.Locking;
 using Microsoft.Extensions.Logging;
 
 namespace AgentKit.Unreal;
@@ -11,7 +12,7 @@ namespace AgentKit.Unreal;
 /// platform's real compiler and the module's real compile environment. The files go to UBT in a list file (-FileList=, the
 /// same as one -SingleFile= each), so any number of them fits on the command line. Nothing is linked and no binary changes,
 /// so it needs no editor lock and runs while an editor is open. UBT allows one instance per engine; -WaitMutex queues behind
-/// any other.
+/// any other. The one exception is a quiet run (<c>uak test -quiet</c>, a benchmark): a compile waits for it to end.
 /// </summary>
 public sealed class CompileCommand : IUakCommand
 {
@@ -42,23 +43,30 @@ public sealed class CompileCommand : IUakCommand
 		                            A header is compiled on its own through a generated file (it must be self-contained).
 		  -dependents               Also compile every source file of the target that includes a given header
 		                            (UBT -SingleFileBuildDependents). Each dependent gets its own line; the header
-		                            still counts as compiled only through its own generated file.
+		                            still counts as compiled only through its own generated file. A given
+		                            -MaxParallelActions is lowered to one action per 1.5 GiB of free memory, as
+		                            UBT limits its own default (which a given value turns off).
 		  -target=<name>            The UBT target (default: the project's editor target).
 		  -config=<name>            Default Development.
 		  -platform=<name>          Default host.
 		  -MaxParallelActions=<n>   Default UAK_MAX_PARALLEL_ACTIONS, else UBT's own.
 		  -maxerrors=<n>            Errors to print (default 10).
-		  -resultfile=<path>        Also write the result as JSON.
+		  -resultfile=<path>        Also write the result as JSON. Deleted first, so an old one is never read
+		                            as this run's; a refused or stopped run writes Outcome refused or stopped.
 		  -- <UBT option>...        More UBT options, passed as given. Rejected as for uak build (see uak help build),
 		                            and -SingleFile, -File, -Files, -FileList and -SingleFileBuildDependents,
 		                            which uak sets (the files go to UBT in a list beside the log).
+		No editor lock is taken, but while a quiet run (uak test -quiet) holds the lock, the compile waits for it, for
+		up to 30 minutes, saying every 5 that it still waits; then it compiles, with a warning.
+		While a uak mutate run has its patch in the tree, it warns that it compiles the mutant; it refuses while a
+		stopped mutation run has left its patch in the files (`uak mutate -restore`).
 		Exit code: 0 clean, 1 errors, 2 usage or setup error (including a file UBT did not compile).
 		""";
 
 	/// <inheritdoc/>
 	public Task<int> RunAsync(UakContext context, IReadOnlyList<string> arguments, CancellationToken cancellationToken)
 	{
-		return UnrealServices.GuardAsync(context, () => RunCheckedAsync(context, arguments, cancellationToken));
+		return UnrealServices.GuardAsync(context, () => UnrealServices.WithFreshResultFileAsync("compile", arguments, () => RunCheckedAsync(context, arguments, cancellationToken)));
 	}
 
 	async Task<int> RunCheckedAsync(UakContext context, IReadOnlyList<string> arguments, CancellationToken cancellationToken)
@@ -83,6 +91,16 @@ public sealed class CompileCommand : IUakCommand
 		string ProjectDirectory = Path.GetDirectoryName(Project)!;
 		EngineLayout Paths = Services.Paths(context);
 		Target ??= TargetResolver.ResolveEditorTarget(Project);
+		if (Dependents && MaxParallel is int Requested)
+		{
+			long? Free = Services.FreeMemoryBytes();
+			MaxParallel = MemoryLimits.Limit(Requested, Free);
+			if (MaxParallel < Requested)
+			{
+				context.Logger.LogInformation("-MaxParallelActions={Requested} lowered to {Limited}: {Free:0.0} GiB free memory, 1.5 GiB per action (UBT's rule).",
+					Requested, MaxParallel, Free / (1024.0 * 1024 * 1024));
+			}
+		}
 
 		List<SourceFile> Files = [];
 		foreach (string Argument in Arguments.Positional)
@@ -111,6 +129,13 @@ public sealed class CompileCommand : IUakCommand
 
 		// Named first, and written as it goes, so a long compile can be followed in its log while it runs.
 		context.Logger.LogInformation("Log: {Log}", LogFile);
+		// While a quiet run measures, wait for it; then record this compile, so a quiet run that starts meanwhile waits for it.
+		using IDisposable Gate = await Services.EnterCompile(context, cancellationToken).ConfigureAwait(false);
+		// No lock, so a mutation run may be applying its patch right now (a warning), or a stopped one may have left it (refused).
+		foreach (string Warning in MutationJournal.CheckForCompile(context))
+		{
+			context.Logger.LogWarning("Mutation: {Warning}.", Warning);
+		}
 		context.Logger.LogInformation("Compiling {Count} file(s) for {Target} {Platform} {Configuration} (UBT -SingleFile)...", Files.Count, Target, Platform.Name, Configuration);
 		BuildLogParser Parser = new();
 		UbtProgress Progress = new(Services.Clock, UbtProgress.DefaultInterval, Text => context.Logger.LogInformation("  {Progress}", Text));

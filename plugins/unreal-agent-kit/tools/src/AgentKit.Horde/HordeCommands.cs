@@ -1057,7 +1057,9 @@ public sealed class HordePreflightCommand : HordeCommandBase
 		"               each is listed (\"removed from the shelf\"), and so are shelved files whose content changed. Refused\n" +
 		"               when nothing is opened in the change, and while an auto-submit preflight of the change is running\n" +
 		"               (Horde submits the change's CURRENT shelf when it succeeds), checked before shelving and again just\n" +
-		"               before. Agents use it only on changelists they created.\n" +
+		"               before. Agents use it only on changelists they created. Also refused while a uak mutate journal is\n" +
+		"               left (`uak mutate -status`): a mutation run may have its patch in the files, and the shelf would ship\n" +
+		"               it; checked first and again just before shelving.\n" +
 		"  -keep-unopened  with -shelve: p4 shelve -f instead (the behaviour before 0.3.3): shelved files that are no longer\n" +
 		"               opened STAY on the shelf, listed as kept; the preflight builds them, and a submit would include them.\n" +
 		"  -force       start a new preflight even when an equal one is still running. By default (without -shelve) uak\n" +
@@ -1080,8 +1082,8 @@ public sealed class HordePreflightCommand : HordeCommandBase
 		"  -no-open     with -wait: don't open the job's page in the browser this time (see uak horde config -open=).\n" + LoginUsage +
 		"  Exit codes: 0 started (with -wait: succeeded), 1 failed or did not complete, 2 usage error, 3 still running after\n" +
 		"  -timeout, 4 not signed in (the sign-in failed or timed out, or -no-login), 5 another error (including 403, not\n" +
-		"  allowed, and uak's refusals above: an auto-submit preflight of the change is running, or the shelf holds files that\n" +
-		"  aren't opened), 6 build settings needed (nothing started), 7 succeeded with warnings.";
+		"  allowed, and uak's refusals above: an auto-submit preflight of the change is running, the shelf holds files that\n" +
+		"  aren't opened, or a uak mutate journal is left), 6 build settings needed (nothing started), 7 succeeded with warnings.";
 
 	internal override Func<UakContext, CancellationToken, Task<int>> Parse(UakArguments arguments)
 	{
@@ -1134,6 +1136,17 @@ public sealed class HordePreflightCommand : HordeCommandBase
 
 		return async (context, cancellationToken) =>
 		{
+			// A mutation run's patch may be in the files: the shelf would ship it (and an auto-submit would submit it). Without a
+			// project the journals can't be seen: it warns so.
+			if (shelve && MutationFolders.DescribeUnchecked(context.ProjectFile, "shelve") is string blind)
+			{
+				context.Logger.LogWarning("{Message}", blind);
+			}
+			if (shelve && MutationFolders.DescribeLeft(context.StateDirectory, "shelve") is string mutation)
+			{
+				context.Logger.LogError("{Message}", mutation);
+				return HordeExitCodes.Error;
+			}
 			HordeServer found = ResolveServer(server);
 			HordeOpenMode open = wait ? ResolveOpen(noOpen) : HordeOpenMode.Never;
 			IPreflightWorkspace? workspace = shelve || streamId is null ? await Workspace(context, cancellationToken).ConfigureAwait(false) : null;
@@ -1238,6 +1251,10 @@ public sealed class HordePreflightCommand : HordeCommandBase
 					if (late.Count > 0)
 					{
 						throw new HordeRefusedException(ShelveRefusal(found.Url, change, late));
+					}
+					if (MutationFolders.DescribeLeft(context.StateDirectory, "shelve") is string lateMutation)
+					{
+						throw new HordeRefusedException(lateMutation);
 					}
 					shelved = await workspace!.ShelveAsync(change, shelveMode, cancellationToken).ConfigureAwait(false);
 					string how = shelveMode == ShelveMode.Replace ? "p4 shelve -r: the shelf is now exactly the opened files" : "p4 shelve -f";

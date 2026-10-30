@@ -217,8 +217,13 @@ public sealed class RunsWaitCommand : IUakCommand
 		  Reads the run's record every few seconds until the run has ended, then prints its end state and last line.
 		  -name=     the run's exact name (no wildcards)
 		  -timeout=  stop waiting after this many seconds (default: no limit)
+		  It prints "exited <code>" and, when the run's last uak build, test or mutate recorded a summary, its verdict
+		  line with that command's exit code ("Verdict: mutate 'M1' exited 6: mutate: SURVIVED: ..."), or "Verdict:
+		  none" when that command recorded no result (it was killed first).
 		  Exit code: 0 the run exited 0; 1 it exited with another code, or ended with no recorded exit code (an adopted
 		  run, or one that died or never started); 2 a usage error, or no such run; 3 -timeout passed while it still runs.
+		  1 is any code but 0: a command whose codes carry results (uak mutate's 6 survived, 3 not built, 4 inconclusive)
+		  is read from the printed code and verdict, not from this exit code.
 		  Run it in a background shell whose own time limit is longer than -timeout (and within the shell's limit), so it
 		  costs nothing while it waits. On exit 3, start another wait.
 		""";
@@ -264,7 +269,7 @@ public sealed class RunsWaitCommand : IUakCommand
 				RunState state = RunRegistry.GetState(record, DateTime.UtcNow);
 				if (state is not (RunState.Running or RunState.Starting))
 				{
-					output.Write(Describe(record, state));
+					output.Write(Describe(record, state, RunSummaries.Read(context.StateDirectory, name)));
 					return state == RunState.Exited && record.ExitCode == 0 ? UakExitCodes.Success : UakExitCodes.Failure;
 				}
 				if (timeout is TimeSpan limit && waited.Elapsed >= limit)
@@ -288,8 +293,12 @@ public sealed class RunsWaitCommand : IUakCommand
 		}
 	}
 
-	/// <summary>A finished run's end state, how long it ran, its last line and its output file.</summary>
-	internal static string Describe(RunRecord record, RunState state)
+	/// <summary>
+	/// A finished run's end state, how long it ran, its last line and its output file; with <paramref name="summaries"/>, the
+	/// last summary's verdict line too, with its command's exit code (uak mutate exits 6 when a mutation survived, which
+	/// <c>uak runs wait</c> reports as 1, so the code and the line say which it was).
+	/// </summary>
+	internal static string Describe(RunRecord record, RunState state, RunSummaryFile? summaries = null)
 	{
 		string ending = state switch
 		{
@@ -311,11 +320,157 @@ public sealed class RunsWaitCommand : IUakCommand
 		{
 			text.Append(CultureInfo.InvariantCulture, $"  Last line: {line}\n");
 		}
+		if (summaries?.Entries.LastOrDefault() is RunSummaryEntry last)
+		{
+			if (last.ExitCode is null)
+			{
+				text.Append(CultureInfo.InvariantCulture, $"  Verdict: none: its last command, {last.Command} '{last.Name}', {DescribeNoResult(last)}\n");
+			}
+			else if (last.Lines.Count > 0)
+			{
+				text.Append(CultureInfo.InvariantCulture, $"  Verdict: {last.Command} '{last.Name}' exited {last.ExitCode}: {last.Lines[^1]}\n");
+			}
+		}
 		if (!string.IsNullOrEmpty(record.OutputFile))
 		{
 			text.Append(CultureInfo.InvariantCulture, $"  Output: {record.OutputFile}\n");
 		}
 		return text.ToString();
+	}
+
+	/// <summary>
+	/// What a summary entry with no result says: the command started, and recorded nothing since; whether it still runs, when
+	/// its process is known.
+	/// </summary>
+	internal static string DescribeNoResult(RunSummaryEntry entry)
+	{
+		ArgumentNullException.ThrowIfNull(entry);
+		string started = entry.Started is DateTime time ? " " + UakJson.FormatTime(time) : "";
+		string why = entry.Pid is not int pid
+			? "it still runs, or it was killed or stopped before it could (its exit code and log say which)"
+			: entry.MayStillRun()
+				? string.Create(CultureInfo.InvariantCulture, $"it still runs (PID {pid})")
+				: string.Create(CultureInfo.InvariantCulture, $"its process (PID {pid}) is gone, so it was killed or stopped before it could (its exit code and log say which)");
+		return $"started{started} and recorded no result: {why}; no earlier result under this name is its";
+	}
+
+	/// <summary>Who recorded an entry, for a line about it: " (PID n)" when its process is known.</summary>
+	internal static string DescribeProcess(RunSummaryEntry entry) =>
+		entry?.Pid is int pid ? string.Create(CultureInfo.InvariantCulture, $" (PID {pid})") : "";
+}
+
+/// <summary>
+/// <c>uak runs show -name=&lt;name&gt;</c>: a run's end state and the summaries its <c>uak build</c>, <c>uak test</c> and
+/// <c>uak mutate</c> recorded (<see cref="RunSummaries"/>), without reading its log. The name is a detached run's, or a
+/// command's own -name= (a test run started directly).
+/// </summary>
+public sealed class RunsShowCommand : IUakCommand
+{
+	/// <inheritdoc />
+	public string Name => "runs show";
+
+	/// <inheritdoc />
+	public string Summary => "Print a run's end state and the summaries its builds, tests and mutation checks recorded.";
+
+	/// <inheritdoc />
+	public string Usage => """
+		uak runs show -name=<exact name>
+		  For a detached run (uak runs start): its state, last line and output file, then the summary of each uak build,
+		  uak test and uak mutate it ran, oldest first. For a name that is no detached run's: the last summary recorded
+		  under that -name= (uak test -name=, uak mutate -name=, uak build -name=). A command drops its name's results as
+		  it starts, so a command that is still running, or was killed before it recorded a result, shows as "recorded
+		  no result" (saying whether its process still runs), never with an earlier command's result. Two commands that
+		  run under one name at once (the default names uak-build, uak-test and uak-test-cooked are every command's that
+		  has no -name=) each keep their own entry, listed with its process ID: give each command its own -name= to tell
+		  them apart. They also share the test log named after the name (<Project>/Saved/Logs/<name>.log), which each
+		  test run replaces as it starts, so it holds the last one's (said when several are listed). Runs and commands
+		  share these names: a command started directly with -name=X drops run X's
+		  results, and `uak runs start -name=X` clears command X's, so give them different names.
+		  A summary holds the lines a command printed at its end: the tree it ran on (revision and changed files), the
+		  watched log categories, the expect check, its problems, and its verdict line.
+		  Exit code: 0 shown, 2 usage error or nothing recorded under the name.
+		""";
+
+	/// <inheritdoc />
+	public bool RequiresEngine => false;
+
+	/// <summary>Where the result goes; null for the console.</summary>
+	public TextWriter? Output { get; init; }
+
+	/// <inheritdoc />
+	public Task<int> RunAsync(UakContext context, IReadOnlyList<string> arguments, CancellationToken cancellationToken)
+	{
+		ArgumentNullException.ThrowIfNull(context);
+		UakArguments parsed = new(arguments);
+		string name = parsed.GetRequiredString("name");
+		parsed.ThrowIfUnknown();
+		parsed.ThrowIfMorePositionalThan(0);
+		// Any name a command records a summary under (uak test -name= takes more than run names do).
+		if (!RunSummaries.IsValidName(name) && !RunRegistry.IsValidName(name))
+		{
+			throw new UakUsageException($"-name= takes an exact name, a plain file name without spaces (no wildcards): '{name}'.");
+		}
+		TextWriter output = Output ?? Console.Out;
+		RunRegistry registry = new(context.StateDirectory);
+		RunRecord? record = RunRegistry.IsValidName(name) ? registry.Read(name) : null;
+		RunSummaryFile? summaries = RunSummaries.Read(context.StateDirectory, name);
+		if (record is null && summaries is null)
+		{
+			context.Logger.LogError("Nothing is recorded under '{Name}': no detached run (`uak runs list -all`) and no summary in {Directory}.",
+				name, RunSummaries.GetDirectory(context.StateDirectory));
+			return Task.FromResult(UakExitCodes.UsageError);
+		}
+		StringBuilder text = new();
+		if (record is not null)
+		{
+			RunState state = RunRegistry.GetState(record, DateTime.UtcNow);
+			if (state is RunState.Running or RunState.Starting)
+			{
+				text.Append(CultureInfo.InvariantCulture, $"Run '{record.Name}' is still {(state == RunState.Starting ? "starting" : "running")}: the summaries so far.\n");
+				if (!string.IsNullOrEmpty(record.OutputFile))
+				{
+					text.Append(CultureInfo.InvariantCulture, $"  Output: {record.OutputFile}\n");
+				}
+			}
+			else
+			{
+				text.Append(RunsWaitCommand.Describe(record, state));
+			}
+		}
+		List<RunSummaryEntry> entries = summaries?.Entries ?? [];
+		if (entries.Count == 0)
+		{
+			text.Append("No summary recorded: the run ran no uak build, test or mutate (or none has finished).\n");
+		}
+		else if (record is null && entries.Count > 1)
+		{
+			// A command's own name holds one entry per command that ran under it at the same time.
+			text.Append(CultureInfo.InvariantCulture, $"{entries.Count} commands ran under '{name}' at the same time; each line names its process.");
+			text.Append(" Give each command its own -name= to tell their results apart.");
+			if (entries.Any(entry => entry.Command is "test" or "mutate"))
+			{
+				// The editor's log is named after the name, not the command: each test run replaces it as it starts.
+				text.Append(CultureInfo.InvariantCulture, $" They also share the test log (<Project>/Saved/Logs/{name}.log, and the folder {name}/ beside it for");
+				text.Append(" a cooked run), which holds the last test run's: the log an earlier one's 'Log:' line names may now be another's.");
+			}
+			text.Append('\n');
+		}
+		foreach (RunSummaryEntry entry in entries)
+		{
+			if (entry.ExitCode is null)
+			{
+				text.Append(CultureInfo.InvariantCulture, $"{entry.Command} '{entry.Name}' {RunsWaitCommand.DescribeNoResult(entry)}.\n");
+				continue;
+			}
+			string finished = entry.Finished is DateTime time ? UakJson.FormatTime(time) : "at an unknown time";
+			text.Append(CultureInfo.InvariantCulture, $"{entry.Command} '{entry.Name}'{RunsWaitCommand.DescribeProcess(entry)}, exit code {entry.ExitCode}, finished {finished}:\n");
+			foreach (string line in entry.Lines)
+			{
+				text.Append(CultureInfo.InvariantCulture, $"  {line}\n");
+			}
+		}
+		output.Write(text.ToString());
+		return Task.FromResult(UakExitCodes.Success);
 	}
 }
 

@@ -7,8 +7,8 @@ using Microsoft.Win32.SafeHandles;
 namespace AgentKit.Core;
 
 /// <summary>
-/// A readable, resolved spelling of a path (<see cref="Get"/>), and an identity for an existing file or directory
-/// (<see cref="TryGetIdentity"/>).
+/// A readable, resolved spelling of a path (<see cref="Get"/>), an identity for an existing file or directory
+/// (<see cref="TryGetIdentity"/>), and how many hard links a file has (<see cref="TryGetLinkCount"/>).
 /// <para>
 /// <see cref="Get"/> resolves what the local file system resolves: a junction, a symbolic link or a subst drive gives its
 /// target's drive-letter path, and a mapped drive gives its UNC path. It does not make every spelling of one place equal: a
@@ -117,6 +117,84 @@ public static class CanonicalPath
 		ulong device = OperatingSystem.IsMacOS() ? BitConverter.ToUInt32(buffer, 0) : BitConverter.ToUInt64(buffer, 0);
 		ulong inode = BitConverter.ToUInt64(buffer, 8);
 		return $"unix:{device:x}:{inode:x}";
+	}
+
+	/// <summary>
+	/// How many hard links an existing file has (names in the file system for its data), following a symbolic link; null when
+	/// it does not exist or the system cannot tell.
+	/// <list type="bullet">
+	/// <item>Windows: GetFileInformationByHandleEx(FileStandardInfo)'s NumberOfLinks.</item>
+	/// <item>Linux (x64, Arm64) and Mac: stat(2)'s st_nlink. TODO(unix): untested; test on Linux and Mac.</item>
+	/// </list>
+	/// </summary>
+	/// <param name="path">A file, absolute or relative to the current directory.</param>
+	public static int? TryGetLinkCount(string path)
+	{
+		ArgumentException.ThrowIfNullOrEmpty(path);
+		string full = Path.GetFullPath(path);
+		try
+		{
+			if (OperatingSystem.IsWindows())
+			{
+				return GetLinkCountWindows(full);
+			}
+			return GetLinkCountUnix(full);
+		}
+		catch (Exception exception) when (exception is DllNotFoundException or EntryPointNotFoundException)
+		{
+			return null;
+		}
+	}
+
+	[SupportedOSPlatform("windows")]
+	private static int? GetLinkCountWindows(string fullPath)
+	{
+		using SafeFileHandle handle = WindowsNative.CreateFileW(fullPath, WindowsNative.FILE_READ_ATTRIBUTES, WindowsNative.FILE_SHARE_ALL, IntPtr.Zero,
+			WindowsNative.OPEN_EXISTING, WindowsNative.FILE_FLAG_BACKUP_SEMANTICS, IntPtr.Zero);
+		if (handle.IsInvalid)
+		{
+			return null;
+		}
+		// FILE_STANDARD_INFO: LARGE_INTEGER AllocationSize, LARGE_INTEGER EndOfFile, DWORD NumberOfLinks, BOOLEAN DeletePending, BOOLEAN Directory.
+		byte[] info = new byte[24];
+		if (!WindowsNative.GetFileInformationByHandleEx(handle, WindowsNative.FileStandardInfo, info, (uint)info.Length))
+		{
+			return null;
+		}
+		return (int)BitConverter.ToUInt32(info, 16);
+	}
+
+	[UnsupportedOSPlatform("windows")]
+	private static int? GetLinkCountUnix(string fullPath)
+	{
+		// TODO(unix): untested; test on Linux and Mac. st_nlink is at offset 16 (8 bytes) on x64 Linux, 20 (4 bytes) on Arm64
+		// Linux (the generic layout: st_mode comes first), and 6 (2 bytes) on Mac's 64-bit-inode struct stat.
+		byte[] buffer = new byte[512];
+		Architecture architecture = RuntimeInformation.ProcessArchitecture;
+		int result;
+		if (OperatingSystem.IsMacOS())
+		{
+			result = architecture == Architecture.X64 ? UnixNative.stat_inode64(fullPath, buffer) : UnixNative.stat(fullPath, buffer);
+			return result == 0 ? BitConverter.ToUInt16(buffer, 6) : null;
+		}
+		if (architecture is not (Architecture.X64 or Architecture.Arm64))
+		{
+			return null;
+		}
+		try
+		{
+			result = UnixNative.stat(fullPath, buffer);
+		}
+		catch (EntryPointNotFoundException)
+		{
+			// glibc before 2.33 exports stat only as __xstat (version 1 is the 64-bit layout on x64, 0 on Arm64).
+			result = UnixNative.__xstat(architecture == Architecture.X64 ? 1 : 0, fullPath, buffer);
+		}
+		if (result != 0)
+		{
+			return null;
+		}
+		return architecture == Architecture.X64 ? (int)BitConverter.ToUInt64(buffer, 16) : (int)BitConverter.ToUInt32(buffer, 20);
 	}
 
 	/// <summary>The canonical form of a path: absolute, links resolved, with no trailing separator (except for a root).</summary>
@@ -231,6 +309,10 @@ public static class CanonicalPath
 		public const uint FILE_SHARE_ALL = 0x00000007;
 		public const uint OPEN_EXISTING = 3;
 		public const uint FILE_FLAG_BACKUP_SEMANTICS = 0x02000000;
+		public const uint FILE_READ_ATTRIBUTES = 0x00000080;
+
+		/// <summary>FILE_INFO_BY_HANDLE_CLASS.FileStandardInfo.</summary>
+		public const int FileStandardInfo = 1;
 
 		[DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
 		public static extern SafeFileHandle CreateFileW(string lpFileName, uint dwDesiredAccess, uint dwShareMode, IntPtr lpSecurityAttributes,

@@ -1251,4 +1251,48 @@ public sealed class HordeCommandTests
 		Assert.AreEqual(HordeExitCodes.NotLoggedIn, await Setup(new HordeJobCommand(), refusing, null, output, home: home, cache: cache).RunAsync(s_context, ["-id=job1"], Token));
 		Assert.IsNull(cache.Read(s_server), "the refused token is gone");
 	}
+
+	[TestMethod]
+	public async Task ShelveIsRefusedWhileAMutationJournalIsLeft()
+	{
+		string state = Path.Combine(Path.GetTempPath(), "uak-horde-tests", Guid.NewGuid().ToString("N"));
+		Directory.CreateDirectory(Path.Combine(state, "Mutations", "M1"));
+		File.WriteAllText(Path.Combine(state, "Mutations", "M1", "0.Foo.cpp.orig"), "original\n");
+		try
+		{
+			FakeHordeApi api = WithStreams();
+			FakeWorkspace workspace = new();
+			using StringWriter output = new();
+			CapturingLogger logger = new();
+			UakContext context = new() { StateDirectory = new DirectoryInfo(state), Logger = logger };
+
+			Assert.AreEqual(HordeExitCodes.Error, await Setup(new HordePreflightCommand(), api, workspace, output).RunAsync(context, ["-c=12345", "-shelve", "-autosubmit"], Token));
+
+			Assert.IsEmpty(workspace.Shelved, "nothing shelved");
+			Assert.IsEmpty(api.Created, "nothing started");
+			StringAssert.Contains(logger.Lines.Single(line => line.StartsWith("Error:", StringComparison.Ordinal)), "uak mutate journal is left");
+		}
+		finally
+		{
+			Directory.Delete(state, recursive: true);
+		}
+	}
+
+	[TestMethod]
+	public async Task ShelveWarnsThatItCannotSeeMutationsWithoutAProject()
+	{
+		FakeHordeApi api = WithStreams();
+		FakeWorkspace workspace = new();
+		using StringWriter output = new();
+
+		Assert.AreEqual(0, await Setup(new HordePreflightCommand(), api, workspace, output).RunAsync(Logged(out CapturingLogger logger), ["-c=12345", "-shelve"], Token));
+
+		CollectionAssert.AreEqual(new[] { 12345 }, workspace.Shelved);
+		StringAssert.Contains(logger.Lines.Single(line => line.StartsWith("Warning:", StringComparison.Ordinal) && line.Contains("No Unreal project", StringComparison.Ordinal)),
+			"uak mutate -status");
+		CapturingLogger withProject = new();
+		UakContext project = new() { ProjectFile = new FileInfo(Path.Combine(Path.GetTempPath(), "Game.uproject")), StateDirectory = new DirectoryInfo(Path.GetTempPath()), Logger = withProject };
+		Assert.AreEqual(0, await Setup(new HordePreflightCommand(), WithStreams(), new FakeWorkspace(), output).RunAsync(project, ["-c=12345", "-shelve"], Token));
+		Assert.IsFalse(withProject.Lines.Any(line => line.Contains("No Unreal project", StringComparison.Ordinal)), "with a project, the guard sees its journals");
+	}
 }

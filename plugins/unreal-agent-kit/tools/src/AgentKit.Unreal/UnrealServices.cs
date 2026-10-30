@@ -3,6 +3,7 @@
 using System.Text;
 using AgentKit.Core;
 using AgentKit.Locking;
+using AgentKit.Vcs;
 using Microsoft.Extensions.Logging;
 
 namespace AgentKit.Unreal;
@@ -111,6 +112,47 @@ public sealed class UnrealServices
 	/// <summary>The clock, for log names and progress echoes.</summary>
 	public TimeProvider Clock { get; init; } = TimeProvider.System;
 
+	/// <summary>Reads the version-control state of the tree a build or test runs on (<see cref="VcsTreeState"/>).</summary>
+	public Func<UakContext, CancellationToken, Task<VcsTreeState>> CaptureTree { get; init; } = VcsTreeState.CaptureAsync;
+
+	/// <summary>How long reading the tree may take before the run reports it unknown: a slow server never holds the lock up for long.</summary>
+	public TimeSpan CaptureTreeTimeout { get; init; } = TimeSpan.FromSeconds(30);
+
+	/// <summary>
+	/// Starts reading the tree (<see cref="CaptureTree"/>) on the thread pool, so it runs alongside the build or test that
+	/// holds the lock. Never throws for a version-control failure or a timeout: the state then says why it is unknown.
+	/// </summary>
+	internal Task<VcsTreeState> StartCaptureTree(UakContext context, CancellationToken cancellationToken)
+	{
+		return Task.Run(async () =>
+		{
+			using CancellationTokenSource Limit = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+			Limit.CancelAfter(CaptureTreeTimeout);
+			try
+			{
+				return await CaptureTree(context, Limit.Token).WaitAsync(CaptureTreeTimeout, cancellationToken).ConfigureAwait(false);
+			}
+			catch (Exception Exception) when (!cancellationToken.IsCancellationRequested && Exception is OperationCanceledException or TimeoutException)
+			{
+				return new VcsTreeState { Error = string.Create(System.Globalization.CultureInfo.InvariantCulture, $"not read within {CaptureTreeTimeout.TotalSeconds:0} s") };
+			}
+		}, CancellationToken.None);
+	}
+
+	/// <summary>
+	/// For <c>uak compile</c>: waits while a quiet run holds the lock (<see cref="QuietRuns"/>), then records the compile until
+	/// the result is disposed.
+	/// </summary>
+	public Func<UakContext, CancellationToken, Task<IDisposable>> EnterCompile { get; init; } =
+		(Context, Token) => QuietRuns.EnterCompileAsync(Context, QuietRuns.DefaultPollInterval, Token);
+
+	/// <summary>The free physical memory as UBT measures it (<see cref="MemoryLimits.GetFreeMemoryBytes"/>), or null when unknown.</summary>
+	public Func<long?> FreeMemoryBytes { get; init; } = MemoryLimits.GetFreeMemoryBytes;
+
+	/// <summary>Runs git (or another tool) and captures its output: <c>uak mutate</c>'s <c>git apply</c>.</summary>
+	public Func<ProcessInvocation, CancellationToken, Task<ProcessCapture>> Capture { get; init; } =
+		(Invocation, Token) => ProcessRunner.Default.CaptureAsync(Invocation, Token);
+
 	/// <summary>The -MaxParallelActions to pass: the option when given, else UAK_MAX_PARALLEL_ACTIONS, else none.</summary>
 	internal int? MaxParallelActions(UakArguments arguments)
 	{
@@ -152,6 +194,56 @@ public sealed class UnrealServices
 	{
 		string Name = arguments.GetString("platform", "host")!;
 		return UnrealPlatform.FromName(Name) ?? throw new UakUsageException($"unknown -platform={Name} (Win64, Linux, Mac or host)");
+	}
+
+	/// <summary>
+	/// Runs a command body whose -resultfile= must never be read as this run's while it holds an earlier one: the file (read
+	/// from the raw arguments, before anything else is checked) is deleted first, refused (a usage error) when it can't be; when
+	/// the command is refused or stops before it writes its own, it gets <c>{ Command, Outcome: "refused" | "stopped",
+	/// ExitCode, Message }</c>.
+	/// </summary>
+	internal static async Task<int> WithFreshResultFileAsync(string command, IReadOnlyList<string> arguments, Func<Task<int>> body)
+	{
+		string? ResultFile;
+		try
+		{
+			ResultFile = new UakArguments(arguments).GetString("resultfile") is string Given ? Path.GetFullPath(Given) : null;
+		}
+		catch (Exception Exception) when (Exception is UakUsageException or ArgumentException or NotSupportedException or PathTooLongException)
+		{
+			// The command's own parse refuses it.
+			ResultFile = null;
+		}
+		if (ResultFile is not null && !StateFiles.TryDelete(ResultFile))
+		{
+			throw new UakUsageException($"-resultfile={ResultFile} exists and can't be deleted");
+		}
+		try
+		{
+			return await body().ConfigureAwait(false);
+		}
+		catch (Exception Exception) when (ResultFile is not null && Exception is not OutOfMemoryException)
+		{
+			if (!File.Exists(ResultFile))
+			{
+				bool Usage = Exception is UakUsageException or ProcessStartException;
+				try
+				{
+					WriteResultFile(ResultFile, new
+					{
+						Command = command,
+						Outcome = Usage ? "refused" : "stopped",
+						ExitCode = Usage ? UakExitCodes.UsageError : UakExitCodes.Failure,
+						Message = Exception is OperationCanceledException ? "cancelled" : Exception.Message,
+					});
+				}
+				catch (Exception WriteException) when (WriteException is IOException or UnauthorizedAccessException)
+				{
+					// The command's own error is what it reports; no file is no result.
+				}
+			}
+			throw;
+		}
 	}
 
 	/// <summary>Writes a JSON result file when -resultfile= was given (UTF-8 without a BOM).</summary>
