@@ -433,8 +433,259 @@ public sealed class LockSafetyTests
 		await using (EditorLockHold hold = await acquire.WaitAsync(s_timeout, TestContext.CancellationToken))
 		{
 			Assert.IsFalse(command.IsAlive());
+			Assert.IsNull(hold.OrphanedCommand);
 		}
 		Assert.IsTrue(logger.Lines.Any(line => line.Contains("'Gone'", StringComparison.Ordinal) && line.Contains("still runs", StringComparison.Ordinal)), string.Join("\n", logger.Lines));
+	}
+
+	[TestMethod]
+	public async Task ACommandThatOutlivesTheWaitIsReportedOnTheHold()
+	{
+		(Process _, ProcessIdentity command) = StartCommand("Outlives");
+		StateFiles.WriteJson(Paths.HolderFile, DeadHolder("Gone", EditorLock.GetScope(_state.Context), command));
+
+		EditorLockOptions options = new() { PollInterval = TimeSpan.FromMilliseconds(100), OrphanedCommandTimeout = TimeSpan.FromMilliseconds(300) };
+		await using EditorLockHold hold = await EditorLock.AcquireAsync(_state.Context, "Next", null, options, TestContext.CancellationToken);
+
+		StringAssert.Contains(hold.OrphanedCommand, command.Pid.ToString(System.Globalization.CultureInfo.InvariantCulture));
+		Assert.IsTrue(command.IsAlive());
+	}
+
+	[TestMethod]
+	public async Task ACommandThatOutlivesTheWaitIsReportedByEveryHoldUntilItHasGone()
+	{
+		ListLogger logger = new();
+		UakContext context = new() { ProjectFile = _state.Context.ProjectFile, StateDirectory = _state.Context.StateDirectory, Logger = logger };
+		(Process process, ProcessIdentity command) = StartCommand("Outlives");
+		StateFiles.WriteJson(Paths.HolderFile, DeadHolder("Gone", EditorLock.GetScope(_state.Context), command));
+		EditorLockOptions options = new() { PollInterval = TimeSpan.FromMilliseconds(100), OrphanedCommandTimeout = TimeSpan.FromMilliseconds(300) };
+		string pid = command.Pid.ToString(System.Globalization.CultureInfo.InvariantCulture);
+
+		// The first takes the record over from holder.json, which it writes over and, on release, deletes.
+		await using (EditorLockHold first = await EditorLock.AcquireAsync(context, "First", null, options, TestContext.CancellationToken))
+		{
+			StringAssert.Contains(first.OrphanedCommand, pid);
+		}
+		Assert.IsNull(EditorLock.GetStatus(_state.Context).Holder);
+		Assert.AreEqual("Gone", EditorLock.GetStatus(_state.Context).OrphanedCommands.Single().Name);
+		StringAssert.Contains(LockStatusCommand.Format(EditorLock.GetStatus(_state.Context), DateTime.UtcNow), $"Orphaned  Gone  PID");
+
+		// The second, which is what the refusal tells the user to run, and any after it, know just as well.
+		for (int hold = 0; hold < 2; hold++)
+		{
+			int before = logger.Lines.Count;
+			await using EditorLockHold next = await EditorLock.AcquireAsync(context, "Next", null, options, TestContext.CancellationToken);
+			StringAssert.Contains(next.OrphanedCommand, pid);
+			string[] logged = [.. logger.Lines.Skip(before)];
+			Assert.IsTrue(logged.Any(line => line.Contains("'Gone'", StringComparison.Ordinal)), string.Join("\n", logged));
+		}
+
+		process.Kill();
+		await process.WaitForExitAsync(TestContext.CancellationToken);
+		await using (EditorLockHold after = await EditorLock.AcquireAsync(context, "After", null, options, TestContext.CancellationToken))
+		{
+			Assert.IsNull(after.OrphanedCommand);
+		}
+		Assert.IsEmpty(EditorLock.GetStatus(_state.Context).OrphanedCommands);
+		Assert.IsEmpty(Directory.GetFiles(Paths.OrphansDirectory), "the record goes with its command");
+	}
+
+	[TestMethod]
+	public async Task AHoldReportsAndKeepsAKeptCommandBesideTheDeadHoldersOwn()
+	{
+		(Process _, ProcessIdentity first) = StartCommand("One");
+		(Process _, ProcessIdentity second) = StartCommand("Two");
+		EditorLockScope scope = EditorLock.GetScope(_state.Context);
+		EditorLockOptions options = new() { PollInterval = TimeSpan.FromMilliseconds(100), OrphanedCommandTimeout = TimeSpan.FromMilliseconds(300) };
+		// A hold that died beside a record of an earlier one: its command is added to what the next holds know.
+		LockHolderInfo kept = DeadHolder("Earlier", scope, first);
+		StateFiles.WriteJson(Path.Combine(Paths.OrphansDirectory, kept.HoldId + ".json"), kept);
+		StateFiles.WriteJson(Paths.HolderFile, DeadHolder("Later", scope, second));
+
+		await using EditorLockHold hold = await EditorLock.AcquireAsync(_state.Context, "Next", null, options, TestContext.CancellationToken);
+
+		StringAssert.Contains(hold.OrphanedCommand, first.Pid.ToString(System.Globalization.CultureInfo.InvariantCulture));
+		StringAssert.Contains(hold.OrphanedCommand, second.Pid.ToString(System.Globalization.CultureInfo.InvariantCulture));
+		Assert.HasCount(2, Directory.GetFiles(Paths.OrphansDirectory));
+	}
+
+	[TestMethod]
+	public async Task AKeptRecordGoesWhenAnotherProcessTookItsIdAndStaysForAnotherLock()
+	{
+		EditorLockScope scope = EditorLock.GetScope(_state.Context);
+		// The ID runs (this process), but with another start time: the command it recorded has gone.
+		ProcessIdentity self = ProcessIdentity.Current;
+		Assert.IsNotNull(self.StartTimeUtc);
+		LockHolderInfo reused = DeadHolder("Reused", scope, new ProcessIdentity(self.Pid, self.StartTimeUtc.Value.AddHours(-1)));
+		string reusedFile = Path.Combine(Paths.OrphansDirectory, reused.HoldId + ".json");
+		StateFiles.WriteJson(reusedFile, reused);
+		(Process _, ProcessIdentity command) = StartCommand("Other");
+		using TempState other = new();
+		UakContext otherProject = new() { ProjectFile = new FileInfo(other.ProjectFile), StateDirectory = _state.Context.StateDirectory, Logger = _state.Context.Logger };
+		LockHolderInfo foreign = DeadHolder("Foreign", EditorLock.GetScope(otherProject), command);
+		string foreignFile = Path.Combine(Paths.OrphansDirectory, foreign.HoldId + ".json");
+		StateFiles.WriteJson(foreignFile, foreign);
+		EditorLockOptions options = new() { PollInterval = TimeSpan.FromMilliseconds(100), OrphanedCommandTimeout = TimeSpan.FromSeconds(20) };
+
+		Stopwatch timer = Stopwatch.StartNew();
+		await using (EditorLockHold hold = await EditorLock.AcquireAsync(_state.Context, "Next", null, options, TestContext.CancellationToken))
+		{
+			Assert.IsNull(hold.OrphanedCommand, "neither is this lock's running command");
+		}
+
+		Assert.IsLessThan(10.0, timer.Elapsed.TotalSeconds);
+		Assert.IsFalse(File.Exists(reusedFile));
+		Assert.IsTrue(File.Exists(foreignFile), "another lock's holder decides that");
+		Assert.IsEmpty(EditorLock.GetStatus(_state.Context).OrphanedCommands);
+	}
+
+	[TestMethod]
+	public async Task ForgetOrphanDropsARecordWhoseCommandReadsAsRunning()
+	{
+		ListLogger logger = new();
+		UakContext context = new() { ProjectFile = _state.Context.ProjectFile, StateDirectory = _state.Context.StateDirectory, Logger = logger };
+		// What a reused PID whose start time can't be read looks like: the ID runs, and nothing will ever end the record.
+		(Process _, ProcessIdentity command) = StartCommand("Reused");
+		LockHolderInfo record = DeadHolder("Gone", EditorLock.GetScope(_state.Context), command);
+		string file = Path.Combine(Paths.OrphansDirectory, record.HoldId + ".json");
+		StateFiles.WriteJson(file, record);
+		EditorLockOptions options = new() { PollInterval = TimeSpan.FromMilliseconds(100), OrphanedCommandTimeout = TimeSpan.FromMilliseconds(300) };
+
+		await using (EditorLockHold refused = await EditorLock.AcquireAsync(context, "Before", null, options, TestContext.CancellationToken))
+		{
+			CollectionAssert.AreEqual(new[] { record.HoldId }, refused.OrphanedHoldIds.ToArray());
+		}
+		string way = $"`uak lock forget-orphan -hold={record.HoldId}`";
+		Assert.IsTrue(logger.Lines.Any(line => line.StartsWith("Warning", StringComparison.Ordinal) && line.Contains(way, StringComparison.Ordinal) && line.Contains("reused", StringComparison.Ordinal)),
+			string.Join("\n", logger.Lines));
+		string status = LockStatusCommand.Format(EditorLock.GetStatus(context), DateTime.UtcNow);
+		StringAssert.Contains(status, way);
+		StringAssert.Contains(status, "may have been reused");
+
+		Assert.AreEqual(UakExitCodes.Success, await new LockForgetOrphanCommand().RunAsync(context, ["-hold=" + record.HoldId], TestContext.CancellationToken));
+
+		Assert.IsFalse(File.Exists(file));
+		Assert.IsTrue(logger.Lines.Any(line => line.StartsWith("Information: Dropped", StringComparison.Ordinal) && line.Contains(record.HoldId, StringComparison.Ordinal)
+			&& line.Contains($"PID {record.Pid.ToString(System.Globalization.CultureInfo.InvariantCulture)}", StringComparison.Ordinal)
+			&& line.Contains($"PID {command.Pid.ToString(System.Globalization.CultureInfo.InvariantCulture)}", StringComparison.Ordinal)), string.Join("\n", logger.Lines));
+		Assert.IsTrue(command.IsAlive(), "it drops the record, and stops nothing");
+		await using (EditorLockHold after = await EditorLock.AcquireAsync(context, "After", null, options, TestContext.CancellationToken))
+		{
+			Assert.IsNull(after.OrphanedCommand);
+			Assert.IsEmpty(after.OrphanedHoldIds);
+		}
+	}
+
+	[TestMethod]
+	public async Task ForgetOrphanKeepsADeadHoldersRecordItDoesNotName()
+	{
+		(Process _, ProcessIdentity command) = StartCommand("Outlives");
+		LockHolderInfo holder = DeadHolder("Gone", EditorLock.GetScope(_state.Context), command);
+		StateFiles.WriteJson(Paths.HolderFile, holder);
+
+		// It takes the lock, so it takes over what holder.json alone records, whichever record it was asked to drop.
+		await Assert.ThrowsExactlyAsync<UakUsageException>(() => new LockForgetOrphanCommand().RunAsync(_state.Context, ["-hold=abc"], TestContext.CancellationToken));
+		Assert.IsTrue(File.Exists(Path.Combine(Paths.OrphansDirectory, holder.HoldId + ".json")));
+
+		Assert.AreEqual(UakExitCodes.Success, await new LockForgetOrphanCommand().RunAsync(_state.Context, ["-hold=" + holder.HoldId], TestContext.CancellationToken));
+		Assert.IsEmpty(Directory.GetFiles(Paths.OrphansDirectory));
+	}
+
+	[TestMethod]
+	public async Task ForgetOrphanWithAnUnknownIdRefusesAndListsTheKeptIds()
+	{
+		(Process _, ProcessIdentity command) = StartCommand("Kept");
+		LockHolderInfo record = DeadHolder("Gone", EditorLock.GetScope(_state.Context), command);
+		string file = Path.Combine(Paths.OrphansDirectory, record.HoldId + ".json");
+		StateFiles.WriteJson(file, record);
+
+		UakUsageException refused = await Assert.ThrowsExactlyAsync<UakUsageException>(() => new LockForgetOrphanCommand().RunAsync(_state.Context, ["-hold=nosuchhold"], TestContext.CancellationToken));
+
+		StringAssert.Contains(refused.Message, "nosuchhold");
+		StringAssert.Contains(refused.Message, record.HoldId);
+		Assert.IsTrue(File.Exists(file));
+		await Assert.ThrowsExactlyAsync<UakUsageException>(() => new LockForgetOrphanCommand().RunAsync(_state.Context, [], TestContext.CancellationToken));
+	}
+
+	[TestMethod]
+	public async Task ARecordThatCannotBeReadIsNamedInAWarning()
+	{
+		ListLogger logger = new();
+		UakContext context = new() { ProjectFile = _state.Context.ProjectFile, StateDirectory = _state.Context.StateDirectory, Logger = logger };
+		string file = Path.Combine(Paths.OrphansDirectory, "broken.json");
+		StateFiles.WriteText(file, "{ not json");
+
+		Assert.IsEmpty(EditorLock.GetStatus(context).OrphanedCommands);
+		Assert.IsTrue(logger.Lines.Any(line => line.StartsWith("Warning", StringComparison.Ordinal) && line.Contains(file, StringComparison.Ordinal)), string.Join("\n", logger.Lines));
+
+		ListLogger holdLogger = new();
+		UakContext holdContext = new() { ProjectFile = _state.Context.ProjectFile, StateDirectory = _state.Context.StateDirectory, Logger = holdLogger };
+		await using EditorLockHold hold = await EditorLock.AcquireAsync(holdContext, "Next", null, s_fast, TestContext.CancellationToken);
+		Assert.IsTrue(holdLogger.Lines.Any(line => line.StartsWith("Warning", StringComparison.Ordinal) && line.Contains(file, StringComparison.Ordinal)), string.Join("\n", holdLogger.Lines));
+		Assert.IsTrue(File.Exists(file), "kept: it may be the only word of a command that runs");
+	}
+
+	[TestMethod]
+	public void AKeptCommandSurvivesAClockStepButNotAnotherStart()
+	{
+		ProcessIdentity self = ProcessIdentity.Current;
+		Assert.IsNotNull(self.StartTimeUtc);
+		LockHolderInfo Recorded(TimeSpan off) => DeadHolder("Gone", EditorLock.GetScope(_state.Context), new ProcessIdentity(self.Pid, self.StartTimeUtc.Value + off));
+
+		Assert.IsTrue(EditorLock.IsCommandRunning(Recorded(TimeSpan.FromSeconds(30))), "a clock step reads a live command's start time off by this");
+		Assert.IsTrue(EditorLock.IsCommandRunning(Recorded(TimeSpan.FromSeconds(-55))));
+		Assert.IsFalse(EditorLock.IsCommandRunning(Recorded(TimeSpan.FromSeconds(90))), "a process that started this far off is another one");
+	}
+
+	[TestMethod]
+	public async Task AHoldThatJoinsAnotherStillReportsAKeptCommand()
+	{
+		(Process _, ProcessIdentity command) = StartCommand("Outlives");
+		EditorLockOptions options = new() { PollInterval = TimeSpan.FromMilliseconds(100), OrphanedCommandTimeout = TimeSpan.FromMilliseconds(300) };
+		StateFiles.WriteJson(Paths.HolderFile, DeadHolder("Gone", EditorLock.GetScope(_state.Context), command));
+		await using EditorLockHold outer = await EditorLock.AcquireAsync(_state.Context, "Outer", null, options, TestContext.CancellationToken);
+
+		// A join reads the marker this process inherited, so it takes a child.
+		Process child = _state.StartChildWithEnvironment(new Dictionary<string, string?> { [EditorLock.HeldVariable] = outer.Marker },
+			"lock", _state.StateDirectory, _state.ProjectFile, "Inner", "default", _log, "100");
+		ExitWithin(child, TimeSpan.FromSeconds(30), "A hold that joins another");
+
+		Assert.AreEqual(0, child.ExitCode);
+		StringAssert.Contains(ReadLog(), "joins that hold");
+		StringAssert.Contains(ReadLog(), $"orphaned Inner PID {command.Pid.ToString(System.Globalization.CultureInfo.InvariantCulture)}");
+	}
+
+	[TestMethod]
+	public async Task ACommandsJobThatOutlivesTheWaitIsKeptAcrossHoldsUntilItIsEmpty()
+	{
+		if (!OperatingSystem.IsWindows())
+		{
+			Assert.Inconclusive("Named job objects are Windows only.");
+			return;
+		}
+		// Only the job says the command runs: the process the holder recorded has gone.
+		string jobName = CommandJobs.NameFor(Guid.NewGuid().ToString("N"));
+		using Microsoft.Win32.SafeHandles.SafeFileHandle job = LockedCommand.WindowsNative.CreateJobObjectW(IntPtr.Zero, jobName);
+		Assert.IsFalse(job.IsInvalid, "Cannot create a named job.");
+		(Process process, ProcessIdentity _) = StartCommand("Leftover");
+		Assert.IsTrue(LockedCommand.WindowsNative.AssignProcessToJobObject(job, process.Handle), "Cannot put the process in the job.");
+		StateFiles.WriteJson(Paths.HolderFile, DeadHolder("Gone", EditorLock.GetScope(_state.Context), command: Child.DeadProcess(), job: jobName));
+		EditorLockOptions options = new() { PollInterval = TimeSpan.FromMilliseconds(100), OrphanedCommandTimeout = TimeSpan.FromMilliseconds(300) };
+
+		for (int hold = 0; hold < 2; hold++)
+		{
+			await using EditorLockHold next = await EditorLock.AcquireAsync(_state.Context, "Next", null, options, TestContext.CancellationToken);
+			StringAssert.Contains(next.OrphanedCommand, $"job {jobName}");
+		}
+
+		process.Kill();
+		await process.WaitForExitAsync(TestContext.CancellationToken);
+		Wait.Until(() => CommandJobs.GetActiveProcesses(jobName) == 0, s_timeout, "the job to empty");
+		await using (EditorLockHold after = await EditorLock.AcquireAsync(_state.Context, "After", null, options, TestContext.CancellationToken))
+		{
+			Assert.IsNull(after.OrphanedCommand);
+		}
+		Assert.IsEmpty(Directory.GetFiles(Paths.OrphansDirectory));
 	}
 
 	[TestMethod]

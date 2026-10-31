@@ -91,10 +91,11 @@ public static class QuietRuns
 
 	/// <summary>
 	/// Once a quiet hold is taken: waits until no <c>uak compile</c> runs, so the measured run starts on a quiet machine. After
-	/// <paramref name="timeout"/> it goes ahead with a warning that the measurement may be disturbed. Returns whether no
-	/// compile was left running.
+	/// <paramref name="timeout"/> it goes ahead with a warning that the measurement may be disturbed (or what
+	/// <paramref name="risk"/> says instead: <c>uak mutate</c> waits for them too). Returns whether no compile was left running.
 	/// </summary>
-	public static async Task<bool> WaitForCompilesAsync(UakContext context, TimeSpan poll, TimeSpan timeout, CancellationToken cancellationToken)
+	public static async Task<bool> WaitForCompilesAsync(UakContext context, TimeSpan poll, TimeSpan timeout, CancellationToken cancellationToken,
+		string risk = "so the measurement may be disturbed by them")
 	{
 		ArgumentNullException.ThrowIfNull(context);
 		int reported = -1;
@@ -104,8 +105,8 @@ public static class QuietRuns
 			string pids = string.Join(", ", compiles.Select(compile => compile.Pid));
 			if (DateTime.UtcNow >= deadline)
 			{
-				context.Logger.LogWarning("Quiet: {Count} `uak compile` (PID {Pids}) still run after {Minutes:0} min: going ahead, so the measurement may be disturbed by them.",
-					compiles.Count, pids, timeout.TotalMinutes);
+				context.Logger.LogWarning("Quiet: {Count} `uak compile` (PID {Pids}) still run after {Minutes:0} min: going ahead, {Risk}.",
+					compiles.Count, pids, timeout.TotalMinutes, risk);
 				return false;
 			}
 			if (compiles.Count != reported)

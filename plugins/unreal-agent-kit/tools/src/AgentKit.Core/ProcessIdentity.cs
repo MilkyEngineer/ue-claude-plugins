@@ -30,11 +30,12 @@ public readonly record struct ProcessIdentity(int Pid, DateTime? StartTimeUtc)
 
 	/// <summary>
 	/// The running process with this ID, with its start time (null when the start time cannot be read, for example for a
-	/// protected process). Null when no process with this ID runs.
+	/// protected process). Null when no process with this ID runs. A zombie on Linux counts as gone: it runs nothing, but
+	/// <c>kill(pid, 0)</c> still finds it until its parent reaps it.
 	/// </summary>
 	public static ProcessIdentity? TryGet(int pid)
 	{
-		if (pid <= 0)
+		if (pid <= 0 || (OperatingSystem.IsLinux() && IsZombie(pid)))
 		{
 			return null;
 		}
@@ -77,13 +78,19 @@ public readonly record struct ProcessIdentity(int Pid, DateTime? StartTimeUtc)
 	/// </summary>
 	public bool IsAlive()
 	{
+		return IsAlive(StartTimeTolerance);
+	}
+
+	/// <summary>As <see cref="IsAlive()"/>, with start times matching within <paramref name="tolerance"/>.</summary>
+	public bool IsAlive(TimeSpan tolerance)
+	{
 		ProcessIdentity? running = TryGet(Pid);
-		return running is not null && StartTimesMatch(StartTimeUtc, running.Value.StartTimeUtc);
+		return running is not null && StartTimesMatch(StartTimeUtc, running.Value.StartTimeUtc, tolerance);
 	}
 
 	/// <summary>
 	/// Whether this process surely still runs: a process with <see cref="Pid"/> runs, and both start times are known and match
-	/// within <see cref="StartTimeTolerance"/>. Unlike <see cref="IsAlive"/>, an unknown start time on either side counts as
+	/// within <see cref="StartTimeTolerance"/>. Unlike <see cref="IsAlive()"/>, an unknown start time on either side counts as
 	/// gone, so a protected process (whose start time can't be read) that reuses the ID is never taken for this one. For
 	/// records whose owner, taken for alive by mistake, would let a check pass that must not (a mutation journal, a quiet hold).
 	/// </summary>
@@ -100,11 +107,36 @@ public readonly record struct ProcessIdentity(int Pid, DateTime? StartTimeUtc)
 	/// <summary>Whether two start times name the same process start: either is unknown, or they are within <see cref="StartTimeTolerance"/>.</summary>
 	public static bool StartTimesMatch(DateTime? a, DateTime? b)
 	{
+		return StartTimesMatch(a, b, StartTimeTolerance);
+	}
+
+	/// <summary>Whether two start times name the same process start: either is unknown, or they are within <paramref name="tolerance"/>.</summary>
+	public static bool StartTimesMatch(DateTime? a, DateTime? b, TimeSpan tolerance)
+	{
 		if (a is null || b is null)
 		{
 			return true;
 		}
-		return (a.Value.ToUniversalTime() - b.Value.ToUniversalTime()).Duration() <= StartTimeTolerance;
+		return (a.Value.ToUniversalTime() - b.Value.ToUniversalTime()).Duration() <= tolerance;
+	}
+
+	/// <summary>Whether a line of <c>/proc/&lt;pid&gt;/stat</c> tells of a zombie: "12 (name) Z ...". The name may hold spaces and parentheses, so the state is what follows the last ')'.</summary>
+	internal static bool IsZombieStat(string stat)
+	{
+		int nameEnd = stat.LastIndexOf(')');
+		return nameEnd >= 0 && nameEnd + 2 < stat.Length && stat[nameEnd + 2] == 'Z';
+	}
+
+	private static bool IsZombie(int pid)
+	{
+		try
+		{
+			return IsZombieStat(File.ReadAllText($"/proc/{pid}/stat"));
+		}
+		catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+		{
+			return false;
+		}
 	}
 
 	/// <summary>"PID 1234 (started 2026-10-01T06:05:00.000Z)".</summary>

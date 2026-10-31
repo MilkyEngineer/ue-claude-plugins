@@ -174,7 +174,9 @@ public sealed class VcsShelveCommand : PerforceCommandBase
 		"                can't be asked, uak warns and shelves.\n" +
 		"                Refused (exit 2) while a uak mutate journal is left (`uak mutate -status`): a mutation run may have its\n" +
 		"                patch in the files, and the shelf would ship it. Checked first, and again just before p4 shelves (then\n" +
-		"                exit 1, naming a changelist uak created).\n" +
+		"                exit 1, naming a changelist uak created). A journal whose files are back stops only a shelf that holds a\n" +
+		"                binary its mutant build may have written (any code file, when it doesn't know which): exit 1, or 2 for\n" +
+		"                files named here.\n" +
 		"  -keep-unopened  p4 shelve -f instead (the behaviour before 0.3.3): opened files are shelved over their shelved\n" +
 		"                copies, and shelved files that are no longer opened STAY on the shelf (listed as kept: a preflight\n" +
 		"                builds them and a submit of the shelf would include them). Use it when the shelf is the only copy of\n" +
@@ -253,9 +255,23 @@ public sealed class VcsShelveCommand : PerforceCommandBase
 		}
 	}
 
+	/// <summary>
+	/// Refuses a shelf that holds a binary a <c>uak mutate</c> mutant build may have left its patch in
+	/// (<see cref="MutationFolders.DescribeBinariesIn"/>): the source files are back, so <see cref="CheckNoMutation"/> lets the
+	/// journal through, but a project that versions its binaries would ship the mutant.
+	/// </summary>
+	void CheckNoMutantBinaries(IEnumerable<string> files, bool late)
+	{
+		if (MutationFolders.DescribeBinariesIn(Context.StateDirectory, files, "shelve") is string refusal)
+		{
+			throw late ? new VcsException(refusal) : new UakUsageException(refusal);
+		}
+	}
+
 	async Task<int> ShelveFilesAsync(PerforceVersionControl p4, List<string> files, string description, bool force, CancellationToken cancellationToken)
 	{
 		CheckNoMutation(late: false);
+		CheckNoMutantBinaries(files, late: false);
 		// Every file must already be opened here, before anything changes.
 		IReadOnlyDictionary<string, PerforceFileResult> opened = await p4.GetOpenedAsync(files, cancellationToken).ConfigureAwait(false);
 		List<string> notOpened = files.Select(Path.GetFullPath).Where(path => !opened.ContainsKey(path)).ToList();
@@ -346,6 +362,10 @@ public sealed class VcsShelveCommand : PerforceCommandBase
 		}
 		// Again just before p4 shelves: a mutation run may have started meanwhile.
 		CheckNoMutation(late: true);
+		if (MutationFolders.HasBinariesPending(Context.StateDirectory))
+		{
+			CheckNoMutantBinaries((await p4.GetOwnPendingChangeAsync(change, cancellationToken).ConfigureAwait(false)).Files, late: true);
+		}
 		// Replacing drops the shelved files that uak sees are not opened (each is printed); one that leaves the changelist
 		// while uak shelves still fails (see PerforceVersionControl.ShelveAsync).
 		PerforceShelveResult result = await p4.ShelveAsync(change, mode, dropUnopened: mode == ShelveMode.Replace, cancellationToken).ConfigureAwait(false);

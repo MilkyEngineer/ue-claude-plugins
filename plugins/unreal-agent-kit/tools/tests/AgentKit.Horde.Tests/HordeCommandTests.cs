@@ -1279,6 +1279,38 @@ public sealed class HordeCommandTests
 	}
 
 	[TestMethod]
+	public async Task ShelveIsRefusedWhenAJournalWhoseFilesAreBackMayHaveLeftItsPatchInAShelvedBinary()
+	{
+		string state = Path.Combine(Path.GetTempPath(), "uak-horde-tests", Guid.NewGuid().ToString("N"));
+		string source = Path.Combine(state, "Foo.cpp").Replace("\\", "\\\\", StringComparison.Ordinal);
+		Directory.CreateDirectory(Path.Combine(state, "Mutations", "M1"));
+		File.WriteAllText(Path.Combine(state, "Mutations", "M1", "journal.json"), "{ \"Name\": \"M1\", \"Phase\": \"Restored\", \"Files\": [ { \"Path\": \"" + source + "\" } ] }");
+		try
+		{
+			FakeHordeApi api = WithStreams();
+			FakeWorkspace workspace = new();
+			workspace.Opened.Add("//Project/Main/Binaries/Win64/UnrealEditor-Game.dll");
+			using StringWriter output = new();
+			CapturingLogger logger = new();
+			UakContext context = new() { StateDirectory = new DirectoryInfo(state), Logger = logger };
+
+			Assert.AreEqual(HordeExitCodes.Error, await Setup(new HordePreflightCommand(), api, workspace, output).RunAsync(context, ["-c=12345", "-shelve"], Token));
+
+			Assert.IsEmpty(workspace.Shelved, "nothing shelved");
+			Assert.IsEmpty(api.Created, "nothing started");
+
+			// The source files alone: the journal's files are back, so only a binary could ship its patch.
+			workspace.Opened.RemoveAt(workspace.Opened.Count - 1);
+			Assert.AreEqual(0, await Setup(new HordePreflightCommand(), WithStreams(), workspace, output).RunAsync(context, ["-c=12345", "-shelve"], Token));
+			Assert.HasCount(1, workspace.Shelved);
+		}
+		finally
+		{
+			Directory.Delete(state, recursive: true);
+		}
+	}
+
+	[TestMethod]
 	public async Task ShelveWarnsThatItCannotSeeMutationsWithoutAProject()
 	{
 		FakeHordeApi api = WithStreams();

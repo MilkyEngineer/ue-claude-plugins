@@ -2,6 +2,7 @@
 
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using AgentKit.Core;
 using AgentKit.Locking;
 using AgentKit.Vcs;
@@ -303,13 +304,26 @@ public sealed class MutateTests
 		return (Box, Sandbox.Write(Path.Combine(Box.Root, "mutation.diff"), patch ?? GitPatch));
 	}
 
-	static UnrealServices Services(FakeProcessRunner runner, FakeLock? lockProvider = null) => new()
+	/// <summary>
+	/// The services a check runs with. The restore's wait before it stamps the files for a recompile is skipped (the stamp is
+	/// then up to <paramref name="recompileMargin"/> ahead of the clock) unless <paramref name="realDelay"/>.
+	/// </summary>
+	static UnrealServices Services(FakeProcessRunner runner, IEditorLockProvider? lockProvider = null, bool realDelay = false, TimeSpan? recompileMargin = null,
+		Func<string, DateTime?>? probe = null, List<TimeSpan>? delays = null, Func<UakContext, Task<bool>>? waitForCompiles = null) => new()
 	{
 		Runner = runner,
 		Lock = lockProvider ?? new FakeLock(),
 		HostPlatform = UnrealPlatform.Win64,
 		GetEnvironmentVariable = _ => null,
 		CaptureTree = TestSupportTrees.None,
+		Delay = realDelay ? Wait => Task.Delay(Wait) : Wait =>
+		{
+			delays?.Add(Wait);
+			return Task.CompletedTask;
+		},
+		RecompileMargin = recompileMargin ?? TimeSpan.FromSeconds(2),
+		ProbeFileTime = probe ?? MutationJournal.ProbeFileTime,
+		WaitForCompiles = waitForCompiles ?? (_ => Task.FromResult(true)),
 	};
 
 	/// <summary>What UBT prints for a build that compiles: a mutant build that compiles nothing can't hold the patch.</summary>
@@ -528,22 +542,48 @@ public sealed class MutateTests
 	}
 
 	[TestMethod]
-	public async Task ARebuildThatFailsAfterTheFilesAreBackSaysSoAndOnlyBuildsMayRun()
+	public async Task ARebuildThatFailsAfterTheFilesAreBackKeepsTheVerdictAndOnlyTestsWaitForABuildOfTheTarget()
 	{
 		(Sandbox Box, string Patch) = WithPatch();
 		using Sandbox _ = Box;
 		FakeProcessRunner Runner = new() { Behaviour = Plays("test-failed.log", 255, [0, 1]) };
+		string ResultFile = Path.Combine(Box.Root, "result.json");
 
-		int Exit = await new MutateCommand(Services(Runner)).RunAsync(Box.Context(), ["-name=M12", "-patch=" + Patch, "-filter=Project.Gameplay"], CancellationToken.None);
+		int Exit = await new MutateCommand(Services(Runner)).RunAsync(Box.Context(), ["-name=M12", "-patch=" + Patch, "-filter=Project.Gameplay", "-resultfile=" + ResultFile],
+			CancellationToken.None);
 
-		Assert.AreEqual(MutateCommand.RestoreFailedExitCode, Exit, Box.Logger.Text);
-		Assert.Contains("the files are back, but the rebuild after failed", Box.Logger.Text);
+		// The files are back byte for byte and stamped, so the verdict stands; with no receipt, which binaries the mutant build
+		// wrote isn't known, so any may still hold it.
+		Assert.AreEqual(MutateCommand.CaughtExitCode, Exit, Box.Logger.Text);
+		Assert.Contains("mutate: BINARIES PENDING: the files are back", Box.Logger.Text);
+		Assert.Contains("uak doesn't know which", Box.Logger.Text);
+		Assert.StartsWith("mutate: CAUGHT", RunSummaries.Read(new DirectoryInfo(Box.StateDirectory), "M12")!.Entries.Single().Lines[^1]);
+		using (JsonDocument Result = JsonDocument.Parse(File.ReadAllText(ResultFile)))
+		{
+			Assert.AreEqual("caught", Result.RootElement.GetProperty("Verdict").GetString());
+			Assert.Contains("BINARIES PENDING", Result.RootElement.GetProperty("Problems")[0].GetString()!);
+		}
 		Assert.AreEqual(Original, File.ReadAllText(Box.SourceFile));
+		MutationRecord Record = StateFiles.ReadJson<MutationRecord>(JournalFile(Box, "M12"))!;
+		Assert.AreEqual(MutationPhase.Restored, Record.Phase);
+		Assert.IsNotNull(Record.RecompileStamp);
+		Assert.AreEqual("GameEditor", Record.BuildTarget);
+
+		// The tree holds no mutation: a commit, a shelf or a preflight may go ahead; tests may not.
 		FakeProcessRunner Later = new() { Behaviour = Plays("test-passed.log", 0, [0]) };
+		Assert.AreEqual(0, await new MutateCommand(Services(Later)).RunAsync(Box.Context(), ["-status"], CancellationToken.None), Box.Logger.Text);
+		Assert.Contains("'M12' (PID", Box.Logger.Text);
+		Assert.IsNull(MutationFolders.DescribeLeft(new DirectoryInfo(Box.StateDirectory), "shelve"));
 		Assert.AreEqual(2, await new TestCommand(Services(Later)).RunAsync(Box.Context(), ["-filter=Project.Math"], CancellationToken.None), "the binaries may hold the mutation");
-		Assert.AreEqual(0, await new BuildCommand(Services(Later)).RunAsync(Box.Context(), [], CancellationToken.None), "a build is what takes it out");
-		Assert.AreEqual(0, await new MutateCommand(Services(Later)).RunAsync(Box.Context(), ["-restore"], CancellationToken.None), Box.Logger.Text);
-		Assert.IsFalse(File.Exists(JournalFile(Box, "M12")));
+		Assert.Contains($"a `uak build` of GameEditor (Win64 Development) that shows a compile of {Box.SourceFile} and succeeds clears this", Box.Logger.Text);
+
+		// Only a whole build of the mutant's own target relinks what it linked.
+		Assert.AreEqual(0, await new BuildCommand(Services(Later)).RunAsync(Box.Context(), ["-target=Game"], CancellationToken.None), Box.Logger.Text);
+		Assert.AreEqual(0, await new BuildCommand(Services(Later)).RunAsync(Box.Context(), ["--", "-SingleFile=" + Box.SourceFile], CancellationToken.None), Box.Logger.Text);
+		Assert.IsTrue(File.Exists(JournalFile(Box, "M12")), "another target, or a build given UBT arguments, may not relink the mutant's binaries");
+		Assert.AreEqual(0, await new BuildCommand(Services(Later)).RunAsync(Box.Context(), [], CancellationToken.None), Box.Logger.Text);
+		Assert.IsFalse(File.Exists(JournalFile(Box, "M12")), "a build of the target that succeeds clears it: the stamp made it recompile the files");
+		Assert.AreEqual(0, await new TestCommand(Services(Later)).RunAsync(Box.Context(), ["-filter=Project.Math"], CancellationToken.None), Box.Logger.Text);
 	}
 
 	[TestMethod]
@@ -877,6 +917,49 @@ public sealed class MutateTests
 	}
 
 	[TestMethod]
+	public async Task APatchMadeInAGitWorkTreeBelowTheProjectIsAppliedThereByGit()
+	{
+		// The project's own folder has no version control, but a plugin's repository below it does: `git diff` there writes
+		// paths relative to it.
+		(Sandbox Box, string Patch) = WithPatch(GitPatch.Replace("Source/Game/Private/Foo.cpp", "Game/Private/Foo.cpp", StringComparison.Ordinal));
+		using Sandbox _ = Box;
+		string Nested = Path.Combine(Box.ProjectDirectory, "Source");
+		using GitObjectsWritable __ = new(Nested);
+		string Lf = Original.Replace("\r\n", "\n", StringComparison.Ordinal);
+		File.WriteAllText(Box.SourceFile, Lf);
+		await GitAsync(Nested, "init", "-q");
+		await GitAsync(Nested, "add", "-A");
+		await GitAsync(Nested, "-c", "user.name=UAK Tests", "-c", "user.email=uak-tests@example.invalid", "commit", "-q", "-m", "base");
+		string? DuringTest = null;
+		FakeProcessRunner Runner = new() { Behaviour = Plays("test-failed.log", 255, [0], () => DuringTest = File.ReadAllText(Box.SourceFile)) };
+
+		int Exit = await new MutateCommand(Services(Runner)).RunAsync(Box.Context(), ["-name=N1", "-patch=" + Patch, "-filter=Project.Gameplay"], CancellationToken.None);
+
+		Assert.AreEqual(MutateCommand.CaughtExitCode, Exit, Box.Logger.Text);
+		Assert.Contains($"are under the Git work tree {Nested}", Box.Logger.Text);
+		Assert.Contains("return A - B;", DuringTest!);
+		Assert.AreEqual(Lf, File.ReadAllText(Box.SourceFile));
+	}
+
+	[TestMethod]
+	public void ANestedWorkTreeIsTakenOnlyWhenTheRootDoesNotFitAndOnlyOneDoes()
+	{
+		using Sandbox Box = new();
+		List<DiffFile> InSource = UnifiedDiff.Parse(GitPatch.Replace("Source/Game/Private/Foo.cpp", "Game/Private/Foo.cpp", StringComparison.Ordinal));
+		Assert.IsNull(MutateCommand.FindNestedGitRoot(InSource, Box.ProjectDirectory, Box.ProjectDirectory), "no work tree below");
+		string Nested = Path.Combine(Box.ProjectDirectory, "Source");
+		Directory.CreateDirectory(Path.Combine(Nested, ".git"));
+		Assert.AreEqual(Nested, MutateCommand.FindNestedGitRoot(InSource, Box.ProjectDirectory, Box.ProjectDirectory));
+		Assert.IsNull(MutateCommand.FindNestedGitRoot(UnifiedDiff.Parse(GitPatch), Box.ProjectDirectory, Box.ProjectDirectory), "the paths fit the root");
+		Assert.IsNull(MutateCommand.FindNestedGitRoot(InSource, Nested, Box.ProjectDirectory), "the root found is that work tree");
+
+		// A second work tree the paths fit: which one was meant can't be told.
+		Sandbox.Write(Path.Combine(Box.ProjectDirectory, "Plugins", "Copy", "Game", "Private", "Foo.cpp"), Original);
+		File.WriteAllText(Path.Combine(Box.ProjectDirectory, "Plugins", "Copy", ".git"), "gitdir: elsewhere");
+		Assert.IsNull(MutateCommand.FindNestedGitRoot(InSource, Box.ProjectDirectory, Box.ProjectDirectory));
+	}
+
+	[TestMethod]
 	public async Task InAGitWorkspaceAHunkThatMatchesOnlyAwayFromItsLineIsRefusedThoughGitWouldApplyIt()
 	{
 		// R-3 (review 5's gitorder): the block the hunk names is at line 4 and line 8, not at 6. git apply searches down first and
@@ -1031,6 +1114,36 @@ public sealed class MutateTests
 		Assert.Contains("shows no compile of " + Box.SourceFile, Box.Logger.Text);
 		CollectionAssert.AreEqual(new[] { true, true }, Runner.Invocations.Select(IsBuild).ToArray(), "no test ran");
 		Assert.AreEqual(Original, File.ReadAllText(Box.SourceFile));
+	}
+
+	[TestMethod]
+	public async Task AJournalAsksNoRebuildToCompileWhatTheMutantBuildNeverCompiled()
+	{
+		(Sandbox Box, string Patch) = WithPatch();
+		using Sandbox _ = Box;
+		string Dll = WriteReceipt(Box);
+		string ResultFile = Path.Combine(Box.Root, "result.json");
+		// The dll it wrote is another agent's change: the patched file reached no binary, and no later build need compile it,
+		// which is what keeps a file outside the target from holding its journal for ever.
+		FakeProcessRunner Runner = new()
+		{
+			Behaviour = Plays("test-passed.log", 0, [0], buildOutput: Build =>
+			{
+				if (Build > 0)
+				{
+					return UpToDate;
+				}
+				File.WriteAllText(Dll, "another agent's change");
+				return ["[1/2] Compile [x64] OtherAgentsFile.cpp", "[2/2] Link [x64] UnrealEditor-Game.dll"];
+			}),
+		};
+
+		int Exit = await new MutateCommand(Services(Runner)).RunAsync(Box.Context(), ["-name=M13b", "-patch=" + Patch, "-filter=Project.Math", "-resultfile=" + ResultFile], CancellationToken.None);
+
+		Assert.AreEqual(MutateCommand.InconclusiveExitCode, Exit, Box.Logger.Text);
+		Assert.IsFalse(File.Exists(JournalFile(Box, "M13b")), Box.Logger.Text);
+		using JsonDocument Result = JsonDocument.Parse(File.ReadAllText(ResultFile));
+		Assert.IsFalse(Result.RootElement.GetProperty("BinariesPending").GetBoolean());
 	}
 
 	[TestMethod]
@@ -1959,5 +2072,1330 @@ public sealed class MutateTests
 		CollectionAssert.AreEqual(new[] { Path.GetFullPath(Other) }, Found);
 		Assert.IsFalse(Entered.Any(Folder => Folder.Split(Path.DirectorySeparatorChar).Any(Part => Part is "Intermediate" or "Binaries")), string.Join("\n", Entered));
 		Assert.Contains(Path.GetDirectoryName(Box.SourceFile)!, Entered);
+	}
+
+	// ---- 0.4.1: a restore the next build recompiles, and a rebuild that fails elsewhere ----
+
+	/// <summary>An object file the mutant build wrote, of the patched file.</summary>
+	static string ObjectFile(Sandbox box) => Path.Combine(box.ProjectDirectory, "Intermediate", "Build", "Win64", "UnrealEditor", "Development", "Game", "Foo.cpp.obj");
+
+	[TestMethod]
+	public async Task TheFilesPutBackAreNewerThanWhatTheMutantBuildWroteByMoreThanUbtsSlop()
+	{
+		// UBT counts a prerequisite as newer only when it is more than a second newer: written back within a second of the
+		// mutant's object, the source would count as built, and the binaries would keep the mutant.
+		(Sandbox Box, string Patch) = WithPatch();
+		using Sandbox _ = Box;
+		string Object = ObjectFile(Box);
+		DateTime? SourceAtRebuild = null;
+		FakeProcessRunner Runner = new()
+		{
+			Behaviour = Plays("test-failed.log", 255, [0], buildOutput: Build =>
+			{
+				if (Build == 0)
+				{
+					Sandbox.Write(Object, "mutant code");
+				}
+				else
+				{
+					SourceAtRebuild = File.GetLastWriteTimeUtc(Box.SourceFile);
+				}
+				return CompileLines;
+			}),
+		};
+
+		int Exit = await new MutateCommand(Services(Runner, realDelay: true)).RunAsync(Box.Context(), ["-name=S1", "-patch=" + Patch, "-filter=Project.Gameplay"],
+			CancellationToken.None);
+
+		Assert.AreEqual(MutateCommand.CaughtExitCode, Exit, Box.Logger.Text);
+		Assert.AreEqual(Original, File.ReadAllText(Box.SourceFile));
+		DateTime ObjectTime = File.GetLastWriteTimeUtc(Object);
+		Assert.IsGreaterThan(MutationJournal.UbtTimestampSlop, SourceAtRebuild!.Value - ObjectTime, "stamped before the rebuild");
+		Assert.IsGreaterThan(MutationJournal.UbtTimestampSlop, File.GetLastWriteTimeUtc(Box.SourceFile) - ObjectTime);
+		Assert.IsLessThanOrEqualTo(DateTime.UtcNow, File.GetLastWriteTimeUtc(Box.SourceFile), "the wait keeps the stamp out of the future");
+		Assert.IsFalse(File.Exists(JournalFile(Box, "S1")));
+	}
+
+	[TestMethod]
+	public async Task ARestoreOfAKilledRunStampsItsFilesBeforeItRebuilds()
+	{
+		using Sandbox Box = new();
+		File.WriteAllText(Box.SourceFile, Original);
+		LeaveJournal(Box, "S2", 0, null);
+		string Object = Sandbox.Write(ObjectFile(Box), "mutant code");
+		DateTime? SourceAtRebuild = null;
+		FakeProcessRunner Later = new()
+		{
+			Behaviour = Plays("test-passed.log", 0, [0], buildOutput: _ =>
+			{
+				SourceAtRebuild = File.GetLastWriteTimeUtc(Box.SourceFile);
+				return CompileLines;
+			}),
+		};
+
+		Assert.AreEqual(0, await new MutateCommand(Services(Later)).RunAsync(Box.Context(), ["-restore"], CancellationToken.None), Box.Logger.Text);
+
+		Assert.AreEqual(Original, File.ReadAllText(Box.SourceFile));
+		Assert.IsGreaterThan(MutationJournal.UbtTimestampSlop, SourceAtRebuild!.Value - File.GetLastWriteTimeUtc(Object));
+		Assert.IsFalse(File.Exists(JournalFile(Box, "S2")));
+	}
+
+	[TestMethod]
+	public void AStampKeepsTheBytesAndTheReadOnlyFlagAndMustClearTheSlop()
+	{
+		using Sandbox Box = new();
+		File.WriteAllText(Box.SourceFile, Original);
+		MutationJournal Journal = MutationJournal.Begin(Box.Context(), "S3", "p.diff", [Box.SourceFile]);
+		File.SetAttributes(Box.SourceFile, FileAttributes.ReadOnly);
+		try
+		{
+			DateTime Artifact = new(2026, 10, 30, 12, 0, 0, DateTimeKind.Utc);
+
+			IOException Refused = Assert.ThrowsExactly<IOException>(() => Journal.StampForRecompile(Artifact.AddSeconds(1), Artifact));
+			Assert.Contains("for a recompile", Refused.Message);
+			Assert.IsNull(Journal.Record.RecompileStamp, "a slop's worth newer is still up to date to UBT");
+
+			Journal.StampForRecompile(Artifact.AddSeconds(2), Artifact);
+			Assert.AreEqual(Artifact.AddSeconds(2), File.GetLastWriteTimeUtc(Box.SourceFile));
+			Assert.AreEqual(Original, File.ReadAllText(Box.SourceFile));
+			Assert.IsTrue(File.GetAttributes(Box.SourceFile).HasFlag(FileAttributes.ReadOnly));
+			Assert.AreEqual(Artifact.AddSeconds(2), StateFiles.ReadJson<MutationRecord>(JournalFile(Box, "S3"))!.RecompileStamp);
+		}
+		finally
+		{
+			File.SetAttributes(Box.SourceFile, FileAttributes.Normal);
+		}
+	}
+
+	[TestMethod]
+	public async Task AStampThatDoesNotTakeLeavesTheJournalForRestore()
+	{
+		(Sandbox Box, string Patch) = WithPatch();
+		using Sandbox _ = Box;
+		FakeProcessRunner Runner = new() { Behaviour = Plays("test-failed.log", 255, [0]) };
+
+		// A stamp older than the end of the mutant build stands for a file system that didn't take the time.
+		int Exit = await new MutateCommand(Services(Runner, recompileMargin: TimeSpan.FromSeconds(-5))).RunAsync(Box.Context(),
+			["-name=S4", "-patch=" + Patch, "-filter=Project.Gameplay"], CancellationToken.None);
+
+		Assert.AreEqual(MutateCommand.RestoreFailedExitCode, Exit, Box.Logger.Text);
+		Assert.Contains("could not be marked for a recompile", Box.Logger.Text);
+		Assert.AreEqual(Original, File.ReadAllText(Box.SourceFile));
+		CollectionAssert.AreEqual(new[] { true, false }, Runner.Invocations.Select(IsBuild).ToArray(), "no rebuild: it could find the mutant's objects up to date");
+		MutationRecord Record = StateFiles.ReadJson<MutationRecord>(JournalFile(Box, "S4"))!;
+		Assert.AreEqual(MutationPhase.Restored, Record.Phase);
+		Assert.IsNull(Record.RecompileStamp);
+
+		FakeProcessRunner Later = new() { Behaviour = Plays("test-passed.log", 0, [0]) };
+		Assert.AreEqual(0, await new BuildCommand(Services(Later)).RunAsync(Box.Context(), [], CancellationToken.None), Box.Logger.Text);
+		Assert.IsTrue(File.Exists(JournalFile(Box, "S4")), "a build without the stamp may keep the mutant's objects");
+		Assert.AreEqual(2, await new TestCommand(Services(Later)).RunAsync(Box.Context(), ["-filter=Project.Math"], CancellationToken.None));
+		Assert.AreEqual(0, await new MutateCommand(Services(Later)).RunAsync(Box.Context(), ["-restore"], CancellationToken.None), Box.Logger.Text);
+		Assert.IsFalse(File.Exists(JournalFile(Box, "S4")));
+	}
+
+	/// <summary>The project's editor receipt, which lists its module's DLL; the DLL, built an hour before the check. Returns the DLL.</summary>
+	static string WriteReceipt(Sandbox box)
+	{
+		string Binaries = Path.Combine(box.ProjectDirectory, "Binaries", "Win64");
+		Sandbox.Write(Path.Combine(Binaries, "GameEditor.target"),
+			"""
+			{
+				"TargetName": "GameEditor",
+				"BuildProducts": [
+					{ "Path": "$(ProjectDir)/Binaries/Win64/UnrealEditor-Game.dll", "Type": "DynamicLibrary" },
+					{ "Path": "$(ProjectDir)/Binaries/Win64/UnrealEditor-Game.pdb", "Type": "SymbolFile" }
+				]
+			}
+			""");
+		Sandbox.Write(Path.Combine(Binaries, "UnrealEditor-Game.pdb"), "symbols");
+		string Dll = Sandbox.Write(Path.Combine(Binaries, "UnrealEditor-Game.dll"), "built before the check");
+		File.SetLastWriteTimeUtc(Dll, DateTime.UtcNow.AddHours(-1));
+		return Dll;
+	}
+
+	[TestMethod]
+	public async Task ARebuildThatFailsElsewhereButRelinkedWhatTheMutantLinkedClearsTheJournal()
+	{
+		(Sandbox Box, string Patch) = WithPatch();
+		using Sandbox _ = Box;
+		string Dll = WriteReceipt(Box);
+		string Other = Path.Combine(Box.ProjectDirectory, "Source", "Other", "Private", "Other.cpp") + "(1): error C1083: Cannot open include file: 'Missing.h'";
+		FakeProcessRunner Runner = new()
+		{
+			Behaviour = Plays("test-failed.log", 255, [0, 1], buildOutput: Build =>
+			{
+				// UBT goes on after an error: the rebuild relinks the patched module, and fails on another agent's half-edited file.
+				File.WriteAllText(Dll, Build == 0 ? "mutant" : "relinked without the mutation");
+				return Build == 0 ? CompileLines : [.. CompileLines, Other];
+			}),
+		};
+
+		int Exit = await new MutateCommand(Services(Runner, realDelay: true)).RunAsync(Box.Context(), ["-name=B1", "-patch=" + Patch, "-filter=Project.Gameplay"], CancellationToken.None);
+
+		Assert.AreEqual(MutateCommand.CaughtExitCode, Exit, Box.Logger.Text);
+		Assert.Contains("no binary the mutant build wrote is left as it wrote it", Box.Logger.Text);
+		Assert.DoesNotContain("BINARIES PENDING", Box.Logger.Text);
+		Assert.IsFalse(File.Exists(JournalFile(Box, "B1")));
+		FakeProcessRunner Later = new() { Behaviour = Plays("test-passed.log", 0, [0]) };
+		Assert.AreEqual(0, await new TestCommand(Services(Later)).RunAsync(Box.Context(), ["-filter=Project.Math"], CancellationToken.None), Box.Logger.Text);
+	}
+
+	[TestMethod]
+	public async Task ABinaryTheMutantBuildWroteHoldsTestsBackUntilSomethingRewritesIt()
+	{
+		(Sandbox Box, string Patch) = WithPatch();
+		using Sandbox _ = Box;
+		string Dll = WriteReceipt(Box);
+		FakeProcessRunner Runner = new()
+		{
+			Behaviour = Plays("test-passed.log", 0, [0, 1], buildOutput: Build =>
+			{
+				if (Build == 0)
+				{
+					File.WriteAllText(Dll, "mutant");
+				}
+				return CompileLines;
+			}),
+		};
+
+		int Exit = await new MutateCommand(Services(Runner, realDelay: true)).RunAsync(Box.Context(), ["-name=B2", "-patch=" + Patch, "-filter=Project.Math"], CancellationToken.None);
+
+		Assert.AreEqual(MutateCommand.SurvivedExitCode, Exit, Box.Logger.Text);
+		Assert.Contains("BINARIES PENDING: the files are back (the tree holds no mutation) and marked so the next build recompiles them, but the rebuild after failed"
+			+ $" (its errors are above: another change may have broken the tree), so {Path.GetFullPath(Dll)} may still hold the mutation", Box.Logger.Text);
+		MutationRecord Record = StateFiles.ReadJson<MutationRecord>(JournalFile(Box, "B2"))!;
+		CollectionAssert.AreEqual(new[] { Path.GetFullPath(Dll) }, Record.Binaries!.Select(Binary => Binary.Path).ToArray(), "the PDB and the receipt aren't code");
+
+		FakeProcessRunner Later = new() { Behaviour = Plays("test-passed.log", 0, [0]) };
+		Assert.AreEqual(2, await new TestCommand(Services(Later)).RunAsync(Box.Context(), ["-filter=Project.Math"], CancellationToken.None));
+		Assert.Contains(Path.GetFullPath(Dll) + " may still hold its patch", Box.Logger.Text);
+		// A later build that relinks the module, even one that fails on another file, takes the mutant out of the binaries.
+		File.WriteAllText(Dll, "relinked by a later build");
+		Assert.AreEqual(0, await new TestCommand(Services(Later)).RunAsync(Box.Context(), ["-filter=Project.Math"], CancellationToken.None), Box.Logger.Text);
+		Assert.Contains("Cleared the mutation journal 'B2'", Box.Logger.Text);
+		Assert.IsFalse(File.Exists(JournalFile(Box, "B2")));
+	}
+
+	[TestMethod]
+	public async Task AMutantBuildThatFailsElsewhereAndLinksNothingLeavesNoJournal()
+	{
+		(Sandbox Box, string Patch) = WithPatch();
+		using Sandbox _ = Box;
+		string Dll = WriteReceipt(Box);
+		string Other = Path.Combine(Box.ProjectDirectory, "Source", "Game", "Private", "Other.cpp") + "(1): error C1083: Cannot open include file: 'Missing.h'";
+		FakeProcessRunner Runner = new() { Behaviour = Plays("test-passed.log", 0, [1], buildOutput: _ => [CompileLines[0], Other]) };
+
+		int Exit = await new MutateCommand(Services(Runner)).RunAsync(Box.Context(), ["-name=B3", "-patch=" + Patch, "-filter=Project.Math"], CancellationToken.None);
+
+		Assert.AreEqual(MutateCommand.InconclusiveExitCode, Exit, Box.Logger.Text);
+		Assert.Contains("no binary the mutant build wrote is left as it wrote it (it wrote none", Box.Logger.Text);
+		Assert.IsFalse(File.Exists(JournalFile(Box, "B3")));
+		Assert.AreEqual("built before the check", File.ReadAllText(Dll));
+		FakeProcessRunner Later = new() { Behaviour = Plays("test-passed.log", 0, [0]) };
+		Assert.AreEqual(0, await new TestCommand(Services(Later)).RunAsync(Box.Context(), ["-filter=Project.Math"], CancellationToken.None), Box.Logger.Text);
+	}
+
+	[TestMethod]
+	public async Task APatchThatAddsAFileLeavesWhichBinariesItWroteUnknown()
+	{
+		// A new file may be a new module, whose DLL the receipt doesn't list yet.
+		string AddPatch = GitPatch + "diff --git a/Source/Game/Private/New.cpp b/Source/Game/Private/New.cpp\nnew file mode 100644\n--- /dev/null\n+++ b/Source/Game/Private/New.cpp\n@@ -0,0 +1 @@\n+int New;\n";
+		(Sandbox Box, string Patch) = WithPatch(AddPatch);
+		using Sandbox _ = Box;
+		WriteReceipt(Box);
+		FakeProcessRunner Runner = new() { Behaviour = Plays("test-failed.log", 255, [0, 1], buildOutput: _ => ["[1/3] Compile [x64] Foo.cpp", "[2/3] Compile [x64] New.cpp"]) };
+
+		int Exit = await new MutateCommand(Services(Runner)).RunAsync(Box.Context(), ["-name=B4", "-patch=" + Patch, "-filter=Project.Gameplay"], CancellationToken.None);
+
+		Assert.AreEqual(MutateCommand.CaughtExitCode, Exit, Box.Logger.Text);
+		Assert.Contains("uak doesn't know which", Box.Logger.Text);
+		Assert.IsNull(StateFiles.ReadJson<MutationRecord>(JournalFile(Box, "B4"))!.Binaries);
+		Assert.IsFalse(File.Exists(Path.Combine(Box.ProjectDirectory, "Source", "Game", "Private", "New.cpp")));
+	}
+
+	[TestMethod]
+	public void TheTargetsBinariesAreTheCodeFilesInTheFoldersOfItsReceiptsBuildProducts()
+	{
+		using Sandbox Box = new();
+		string Engine = Box.Layout.EngineDirectory;
+		Sandbox.Write(Path.Combine(Box.ProjectDirectory, "Binaries", "Win64", "GameEditor.target"),
+			"""
+			{ "BuildProducts": [
+				{ "Path": "$(EngineDir)/Plugins/Tools/Binaries/Win64/UnrealEditor-Tools.dll", "Type": "DynamicLibrary" },
+				{ "Path": "$(ProjectDir)/Plugins/P/Binaries/Win64/Launcher", "Type": "Executable" },
+				{ "Path": "$(ProjectDir)/Plugins/P/Binaries/Win64/UnrealEditor-P.pdb", "Type": "SymbolFile" }
+			] }
+			""");
+		string EngineDll = Sandbox.Write(Path.Combine(Engine, "Plugins", "Tools", "Binaries", "Win64", "UnrealEditor-Tools.dll"), "a");
+		string Launcher = Sandbox.Write(Path.Combine(Box.ProjectDirectory, "Plugins", "P", "Binaries", "Win64", "Launcher"), "b");
+		string NewModule = Sandbox.Write(Path.Combine(Box.ProjectDirectory, "Plugins", "P", "Binaries", "Win64", "UnrealEditor-P2.dll"), "c");
+		Sandbox.Write(Path.Combine(Box.ProjectDirectory, "Plugins", "P", "Binaries", "Win64", "UnrealEditor-P.pdb"), "d");
+		string ProjectDll = Sandbox.Write(Path.Combine(Box.ProjectDirectory, "Binaries", "Win64", "UnrealEditor-Game.dll"), "e");
+
+		TargetBinaries Binaries = TargetBinaries.Find(Box.ProjectDirectory, Engine, "GameEditor", UnrealPlatform.Win64, "Development")!;
+		List<MutationBinary> Before = Binaries.Snapshot()!;
+
+		CollectionAssert.AreEquivalent(new[] { EngineDll, Launcher, NewModule, ProjectDll }.Select(Path.GetFullPath).ToArray(), Before.Select(Binary => Binary.Path).ToArray());
+		File.WriteAllText(Launcher, "rebuilt");
+		string Added = Sandbox.Write(Path.Combine(Box.ProjectDirectory, "Binaries", "Win64", "UnrealEditor-Game-0001.dll"), "f");
+		CollectionAssert.AreEquivalent(new[] { Launcher, Added }.Select(Path.GetFullPath).ToArray(),
+			TargetBinaries.WrittenSince(Before, Binaries.Snapshot()!).Select(Binary => Binary.Path).ToArray());
+
+		Assert.IsNull(TargetBinaries.Find(Box.ProjectDirectory, Engine, "GameEditor", UnrealPlatform.Win64, "DebugGame"), "no receipt: unknown");
+		Assert.AreEqual(Path.Combine(Box.ProjectDirectory, "Binaries", "Win64", "GameEditor-Win64-DebugGame.target"),
+			TargetBinaries.ReceiptPath(Box.ProjectDirectory, "GameEditor", UnrealPlatform.Win64, "DebugGame"));
+		Sandbox.Write(Path.Combine(Box.ProjectDirectory, "Binaries", "Win64", "GameEditor.target"), "{ \"BuildProducts\": [ { \"Path\": 3 } ] }");
+		Assert.IsNull(TargetBinaries.Find(Box.ProjectDirectory, Engine, "GameEditor", UnrealPlatform.Win64, "Development"), "a receipt uak can't read: unknown");
+	}
+
+	// ---- 0.4.1: what a rebuild must show, and what the stamp must pass (each RX test turns a review experiment around) ----
+
+	/// <summary>What UBT prints for a build with nothing to do.</summary>
+	static readonly string[] UpToDate = ["Target is up to date", "Result: Succeeded"];
+
+	/// <summary>A build whose first run writes the mutant to <paramref name="dll"/>, with <paramref name="later"/> as the output of each later one.</summary>
+	static Func<int, string[]> MutantThen(string dll, string[] later) => Build =>
+	{
+		if (Build == 0)
+		{
+			File.WriteAllText(dll, "mutant");
+			return CompileLines;
+		}
+		return later;
+	};
+
+	static MutationRecord Record(Sandbox box, string name) => StateFiles.ReadJson<MutationRecord>(JournalFile(box, name))!;
+
+	static string Binary(Sandbox box, string name) => Path.Combine(box.ProjectDirectory, "Binaries", "Win64", name);
+
+	[TestMethod]
+	public async Task RX1_ARebuildThatIsUpToDateProvesNothingSoTheJournalStaysUntilABuildCompiles()
+	{
+		(Sandbox Box, string Patch) = WithPatch();
+		using Sandbox _ = Box;
+		string Dll = WriteReceipt(Box);
+		string ResultFile = Path.Combine(Box.Root, "result.json");
+		FakeProcessRunner Runner = new() { Behaviour = Plays("test-failed.log", 255, [0, 0], buildOutput: MutantThen(Dll, UpToDate)) };
+
+		int Exit = await new MutateCommand(Services(Runner)).RunAsync(Box.Context(), ["-name=X1", "-patch=" + Patch, "-filter=Project.Gameplay", "-resultfile=" + ResultFile], CancellationToken.None);
+
+		Assert.AreEqual(MutateCommand.CaughtExitCode, Exit, Box.Logger.Text);
+		Assert.Contains($"BINARIES PENDING: the files are back (the tree holds no mutation) and marked so the next build recompiles them, but the rebuild after shows no compile of {Box.SourceFile},"
+			+ $" so {Path.GetFullPath(Dll)} may still hold the mutation", Box.Logger.Text);
+		Assert.Contains("files put back; the binaries may hold the mutation until a build recompiles them", Box.Logger.Text);
+		Assert.AreEqual("mutant", File.ReadAllText(Dll));
+		CollectionAssert.AreEqual(new[] { Box.SourceFile }, Record(Box, "X1").AwaitingRecompile);
+		using (JsonDocument Result = JsonDocument.Parse(File.ReadAllText(ResultFile)))
+		{
+			Assert.IsTrue(Result.RootElement.GetProperty("BinariesPending").GetBoolean(), "a structured field: the verdict's exit code doesn't say it");
+			Assert.AreEqual("caught", Result.RootElement.GetProperty("Verdict").GetString());
+			Assert.AreEqual(0, Result.RootElement.GetProperty("ExitCode").GetInt32());
+		}
+
+		FakeProcessRunner Later = new() { Behaviour = Plays("test-passed.log", 0, [0]) };
+		Assert.AreEqual(2, await new TestCommand(Services(Later)).RunAsync(Box.Context(), ["-filter=Project.Math"], CancellationToken.None), "tests must not run the mutant");
+		Assert.Contains($"a `uak build` of GameEditor (Win64 Development) that shows a compile of {Box.SourceFile} and succeeds clears this", Box.Logger.Text);
+		FakeProcessRunner Compiles = new() { Behaviour = Plays("test-passed.log", 0, [0], buildOutput: _ =>
+		{
+			File.WriteAllText(Dll, "relinked without the mutation");
+			return CompileLines;
+		}) };
+		Assert.AreEqual(0, await new BuildCommand(Services(Compiles)).RunAsync(Box.Context(), [], CancellationToken.None), Box.Logger.Text);
+		Assert.IsFalse(File.Exists(JournalFile(Box, "X1")));
+		Assert.AreEqual(0, await new TestCommand(Services(Later)).RunAsync(Box.Context(), ["-filter=Project.Math"], CancellationToken.None), Box.Logger.Text);
+	}
+
+	[TestMethod]
+	public async Task ARebuildThatShowsTheCompileClearsTheJournalAndSaysNothingIsPending()
+	{
+		(Sandbox Box, string Patch) = WithPatch();
+		using Sandbox _ = Box;
+		string Dll = WriteReceipt(Box);
+		string ResultFile = Path.Combine(Box.Root, "result.json");
+		FakeProcessRunner Runner = new() { Behaviour = Plays("test-failed.log", 255, [0, 0], buildOutput: MutantThen(Dll, CompileLines)) };
+
+		await new MutateCommand(Services(Runner)).RunAsync(Box.Context(), ["-name=X1b", "-patch=" + Patch, "-filter=Project.Gameplay", "-resultfile=" + ResultFile], CancellationToken.None);
+
+		Assert.IsFalse(File.Exists(JournalFile(Box, "X1b")), Box.Logger.Text);
+		Assert.Contains("files put back and rebuilt", Box.Logger.Text);
+		using JsonDocument Result = JsonDocument.Parse(File.ReadAllText(ResultFile));
+		Assert.IsFalse(Result.RootElement.GetProperty("BinariesPending").GetBoolean());
+	}
+
+	[TestMethod]
+	public async Task ARestoreMarksTheFilesAgainAndForceSetsAsideAJournalNoBuildRecompiles()
+	{
+		(Sandbox Box, string Patch) = WithPatch();
+		using Sandbox _ = Box;
+		string Dll = WriteReceipt(Box);
+		FakeProcessRunner Runner = new() { Behaviour = Plays("test-failed.log", 255, [0, 0], buildOutput: MutantThen(Dll, UpToDate)) };
+		await new MutateCommand(Services(Runner)).RunAsync(Box.Context(), ["-name=X1c", "-patch=" + Patch, "-filter=Project.Gameplay"], CancellationToken.None);
+		DateTime FirstStamp = Record(Box, "X1c").RecompileStamp!.Value;
+		await Task.Delay(50);
+
+		FakeProcessRunner Still = new() { Behaviour = Plays("test-passed.log", 0, [0], buildOutput: _ => UpToDate) };
+		Assert.AreEqual(MutateCommand.RestoreFailedExitCode, await new MutateCommand(Services(Still)).RunAsync(Box.Context(), ["-restore", "-name=X1c"], CancellationToken.None), Box.Logger.Text);
+		Assert.Contains("the rebuild shows no compile of " + Box.SourceFile, Box.Logger.Text);
+		Assert.Contains("-force (with -name=) sets the journal aside", Box.Logger.Text);
+		Assert.IsGreaterThan(FirstStamp, Record(Box, "X1c").RecompileStamp!.Value, "a new stamp: the rebuild gets another chance");
+
+		Assert.AreEqual(0, await new MutateCommand(Services(Still)).RunAsync(Box.Context(), ["-restore", "-name=X1c", "-force"], CancellationToken.None), Box.Logger.Text);
+		Assert.IsFalse(File.Exists(JournalFile(Box, "X1c")));
+		Assert.Contains("-force sets the journal aside all the same", Box.Logger.Text);
+		Assert.HasCount(1, Directory.GetDirectories(MutationJournal.GetDiscardedRoot(Box.Context()), "X1c-*"));
+	}
+
+	[TestMethod]
+	public async Task ForceClearsNoJournalWhenTheRebuildFails()
+	{
+		(Sandbox Box, string Patch) = WithPatch();
+		using Sandbox _ = Box;
+		string Dll = WriteReceipt(Box);
+		FakeProcessRunner Runner = new() { Behaviour = Plays("test-failed.log", 255, [0, 0], buildOutput: MutantThen(Dll, UpToDate)) };
+		await new MutateCommand(Services(Runner)).RunAsync(Box.Context(), ["-name=X1d", "-patch=" + Patch, "-filter=Project.Gameplay"], CancellationToken.None);
+
+		FakeProcessRunner Fails = new() { Behaviour = Plays("test-passed.log", 0, [1]) };
+
+		Assert.AreEqual(MutateCommand.RestoreFailedExitCode, await new MutateCommand(Services(Fails)).RunAsync(Box.Context(), ["-restore", "-name=X1d", "-force"], CancellationToken.None), Box.Logger.Text);
+		Assert.IsTrue(File.Exists(JournalFile(Box, "X1d")));
+	}
+
+	[TestMethod]
+	public async Task RX2_AnUpToDateBuildNeverClearsAPendingJournal()
+	{
+		(Sandbox Box, string Patch) = WithPatch();
+		using Sandbox _ = Box;
+		string Dll = WriteReceipt(Box);
+		FakeProcessRunner Runner = new() { Behaviour = Plays("test-passed.log", 0, [0, 1], buildOutput: MutantThen(Dll, CompileLines)) };
+		Assert.AreEqual(MutateCommand.SurvivedExitCode, await new MutateCommand(Services(Runner)).RunAsync(Box.Context(), ["-name=X2", "-patch=" + Patch, "-filter=Project.Math"], CancellationToken.None));
+		Assert.Contains("BINARIES PENDING", Box.Logger.Text);
+
+		// That rebuild failed without an error its log names: any of its actions may have failed, so nothing it printed counts.
+		CollectionAssert.AreEqual(new[] { Box.SourceFile }, Record(Box, "X2").AwaitingRecompile);
+		FakeProcessRunner Later = new() { Behaviour = Plays("test-passed.log", 0, [0], buildOutput: _ => UpToDate) };
+		Assert.AreEqual(0, await new BuildCommand(Services(Later)).RunAsync(Box.Context(), [], CancellationToken.None), Box.Logger.Text);
+
+		Assert.AreEqual("mutant", File.ReadAllText(Dll));
+		Assert.IsTrue(File.Exists(JournalFile(Box, "X2")), "an up-to-date build, DLL untouched, must not clear the journal");
+		Assert.Contains("The mutation journal 'X2' stays: this build shows no compile of", Box.Logger.Text);
+		Assert.AreEqual(2, await new TestCommand(Services(Later)).RunAsync(Box.Context(), ["-filter=Project.Math"], CancellationToken.None));
+	}
+
+	[TestMethod]
+	public async Task ARebuildThatFailsElsewhereCountsForWhatItCompiledAndABinaryNoBuildRelinksHoldsNothingUp()
+	{
+		(Sandbox Box, string Patch) = WithPatch();
+		using Sandbox _ = Box;
+		string Dll = WriteReceipt(Box);
+		string Unrelated = Sandbox.Write(Binary(Box, "UnrealEditor-Unrelated.dll"), "built before the check");
+		string OtherError = Path.Combine(Box.ProjectDirectory, "Source", "Game", "Private", "Other.cpp") + "(1): error C1083: Cannot open include file: 'Missing.h'";
+		FakeProcessRunner Runner = new()
+		{
+			Behaviour = Plays("test-passed.log", 0, [0, 1], buildOutput: Build =>
+			{
+				if (Build == 0)
+				{
+					// Another agent's change got linked too: nothing about the mutation will ever relink it.
+					File.WriteAllText(Dll, "mutant");
+					File.WriteAllText(Unrelated, "another change");
+					return [.. CompileLines, "[3/3] Link [x64] UnrealEditor-Unrelated.dll"];
+				}
+				return ["[1/2] Compile [x64] Foo.cpp", "[2/2] Compile [x64] Other.cpp", OtherError];
+			}),
+		};
+
+		Assert.AreEqual(MutateCommand.SurvivedExitCode, await new MutateCommand(Services(Runner)).RunAsync(Box.Context(), ["-name=X2b", "-patch=" + Patch, "-filter=Project.Math"], CancellationToken.None), Box.Logger.Text);
+
+		Assert.Contains("BINARIES PENDING", Box.Logger.Text);
+		Assert.IsEmpty(Record(Box, "X2b").AwaitingRecompile!, "Foo.cpp compiled, though the build failed on Other.cpp");
+		Assert.HasCount(2, Record(Box, "X2b").Binaries!);
+		FakeProcessRunner Later = new() { Behaviour = Plays("test-passed.log", 0, [0], buildOutput: _ =>
+		{
+			File.WriteAllText(Dll, "relinked without the mutation");
+			return ["[1/1] Link [x64] UnrealEditor-Game.dll"];
+		}) };
+		Assert.AreEqual(0, await new BuildCommand(Services(Later)).RunAsync(Box.Context(), [], CancellationToken.None), Box.Logger.Text);
+
+		Assert.IsFalse(File.Exists(JournalFile(Box, "X2b")), "Unrelated.dll is never relinked: waiting for it would keep the journal for good");
+		Assert.AreEqual(0, await new TestCommand(Services(Later)).RunAsync(Box.Context(), ["-filter=Project.Math"], CancellationToken.None), Box.Logger.Text);
+	}
+
+	[TestMethod]
+	public async Task ACompileThatFailedIsNoEvidenceEvenWhenItsErrorRepeatsAnothers()
+	{
+		(Sandbox Box, string Patch) = WithPatch();
+		using Sandbox _ = Box;
+		string Dll = WriteReceipt(Box);
+		string Broken = Box.HeaderFile + "(1): error C2143: syntax error";
+		FakeProcessRunner Runner = new()
+		{
+			Behaviour = Plays("test-passed.log", 0, [0, 1], buildOutput: MutantThen(Dll, ["[1/2] Compile [x64] Bar.cpp", Broken, "[2/2] Compile [x64] Foo.cpp", Broken])),
+		};
+
+		await new MutateCommand(Services(Runner)).RunAsync(Box.Context(), ["-name=X2c", "-patch=" + Patch, "-filter=Project.Math"], CancellationToken.None);
+
+		CollectionAssert.AreEqual(new[] { Box.SourceFile }, Record(Box, "X2c").AwaitingRecompile, "the failed compile left the mutant's object");
+	}
+
+	[TestMethod]
+	public void AFailedActionIsKnownByAnyErrorUnderItAndABuildSaysWhatItLinked()
+	{
+		string Broken = "C:\\Game\\Foo.h(1): error C2143: syntax error";
+		BuildLogSummary Failed = BuildLogParser.Parse(["[1/5] Compile [x64] Bar.cpp", Broken, "[2/5] Compile [x64] Foo.cpp", Broken, "[3/5] Compile [x64] Clean.cpp",
+			"[4/5] Link [x64] UnrealEditor-Game.lib", "[5/5] Link [x64] UnrealEditor-Game.dll [Cache]"]);
+
+		Assert.HasCount(1, Failed.Errors);
+		BuildOutcome Outcome = BuildOutcome.From(Failed, 1);
+		CollectionAssert.AreEqual(new[] { "Bar.cpp", "Foo.cpp", "Clean.cpp" }, Outcome.Compiled.ToArray());
+		CollectionAssert.AreEqual(new[] { "Clean.cpp" }, Outcome.CompiledClean.ToArray());
+		CollectionAssert.AreEqual(new[] { "UnrealEditor-Game.lib", "UnrealEditor-Game.dll" }, Outcome.Linked.ToArray());
+
+		BuildLogSummary Silent = BuildLogParser.Parse(["[1/1] Compile [x64] Foo.cpp"]);
+		Assert.IsEmpty(BuildOutcome.From(Silent, 1).CompiledClean, "it failed, and its log doesn't say what did");
+		CollectionAssert.AreEqual(new[] { "Foo.cpp" }, BuildOutcome.From(Silent, 0).CompiledClean.ToArray());
+
+		BuildOutcome Others = BuildOutcome.From(BuildLogParser.Parse(["[1/6] Link-LTO [x64] libA.so", "[2/6] Relink [x64] libB.so", "[3/6] Link-PGO [x64] libC.so",
+			"[4/6] LinkStub [arm64] D.dylib", "[5/6] Archive [x64] libE.a", "[6/6] WriteMetadata GameEditor.target"]), 0);
+		CollectionAssert.AreEqual(new[] { "libA.so", "libB.so", "libC.so" }, Others.Linked.ToArray());
+	}
+
+	const string SyntaxError = "C:\\Game\\Foo.h(1): error C2143: syntax error";
+
+	[TestMethod]
+	[DataRow("c1xx: fatal error C1083: Cannot open source file: 'Bad.cpp': No such file or directory")]
+	[DataRow("cl : Command line error D8021 : invalid numeric argument '/Wextra'")]
+	[DataRow("INTERNAL COMPILER ERROR in 'C:\\VC\\c2.dll'")]
+	[DataRow("error: unable to open output file 'Bad.o'")]
+	[DataRow("Stack dump:")]
+	[DataRow("Segmentation fault")]
+	public void AFailureNoPatternParsesTakesEveryCompileOfAFailedBuildFromTheEvidence(string line)
+	{
+		BuildLogSummary Failed = BuildLogParser.Parse(["[1/3] Compile [x64] Clean.cpp", "[2/3] Compile [x64] Bad.cpp", line, "[3/3] Compile [x64] Bar.cpp", SyntaxError,
+			"Result: Failed (OtherCompilationError)"]);
+
+		Assert.HasCount(1, Failed.Errors);
+		Assert.IsFalse(Failed.EveryFailureAttributed);
+		Assert.IsEmpty(BuildOutcome.From(Failed, 6).CompiledClean, "Bad.cpp failed, and no error says so: any compile here may have");
+
+		// A build that succeeded shows the words meant nothing.
+		BuildLogSummary Fine = BuildLogParser.Parse(["[1/2] Compile [x64] Clean.cpp", "[2/2] Compile [x64] Bad.cpp", line, "Result: Succeeded"]);
+		Assert.HasCount(2, BuildOutcome.From(Fine, 0).CompiledClean);
+	}
+
+	[TestMethod]
+	[DataRow("ERROR:  Compile [x64] Bad.cpp: Exited with error code -1073741819 (Access violation). The build will fail.")]
+	[DataRow(" Compile [x64] Bad.cpp: Exited with error code -1073741819 (Access violation). The build will fail.")]
+	public void ACompilerThatCrashedWithNoOutputTakesEveryCompileFromTheEvidence(string line)
+	{
+		BuildLogSummary Failed = BuildLogParser.Parse(["[1/3] Compile [x64] Clean.cpp", "[2/3] Compile [x64] Bad.cpp", "[3/3] Compile [x64] Bar.cpp", line, SyntaxError]);
+
+		Assert.IsEmpty(BuildOutcome.From(Failed, 6).CompiledClean, "UBT's line can reach the log ahead of its action's: it tells no action");
+	}
+
+	[TestMethod]
+	[DataRow("Compile [x64] Good.cpp: Exited with error code 9001. This action will retry (More info in uba trace)")]
+	[DataRow("Compile [x64] Good.cpp: Exited with error code 9001. This action will retry without UBA")]
+	[DataRow("Compile [x64] Good.cpp [RemoteExecutor: host]: Exited with error code 5 (Access denied). This action will retry locally")]
+	[DataRow("Compile [x64] Good.cpp [RemoteExecutor: host]: Exited with error code 5 with no output. This action will retry locally")]
+	public void AnActionThatWillRetryLeavesAFailedBuildsEvidence(string line)
+	{
+		BuildLogSummary Failed = BuildLogParser.Parse(["[1/2] Compile [x64] Good.cpp", line, "[2/2] Compile [x64] Bad.cpp", SyntaxError, "Result: Failed (OtherCompilationError)"]);
+
+		Assert.IsFalse(Failed.ActionExitedWithError);
+		Assert.IsEmpty(Failed.UnparsedFailures);
+		Assert.IsTrue(Failed.EveryFailureAttributed);
+		CollectionAssert.AreEqual(new[] { "Good.cpp" }, BuildOutcome.From(Failed, 6).CompiledClean.ToArray());
+	}
+
+	[TestMethod]
+	public void AnUnparsedLineUnderAFailureAlreadyKnownOrANoteLeavesTheRestAsEvidence()
+	{
+		BuildLogSummary Failed = BuildLogParser.Parse(["Failed to read a cache: that's before any action",
+			"[1/3] Compile [x64] Clean.cpp", "C:\\Game\\Foo.h(3): note: see declaration of 'Error'",
+			"[2/3] Compile [x64] Bad.cpp", "c1xx: fatal error C1083: Cannot open include file", SyntaxError,
+			"[3/3] Compile [x64] Other.cpp", SyntaxError, "cl : Command line error D8021 : invalid numeric argument",
+			"Result: Failed (OtherCompilationError)"]);
+
+		Assert.IsTrue(Failed.EveryFailureAttributed);
+		CollectionAssert.AreEqual(new[] { "Clean.cpp" }, BuildOutcome.From(Failed, 6).CompiledClean.ToArray());
+
+		BuildLogSummary Fixture = BuildLogParser.Parse(Fixtures.Lines("build-compile-errors.log"));
+		Assert.IsTrue(Fixture.EveryFailureAttributed, string.Join(", ", Fixture.UnparsedFailures));
+		CollectionAssert.Contains(BuildOutcome.From(Fixture, 6).CompiledClean.ToArray(), "MyComponent.cpp");
+	}
+
+	[TestMethod]
+	public async Task ARebuildThatFailedWithAnUnparsedErrorShowsNoRecompile()
+	{
+		(Sandbox Box, string Patch) = WithPatch();
+		using Sandbox _ = Box;
+		string Dll = WriteReceipt(Box);
+		string[] Rebuild = ["[1/2] Compile [x64] Foo.cpp", "c1xx: fatal error C1083: Cannot open compiler generated file", "[2/2] Compile [x64] Bar.cpp", SyntaxError];
+		FakeProcessRunner Runner = new() { Behaviour = Plays("test-passed.log", 0, [0, 1], buildOutput: MutantThen(Dll, Rebuild)) };
+
+		await new MutateCommand(Services(Runner)).RunAsync(Box.Context(), ["-name=N3", "-patch=" + Patch, "-filter=Project.Math"], CancellationToken.None);
+
+		CollectionAssert.AreEqual(new[] { Box.SourceFile }, Record(Box, "N3").AwaitingRecompile, "the failed compile left the mutant's object");
+	}
+
+	[TestMethod]
+	public async Task AMutantBuildKilledWithNoResultLineLeavesWhatItDidUnknown()
+	{
+		(Sandbox Box, string Patch) = WithPatch();
+		using Sandbox _ = Box;
+		string Dll = WriteReceipt(Box);
+		// UBT died: no Result: line and no error, and Foo.cpp's compile may have written its object with no line to show for it.
+		string[] Killed = ["[1/2] Compile [x64] Bar.cpp"];
+		FakeProcessRunner Runner = new()
+		{
+			Behaviour = Plays("test-passed.log", 0, [1, 1], buildOutput: Build =>
+			{
+				if (Build == 0)
+				{
+					File.WriteAllText(Dll, "mutant");
+				}
+				return Killed;
+			}),
+		};
+
+		Assert.AreEqual(MutateCommand.InconclusiveExitCode, await new MutateCommand(Services(Runner)).RunAsync(Box.Context(), ["-name=N7", "-patch=" + Patch, "-filter=Project.Math"], CancellationToken.None), Box.Logger.Text);
+
+		MutationRecord Left = Record(Box, "N7");
+		Assert.IsNull(Left.Binaries, "the log can't say what it wrote");
+		CollectionAssert.AreEqual(new[] { Box.SourceFile }, Left.AwaitingRecompile, "it may have compiled anything");
+	}
+
+	[TestMethod]
+	public void OnlyABuildThatFailedWithNeitherAResultNorAnErrorStoppedPartWay()
+	{
+		string[] Compile = ["[1/1] Compile [x64] Foo.cpp"];
+		Assert.IsTrue(BuildOutcome.From(BuildLogParser.Parse(Compile), 1).StoppedPartWay);
+		Assert.IsFalse(BuildOutcome.From(BuildLogParser.Parse(Compile), 0).StoppedPartWay);
+		Assert.IsFalse(BuildOutcome.From(BuildLogParser.Parse([.. Compile, "Result: Failed (OtherCompilationError)"]), 6).StoppedPartWay);
+		Assert.IsFalse(BuildOutcome.From(BuildLogParser.Parse([.. Compile, SyntaxError]), 1).StoppedPartWay);
+	}
+
+	[TestMethod]
+	[DataRow("Foo.m", true)]
+	[DataRow("Foo.mm", true)]
+	[DataRow("Foo.ispc", true)]
+	[DataRow("Foo.ipp", false)]
+	[DataRow("Foo.tpp", false)]
+	[DataRow("Foo.def", false)]
+	[DataRow("Foo.isph", false)]
+	public void AFileACompileReachesNeedsACompile(string name, bool needsItsOwn)
+	{
+		string File_ = Path.GetFullPath(name);
+		List<DiffFile> Files = UnifiedDiff.Parse($"--- a/{name}\n+++ b/{name}\n@@ -1 +1 @@\n-a\n+b\n");
+		BuildOutcome None = BuildOutcome.From(BuildLogParser.Parse(UpToDate), 0);
+		BuildOutcome Other = BuildOutcome.From(BuildLogParser.Parse(["[1/1] Compile [x64] Bar.cpp"]), 0);
+		BuildOutcome Own = BuildOutcome.From(BuildLogParser.Parse([$"[1/1] Compile [x64] {name}"]), 0);
+
+		CollectionAssert.AreEqual(new[] { File_ }, MutateCommand.FindUncompiled(None, Files, [File_]));
+		Assert.HasCount(needsItsOwn ? 1 : 0, MutateCommand.FindUncompiled(Other, Files, [File_]));
+		Assert.IsEmpty(MutateCommand.FindUncompiled(Own, Files, [File_]));
+	}
+
+	[TestMethod]
+	[DataRow("Foo.asm")]
+	[DataRow("Foo.S")]
+	[DataRow("Foo.ini")]
+	public void AFileNoCompileReachesNeedsNone(string name)
+	{
+		string File_ = Path.GetFullPath(name);
+		List<DiffFile> Files = UnifiedDiff.Parse($"--- a/{name}\n+++ b/{name}\n@@ -1 +1 @@\n-a\n+b\n");
+
+		Assert.IsEmpty(MutateCommand.FindUncompiled(BuildOutcome.From(BuildLogParser.Parse(UpToDate), 0), Files, [File_]));
+	}
+
+	[TestMethod]
+	public void WhatARebuildMustShowDependsOnWhatKindOfFileWasPatched()
+	{
+		using Sandbox Box = new();
+		string Config = Path.Combine(Box.ProjectDirectory, "Config", "DefaultGame.ini");
+		BuildOutcome None = BuildOutcome.From(BuildLogParser.Parse(UpToDate), 0);
+		BuildOutcome Other = BuildOutcome.From(BuildLogParser.Parse(["[1/1] Compile [x64] Bar.cpp"]), 0);
+		BuildOutcome Own = BuildOutcome.From(BuildLogParser.Parse(["[1/1] Compile [x64] Foo.cpp"]), 0);
+		BuildOutcome Unity = BuildOutcome.From(BuildLogParser.Parse(["[1/1] Compile [x64] Module.Game.2.cpp"]), 0);
+		BuildOutcome LinkOnly = BuildOutcome.From(BuildLogParser.Parse(["[1/1] Link [x64] UnrealEditor-Game.dll"]), 0);
+		MutationFile Source = new() { Path = Box.SourceFile, Existed = true };
+		MutationFile Header = new() { Path = Box.HeaderFile, Existed = true };
+		MutationFile Deleted = new() { Path = Box.SourceFile, Existed = true, PlannedDeleted = true };
+		MutationFile Created = new() { Path = Path.Combine(Path.GetDirectoryName(Box.SourceFile)!, "New.cpp") };
+
+		Assert.IsTrue(MutateCommand.ShowsRecompile(None, new MutationFile { Path = Config, Existed = true }), "no compile is due for a file that isn't C++");
+		Assert.IsFalse(MutateCommand.ShowsRecompile(None, Source));
+		Assert.IsFalse(MutateCommand.ShowsRecompile(Other, Source));
+		Assert.IsTrue(MutateCommand.ShowsRecompile(Own, Source));
+		Assert.IsTrue(MutateCommand.ShowsRecompile(Unity, Source));
+		Assert.IsFalse(MutateCommand.ShowsRecompile(None, Header));
+		Assert.IsTrue(MutateCommand.ShowsRecompile(Other, Header), "a header shows only in what includes it");
+		Assert.IsFalse(MutateCommand.ShowsRecompile(LinkOnly, Header));
+		Assert.IsFalse(MutateCommand.ShowsRecompile(None, Deleted));
+		Assert.IsTrue(MutateCommand.ShowsRecompile(Other, Deleted));
+		Assert.IsFalse(MutateCommand.ShowsRecompile(None, Created));
+		Assert.IsTrue(MutateCommand.ShowsRecompile(LinkOnly, Created), "the file is gone: its object leaves the link");
+		Assert.IsFalse(MutateCommand.ShowsRecompile(BuildOutcome.From(BuildLogParser.Parse(LinkOnly.Linked.Select(Item => "[1/1] Link [x64] " + Item)), 1), Created), "that link may have failed");
+	}
+
+	const string HeaderPatch = "--- a/Source/Game/Public/Foo.h\n+++ b/Source/Game/Public/Foo.h\n@@ -1 +1 @@\n-#pragma once\n+#pragma   once\n";
+
+	[TestMethod]
+	public async Task APatchedHeaderIsShownByACompileOfWhatIncludesIt()
+	{
+		(Sandbox Box, string Patch) = WithPatch(HeaderPatch);
+		using Sandbox _ = Box;
+		string Dll = WriteReceipt(Box);
+		string[] Includer = ["[1/2] Compile [x64] Bar.cpp", "[2/2] Link [x64] UnrealEditor-Game.dll"];
+		FakeProcessRunner Runner = new()
+		{
+			Behaviour = Plays("test-failed.log", 255, [0, 0], buildOutput: Build =>
+			{
+				File.WriteAllText(Dll, Build == 0 ? "mutant" : "relinked");
+				return Includer;
+			}),
+		};
+
+		Assert.AreEqual(MutateCommand.CaughtExitCode, await new MutateCommand(Services(Runner)).RunAsync(Box.Context(), ["-name=H1", "-patch=" + Patch, "-filter=Project.Gameplay"], CancellationToken.None), Box.Logger.Text);
+
+		Assert.IsFalse(File.Exists(JournalFile(Box, "H1")), "no compile names a header");
+		Assert.DoesNotContain("BINARIES PENDING", Box.Logger.Text);
+	}
+
+	[TestMethod]
+	[DataRow(HeaderPatch)]
+	[DataRow(GitPatch)]
+	public async Task AFileTheMutantBuildNeverCompiledAsksNoRebuildToCompileIt(string patch)
+	{
+		// Not in the editor target, or included by nothing: no build will ever compile it, so a journal waiting for one could never clear.
+		(Sandbox Box, string Patch) = WithPatch(patch);
+		using Sandbox _ = Box;
+		string Dll = WriteReceipt(Box);
+		FakeProcessRunner Runner = new() { Behaviour = Plays("test-passed.log", 0, [0, 0], buildOutput: _ => UpToDate) };
+
+		int Exit = await new MutateCommand(Services(Runner)).RunAsync(Box.Context(), ["-name=H2", "-patch=" + Patch, "-filter=Project.Math"], CancellationToken.None);
+
+		Assert.AreEqual(MutateCommand.InconclusiveExitCode, Exit, Box.Logger.Text);
+		Assert.IsFalse(File.Exists(JournalFile(Box, "H2")), Box.Logger.Text);
+		Assert.DoesNotContain("BINARIES PENDING", Box.Logger.Text);
+		Assert.AreEqual("built before the check", File.ReadAllText(Dll));
+	}
+
+	[TestMethod]
+	[DataRow(true)]
+	[DataRow(false)]
+	public async Task AFileThePatchCreatedIsGoneOnceARebuildLinksWithoutIt(bool relinks)
+	{
+		const string AddPatch = "--- /dev/null\n+++ b/Source/Game/Private/New.cpp\n@@ -0,0 +1 @@\n+int New;\n";
+		(Sandbox Box, string Patch) = WithPatch(AddPatch);
+		using Sandbox _ = Box;
+		string[] Compiled = ["[1/2] Compile [x64] New.cpp", "[2/2] Link [x64] UnrealEditor-Game.dll"];
+		string[] Rebuilt = relinks ? ["[1/1] Link [x64] UnrealEditor-Game.dll"] : UpToDate;
+		FakeProcessRunner Runner = new() { Behaviour = Plays("test-failed.log", 255, [0, 0], buildOutput: Build => Build == 0 ? Compiled : Rebuilt) };
+
+		await new MutateCommand(Services(Runner)).RunAsync(Box.Context(), ["-name=H3", "-patch=" + Patch, "-filter=Project.Gameplay"], CancellationToken.None);
+
+		Assert.AreEqual(!relinks, File.Exists(JournalFile(Box, "H3")), Box.Logger.Text);
+	}
+
+	[TestMethod]
+	[DataRow(false)]
+	[DataRow(true)]
+	public async Task AKilledRunsRestoreAsksForACompileOnlyWhenAMutantMayHaveBeenBuilt(bool buildStarted)
+	{
+		using Sandbox Box = new();
+		File.WriteAllText(Box.SourceFile, Original);
+		LeaveJournal(Box, "K", 0, null);
+		if (!buildStarted)
+		{
+			// As the run records it before its build; it then clears that once its build may have started.
+			MutationRecord Saved = Record(Box, "K");
+			Saved.AwaitingRecompile = [];
+			StateFiles.WriteJson(JournalFile(Box, "K"), Saved);
+		}
+		FakeProcessRunner Runner = new() { Behaviour = Plays("test-passed.log", 0, [0], buildOutput: _ => UpToDate) };
+
+		int Exit = await new MutateCommand(Services(Runner)).RunAsync(Box.Context(), ["-restore"], CancellationToken.None);
+
+		Assert.AreEqual(buildStarted ? MutateCommand.RestoreFailedExitCode : 0, Exit, Box.Logger.Text);
+		Assert.AreEqual(buildStarted, File.Exists(JournalFile(Box, "K")), "no mutant was built: an up-to-date rebuild is all there is to see");
+		Assert.AreEqual(Original, File.ReadAllText(Box.SourceFile));
+	}
+
+	[TestMethod]
+	public async Task ARunRecordsWhatItsMutantBuildCompiledBeforeItsTests()
+	{
+		(Sandbox Box, string Patch) = WithPatch();
+		using Sandbox _ = Box;
+		List<string>? DuringTest = null;
+		FakeProcessRunner Runner = new() { Behaviour = Plays("test-failed.log", 255, [0], () => DuringTest = Record(Box, "K2").AwaitingRecompile) };
+
+		await new MutateCommand(Services(Runner)).RunAsync(Box.Context(), ["-name=K2", "-patch=" + Patch, "-filter=Project.Gameplay"], CancellationToken.None);
+
+		CollectionAssert.AreEqual(new[] { Box.SourceFile }, DuringTest, "a run killed in its tests leaves it");
+	}
+
+	[TestMethod]
+	public async Task RX3_TheStampPassesAFileServersClock()
+	{
+		(Sandbox Box, string Patch) = WithPatch();
+		using Sandbox _ = Box;
+		string Object = ObjectFile(Box);
+		DateTime Server = DateTime.UtcNow.AddSeconds(30);
+		List<TimeSpan> Delays = [];
+		FakeProcessRunner Runner = new()
+		{
+			Behaviour = Plays("test-failed.log", 255, [0], buildOutput: Build =>
+			{
+				if (Build == 0)
+				{
+					// A file server whose clock is 30 s ahead of this machine stamps what the build writes.
+					Sandbox.Write(Object, "mutant code");
+					File.SetLastWriteTimeUtc(Object, Server);
+				}
+				return CompileLines;
+			}),
+		};
+
+		int Exit = await new MutateCommand(Services(Runner, probe: _ => Server, delays: Delays)).RunAsync(Box.Context(), ["-name=X3", "-patch=" + Patch, "-filter=Project.Gameplay"], CancellationToken.None);
+
+		Assert.AreEqual(MutateCommand.CaughtExitCode, Exit, Box.Logger.Text);
+		Assert.IsGreaterThan(MutationJournal.UbtTimestampSlop, File.GetLastWriteTimeUtc(Box.SourceFile) - File.GetLastWriteTimeUtc(Object), "or UBT keeps the object");
+		Assert.AreEqual(TimeSpan.FromSeconds(2), Delays.Single(), "the server's clock passes the stamp as fast as this one: only the margin is waited out");
+		Assert.IsFalse(File.Exists(JournalFile(Box, "X3")));
+	}
+
+	[TestMethod]
+	public async Task TheStampPassesTheNewestBinaryTheMutantBuildWroteWaitingItOutUpToALimit()
+	{
+		(Sandbox Box, string Patch) = WithPatch();
+		using Sandbox _ = Box;
+		string Dll = WriteReceipt(Box);
+		foreach ((double Ahead, double Waited) in new[] { (30.0, 32.0), (3600.0, 60.0) })
+		{
+			DateTime Dated = DateTime.UtcNow.AddSeconds(Ahead);
+			List<TimeSpan> Delays = [];
+			string Name = $"X3b{Ahead}";
+			FakeProcessRunner Runner = new()
+			{
+				Behaviour = Plays("test-failed.log", 255, [0, 0], buildOutput: Build =>
+				{
+					if (Build == 0)
+					{
+						File.WriteAllText(Dll, "mutant " + Name);
+						File.SetLastWriteTimeUtc(Dll, Dated);
+					}
+					return Build == 0 ? CompileLines : UpToDate;
+				}),
+			};
+
+			await new MutateCommand(Services(Runner, delays: Delays)).RunAsync(Box.Context(), ["-name=" + Name, "-patch=" + Patch, "-filter=Project.Gameplay"], CancellationToken.None);
+
+			Assert.IsGreaterThan(MutationJournal.UbtTimestampSlop, File.GetLastWriteTimeUtc(Box.SourceFile) - Dated);
+			Assert.AreEqual(Waited, Delays.Single().TotalSeconds, 1.0, Box.Logger.Text);
+			// Dated past the stamp, it would pass for one relinked since.
+			Assert.AreEqual(Path.GetFullPath(Dll), MutationJournal.List(Box.Context()).Journals.Single().StillHeldBinaries()!.Single().Path);
+			Assert.AreEqual(0, await new MutateCommand(Services(new FakeProcessRunner { Behaviour = Plays("test-passed.log", 0, [0]) })).RunAsync(Box.Context(), ["-restore"], CancellationToken.None), Box.Logger.Text);
+		}
+		Assert.Contains("ahead of every clock", Box.Logger.Text);
+	}
+
+	[TestMethod]
+	public async Task TheStampWaitsForRunningCompilesBeforeItTakesItsTime()
+	{
+		(Sandbox Box, string Patch) = WithPatch();
+		using Sandbox _ = Box;
+		bool Waited = false;
+		FakeProcessRunner Runner = new() { Behaviour = Plays("test-failed.log", 255, [0]) };
+		Func<UakContext, Task<bool>> Compiles = _ =>
+		{
+			// The files are back, not stamped yet: a compile that read the mutant may still write its object.
+			Assert.AreEqual(Original, File.ReadAllText(Box.SourceFile));
+			Assert.IsNull(Record(Box, "P3").RecompileStamp);
+			Waited = true;
+			return Task.FromResult(false);
+		};
+
+		Assert.AreEqual(MutateCommand.CaughtExitCode, await new MutateCommand(Services(Runner, waitForCompiles: Compiles)).RunAsync(Box.Context(), ["-name=P3", "-patch=" + Patch, "-filter=Project.Gameplay"], CancellationToken.None), Box.Logger.Text);
+
+		Assert.IsTrue(Waited);
+		Assert.IsFalse(File.Exists(JournalFile(Box, "P3")), "a compile that outlives the wait is warned about, and stops nothing");
+	}
+
+	[TestMethod]
+	public async Task RX4_APluginTheReceiptDoesNotListIsFoundByItsFolder()
+	{
+		(Sandbox Box, string Patch) = WithPatch();
+		using Sandbox _ = Box;
+		WriteReceipt(Box);
+		string PluginDll = Path.Combine(Box.ProjectDirectory, "Plugins", "NewSincePlugin", "Binaries", "Win64", "UnrealEditor-NewSincePlugin.dll");
+		FakeProcessRunner Runner = new()
+		{
+			Behaviour = Plays("test-failed.log", 255, [0, 1], buildOutput: Build =>
+			{
+				if (Build == 0)
+				{
+					// Linked for the first time by the mutant build, in a folder that didn't exist before it, and no receipt names it.
+					Sandbox.Write(PluginDll, "mutant");
+					return ["[1/2] Compile [x64] Foo.cpp", "[2/2] Link [x64] UnrealEditor-NewSincePlugin.dll"];
+				}
+				return CompileLines;
+			}),
+		};
+
+		int Exit = await new MutateCommand(Services(Runner)).RunAsync(Box.Context(), ["-name=X4", "-patch=" + Patch, "-filter=Project.Gameplay"], CancellationToken.None);
+
+		Assert.AreEqual(MutateCommand.CaughtExitCode, Exit, Box.Logger.Text);
+		Assert.Contains("BINARIES PENDING", Box.Logger.Text);
+		Assert.Contains(Path.GetFullPath(PluginDll) + " may still hold the mutation", Box.Logger.Text);
+		FakeProcessRunner Later = new() { Behaviour = Plays("test-passed.log", 0, [0]) };
+		Assert.AreEqual(2, await new TestCommand(Services(Later)).RunAsync(Box.Context(), ["-filter=Project.Math"], CancellationToken.None));
+	}
+
+	[TestMethod]
+	public async Task ALinkOutsideTheFoldersLookedAtLeavesWhichBinariesItWroteUnknown()
+	{
+		(Sandbox Box, string Patch) = WithPatch();
+		using Sandbox _ = Box;
+		string Dll = WriteReceipt(Box);
+		// An engine plugin, say: it wrote where nothing was listed, so `Written` can't be the whole of what the build wrote.
+		string[] Mutant = ["[1/3] Compile [x64] Foo.cpp", "[2/3] Link [x64] UnrealEditor-Game.dll", "[3/3] Link [x64] UnrealEditor-EngineTool.dll"];
+		FakeProcessRunner Runner = new()
+		{
+			Behaviour = Plays("test-failed.log", 255, [0, 1], buildOutput: Build =>
+			{
+				if (Build == 0)
+				{
+					File.WriteAllText(Dll, "mutant");
+				}
+				return Mutant;
+			}),
+		};
+
+		await new MutateCommand(Services(Runner)).RunAsync(Box.Context(), ["-name=X4b", "-patch=" + Patch, "-filter=Project.Gameplay"], CancellationToken.None);
+
+		Assert.IsNull(Record(Box, "X4b").Binaries, Box.Logger.Text);
+		Assert.Contains("the mutant build linked UnrealEditor-EngineTool.dll", Box.Logger.Text);
+		Assert.Contains("uak doesn't know which", Box.Logger.Text);
+	}
+
+	[TestMethod]
+	public async Task AnImportLibraryLinkAsksForNoBinary()
+	{
+		(Sandbox Box, string Patch) = WithPatch();
+		using Sandbox _ = Box;
+		string Dll = WriteReceipt(Box);
+		FakeProcessRunner Runner = new()
+		{
+			Behaviour = Plays("test-passed.log", 0, [0, 1], buildOutput: Build =>
+			{
+				if (Build == 0)
+				{
+					File.WriteAllText(Dll, "mutant");
+				}
+				return ["[1/3] Compile [x64] Foo.cpp", "[2/3] Link [x64] UnrealEditor-Game.lib", "[3/3] Link [x64] UnrealEditor-Game.dll"];
+			}),
+		};
+
+		await new MutateCommand(Services(Runner)).RunAsync(Box.Context(), ["-name=X4c", "-patch=" + Patch, "-filter=Project.Math"], CancellationToken.None);
+
+		Assert.AreEqual(Path.GetFullPath(Dll), Record(Box, "X4c").Binaries!.Single().Path, Box.Logger.Text);
+	}
+
+	[TestMethod]
+	public async Task AMutantBuildThatStopsPartWayLeavesWhichBinariesItWroteUnknown()
+	{
+		(Sandbox Box, string Patch) = WithPatch();
+		using Sandbox _ = Box;
+		WriteReceipt(Box);
+		using CancellationTokenSource Cancel = new();
+		int Runs = 0;
+		FakeProcessRunner Runner = new()
+		{
+			Behaviour = (_, _) =>
+			{
+				if (Runs++ == 0)
+				{
+					Cancel.Cancel();
+					throw new OperationCanceledException(Cancel.Token);
+				}
+				return 1;
+			},
+		};
+
+		Assert.AreEqual(UakExitCodes.Failure, await new MutateCommand(Services(Runner)).RunAsync(Box.Context(), ["-name=X4d", "-patch=" + Patch, "-filter=Project.Math"], Cancel.Token), Box.Logger.Text);
+
+		MutationRecord Left = Record(Box, "X4d");
+		Assert.IsNull(Left.Binaries, "no log says what it linked");
+		CollectionAssert.AreEqual(new[] { Box.SourceFile }, Left.AwaitingRecompile, "it may have compiled anything");
+	}
+
+	[TestMethod]
+	public void EveryPluginsBinariesFolderCountsAndTheListIsUnionedAfterTheBuild()
+	{
+		using Sandbox Box = new();
+		string Engine = Box.Layout.EngineDirectory;
+		Sandbox.Write(Path.Combine(Box.ProjectDirectory, "Binaries", "Win64", "GameEditor.target"), """{ "BuildProducts": [ { "Path": "$(ProjectDir)/Binaries/Win64/UnrealEditor-Game.dll", "Type": "DynamicLibrary" } ] }""");
+		string Nested = Sandbox.Write(Path.Combine(Box.ProjectDirectory, "Plugins", "Group", "Inner", "Binaries", "Win64", "UnrealEditor-Inner.dll"), "a");
+		Sandbox.Write(Path.Combine(Box.ProjectDirectory, "Plugins", "Group", "Inner", "Inner.uplugin"), "{}");
+		string Stale = Sandbox.Write(Path.Combine(Box.ProjectDirectory, "Plugins", "NoDescriptor", "Binaries", "Win64", "UnrealEditor-Stale.dll"), "b");
+		string Other = Sandbox.Write(Path.Combine(Box.ProjectDirectory, "Plugins", "Group", "Inner", "Binaries", "Linux", "libUnrealEditor-Inner.so"), "c");
+		string InPlugin = Sandbox.Write(Path.Combine(Box.ProjectDirectory, "Plugins", "Group", "Inner", "Nested", "Binaries", "Win64", "UnrealEditor-NotAPlugin.dll"), "d");
+
+		TargetBinaries First = TargetBinaries.Find(Box.ProjectDirectory, Engine, "GameEditor", UnrealPlatform.Win64, "Development")!;
+		List<string> Found = [.. First.Snapshot()!.Select(Binary => Binary.Path)];
+
+		CollectionAssert.Contains(Found, Path.GetFullPath(Nested));
+		CollectionAssert.Contains(Found, Path.GetFullPath(Stale));
+		CollectionAssert.DoesNotContain(Found, Path.GetFullPath(Other));
+		CollectionAssert.DoesNotContain(Found, Path.GetFullPath(InPlugin), "UBT looks for no plugin below a plugin");
+
+		string Later = Sandbox.Write(Path.Combine(Box.ProjectDirectory, "Plugins", "New", "Binaries", "Win64", "UnrealEditor-New.dll"), "e");
+		TargetBinaries Second = First.Union(TargetBinaries.Find(Box.ProjectDirectory, Engine, "GameEditor", UnrealPlatform.Win64, "Development"))!;
+		Assert.HasCount(First.Folders.Count + 1, Second.Folders);
+		CollectionAssert.Contains(Second.Snapshot()!.Select(Binary => Binary.Path).ToList(), Path.GetFullPath(Later));
+		Assert.IsNull(First.Union(null), "a receipt lost since: unknown");
+	}
+
+	[TestMethod]
+	public async Task RX5_ARestoreRecordsTheBuildSoTheBuildItsMessageNamesClearsTheJournal()
+	{
+		using Sandbox Box = new();
+		File.WriteAllText(Box.SourceFile, Original);
+		LeaveJournal(Box, "Old", 0, null);
+		Assert.IsNull(Record(Box, "Old").BuildTarget, "as 0.4.0 left it");
+
+		FakeProcessRunner Fail = new() { Behaviour = Plays("test-passed.log", 0, [1]) };
+		Assert.AreEqual(MutateCommand.RestoreFailedExitCode, await new MutateCommand(Services(Fail)).RunAsync(Box.Context(), ["-restore"], CancellationToken.None));
+		Assert.Contains("refuse until a `uak build`", Box.Logger.Text);
+		Assert.AreEqual("GameEditor", Record(Box, "Old").BuildTarget);
+		Assert.AreEqual("Win64", Record(Box, "Old").BuildPlatform);
+		Assert.AreEqual("Development", Record(Box, "Old").BuildConfiguration);
+
+		FakeProcessRunner Later = new() { Behaviour = Plays("test-passed.log", 0, [0]) };
+		Assert.AreEqual(0, await new BuildCommand(Services(Later)).RunAsync(Box.Context(), [], CancellationToken.None), Box.Logger.Text);
+		Assert.IsFalse(File.Exists(JournalFile(Box, "Old")), "the build that message promised clears it");
+		Assert.AreEqual(0, await new TestCommand(Services(Later)).RunAsync(Box.Context(), ["-filter=Project.Math"], CancellationToken.None), Box.Logger.Text);
+	}
+
+	[TestMethod]
+	public async Task RX6_RestoreAcceptOfAnUnreadableJournalRefusesARebuildThatCompiledNothing()
+	{
+		using Sandbox Box = new();
+		File.WriteAllText(Box.SourceFile, Original);
+		LeaveJournal(Box, "U", 0, null);
+		string Folder = Path.GetDirectoryName(JournalFile(Box, "U"))!;
+		File.WriteAllText(JournalFile(Box, "U"), "{ not json");
+		// Put back by hand with a copy that keeps the copy's write time, as Copy-Item and Explorer do.
+		string Copy = Directory.GetFiles(Folder, "*.orig").Single();
+		File.Copy(Copy, Box.SourceFile, overwrite: true);
+
+		FakeProcessRunner Refused = new() { Behaviour = Plays("test-passed.log", 0, [0]) };
+		Assert.AreEqual(2, await new TestCommand(Services(Refused)).RunAsync(Box.Context(), ["-filter=Project.Math"], CancellationToken.None));
+		Assert.Contains("Give each file you put back a new write time", Box.Logger.Text);
+
+		FakeProcessRunner Fail = new() { Behaviour = Plays("test-passed.log", 0, [1]) };
+		Assert.AreEqual(MutateCommand.RestoreFailedExitCode, await new MutateCommand(Services(Fail)).RunAsync(Box.Context(), ["-restore", "-name=U", "-accept"], CancellationToken.None), Box.Logger.Text);
+		Assert.IsTrue(Directory.Exists(Folder), "after a failed rebuild the unreadable folder stays");
+		Assert.Contains("(U) stay", Box.Logger.Text);
+
+		FakeProcessRunner Good = new() { Behaviour = Plays("test-passed.log", 0, [0], buildOutput: _ => UpToDate) };
+		Assert.AreEqual(MutateCommand.RestoreFailedExitCode, await new MutateCommand(Services(Good)).RunAsync(Box.Context(), ["-restore", "-name=U", "-accept"], CancellationToken.None), Box.Logger.Text);
+		Assert.IsTrue(Directory.Exists(Folder), "up to date: the source it can't name is older than the mutant's object");
+		Assert.Contains("the rebuild compiled nothing, so the journal(s) uak can't read (U) stay", Box.Logger.Text);
+		Assert.Contains("Give each file that run touched a new write time", Box.Logger.Text);
+
+		FakeProcessRunner Compiles = new() { Behaviour = Plays("test-passed.log", 0, [0]) };
+		Assert.AreEqual(0, await new MutateCommand(Services(Compiles)).RunAsync(Box.Context(), ["-restore", "-name=U", "-accept"], CancellationToken.None), Box.Logger.Text);
+		Assert.IsFalse(Directory.Exists(Folder));
+	}
+
+	[TestMethod]
+	public async Task TheFilesAnUnreadableJournalStillNamesAreStampedBeforeItsRebuild()
+	{
+		using Sandbox Box = new();
+		File.WriteAllText(Box.SourceFile, Original);
+		LeaveJournal(Box, "V", 0, null);
+		// Parses, and names its files, but names another run: uak can't trust it, and can still stamp them.
+		File.WriteAllText(JournalFile(Box, "V"), File.ReadAllText(JournalFile(Box, "V")).Replace("\"V\"", "\"Other\"", StringComparison.Ordinal));
+		File.WriteAllText(Box.SourceFile, Original);
+		string Object = Sandbox.Write(ObjectFile(Box), "mutant code");
+		File.SetLastWriteTimeUtc(Box.SourceFile, DateTime.UtcNow.AddHours(-1));
+		DateTime? SourceAtRebuild = null;
+		FakeProcessRunner Later = new()
+		{
+			Behaviour = Plays("test-passed.log", 0, [0], buildOutput: _ =>
+			{
+				SourceAtRebuild = File.GetLastWriteTimeUtc(Box.SourceFile);
+				return CompileLines;
+			}),
+		};
+
+		Assert.AreEqual(0, await new MutateCommand(Services(Later)).RunAsync(Box.Context(), ["-restore", "-name=V", "-accept"], CancellationToken.None), Box.Logger.Text);
+
+		Assert.IsGreaterThan(MutationJournal.UbtTimestampSlop, SourceAtRebuild!.Value - File.GetLastWriteTimeUtc(Object));
+		Assert.HasCount(1, Directory.GetDirectories(MutationJournal.GetDiscardedRoot(Box.Context()), "V-*"));
+	}
+
+	[TestMethod]
+	public async Task APartialOrMisnamedListOfNoSourcesLeavesItsSourcesUnknown()
+	{
+		using Sandbox Box = new();
+		string Config = Sandbox.Write(Path.Combine(Box.ProjectDirectory, "Config", "DefaultGame.ini"), "a=1\n");
+		File.WriteAllText(Box.SourceFile, Original);
+		LeaveJournal(Box, "L", 0, null);
+		string Folder = Path.GetDirectoryName(JournalFile(Box, "L"))!;
+		string Written = File.ReadAllText(JournalFile(Box, "L")).Replace(JsonSerializer.Serialize(Box.SourceFile), JsonSerializer.Serialize(Config), StringComparison.Ordinal);
+		// Lists only a config file, and an entry with no full path, which may have been anything: List() can't read it.
+		JsonObject Partial = JsonNode.Parse(Written)!.AsObject();
+		Partial["Files"]!.AsArray().Add(new JsonObject { ["Path"] = "Lost.cpp" });
+		File.WriteAllText(JournalFile(Box, "L"), Partial.ToJsonString());
+		File.WriteAllText(Box.SourceFile, Original);
+
+		FakeProcessRunner Good = new() { Behaviour = Plays("test-passed.log", 0, [0], buildOutput: _ => UpToDate) };
+		Assert.AreEqual(MutateCommand.RestoreFailedExitCode, await new MutateCommand(Services(Good)).RunAsync(Box.Context(), ["-restore", "-name=L", "-accept"], CancellationToken.None), Box.Logger.Text);
+		Assert.IsTrue(Directory.Exists(Folder), "up to date, and the list leaves a file out: that may be a source");
+		Assert.Contains("the rebuild compiled nothing", Box.Logger.Text);
+
+		// One that names another run.
+		File.WriteAllText(JournalFile(Box, "L"), Written.Replace("\"L\"", "\"Other\"", StringComparison.Ordinal));
+		Assert.AreEqual(MutateCommand.RestoreFailedExitCode, await new MutateCommand(Services(Good)).RunAsync(Box.Context(), ["-restore", "-name=L", "-accept"], CancellationToken.None), Box.Logger.Text);
+		Assert.IsTrue(Directory.Exists(Folder), "it says nothing of this folder's run");
+
+		// Its own whole list, of no source, that uak can't otherwise read: nothing is due for a compile.
+		JsonObject Whole = JsonNode.Parse(Written)!.AsObject();
+		Whole["Phase"] = "Unheard of";
+		File.WriteAllText(JournalFile(Box, "L"), Whole.ToJsonString());
+		Assert.AreEqual(0, await new MutateCommand(Services(Good)).RunAsync(Box.Context(), ["-restore", "-name=L", "-accept"], CancellationToken.None), Box.Logger.Text);
+		Assert.IsFalse(Directory.Exists(Folder));
+
+		string Other = Path.Combine(Box.Root, "NoRecord");
+		Directory.CreateDirectory(Other);
+		Assert.IsNull(MutationFolders.ReadWholeList(Other));
+	}
+
+	[TestMethod]
+	public async Task RX7_ARecordThatNamesAnotherRunNeverPassesTheShelveGuard()
+	{
+		using Sandbox Box = new();
+		File.WriteAllText(Box.SourceFile, Original);
+		LeaveJournal(Box, "V", 0, null);
+		string Json = File.ReadAllText(JournalFile(Box, "V"));
+		// Parses, phase Restored, but names another run: List() calls it unreadable, so ListLeft() must not trust its phase.
+		string Restored = Json.Replace("\"Applied\"", "\"Restored\"", StringComparison.Ordinal);
+		File.WriteAllText(JournalFile(Box, "V"), Restored.Replace("\"V\"", "\"Other\"", StringComparison.Ordinal));
+
+		StringAssert.Contains(MutationFolders.DescribeLeft(new DirectoryInfo(Box.StateDirectory), "shelve"), "uak mutate journal is left");
+		FakeProcessRunner Later = new() { Behaviour = Plays("test-passed.log", 0, [0]) };
+		Assert.AreEqual(MutateCommand.RestoreFailedExitCode, await new MutateCommand(Services(Later)).RunAsync(Box.Context(), ["-status"], CancellationToken.None), Box.Logger.Text);
+
+		// Nor one whose paths aren't all whole; as uak writes it, its files are back.
+		File.WriteAllText(JournalFile(Box, "V"), Restored.Replace(JsonSerializer.Serialize(Box.SourceFile), "\"Foo.cpp\"", StringComparison.Ordinal));
+		Assert.IsNotNull(MutationFolders.DescribeLeft(new DirectoryInfo(Box.StateDirectory), "shelve"));
+		File.WriteAllText(JournalFile(Box, "V"), Restored);
+		Assert.IsNull(MutationFolders.DescribeLeft(new DirectoryInfo(Box.StateDirectory), "shelve"));
+	}
+
+	[TestMethod]
+	public async Task RX8_AWriteTimeChangeAloneIsNoRelink()
+	{
+		(Sandbox Box, string Patch) = WithPatch();
+		using Sandbox _ = Box;
+		string Dll = WriteReceipt(Box);
+		FakeProcessRunner Runner = new() { Behaviour = Plays("test-passed.log", 0, [0, 1], buildOutput: MutantThen(Dll, CompileLines)) };
+		Assert.AreEqual(MutateCommand.SurvivedExitCode, await new MutateCommand(Services(Runner)).RunAsync(Box.Context(), ["-name=X8", "-patch=" + Patch, "-filter=Project.Math"], CancellationToken.None));
+
+		// Same bytes, a time before the stamp: nothing relinked it.
+		File.SetLastWriteTimeUtc(Dll, DateTime.UtcNow.AddDays(-1));
+		FakeProcessRunner Later = new() { Behaviour = Plays("test-passed.log", 0, [0]) };
+		Assert.AreEqual(2, await new TestCommand(Services(Later)).RunAsync(Box.Context(), ["-filter=Project.Math"], CancellationToken.None), Box.Logger.Text);
+		Assert.AreEqual("mutant", File.ReadAllText(Dll));
+		Assert.IsTrue(File.Exists(JournalFile(Box, "X8")));
+
+		// A time past the stamp is a link after the files were back.
+		File.SetLastWriteTimeUtc(Dll, Record(Box, "X8").RecompileStamp!.Value.AddSeconds(1));
+		Assert.AreEqual(0, await new TestCommand(Services(Later)).RunAsync(Box.Context(), ["-filter=Project.Math"], CancellationToken.None), Box.Logger.Text);
+		Assert.IsFalse(File.Exists(JournalFile(Box, "X8")));
+	}
+
+	[TestMethod]
+	[DataRow("Source/Game/Game.Build.cs")]
+	[DataRow("Source/Extra.Target.cs")]
+	[DataRow("Plugins/Tool/Tool.uplugin")]
+	[DataRow("Game.uproject")]
+	public async Task RX9_APatchToWhatTheBuildIsMadeOfLeavesWhichBinariesItWroteUnknown(string file)
+	{
+		string BuildPatch = $"--- a/{file}\n+++ b/{file}\n@@ -1 +1 @@\n-// a\n+// b\n";
+		(Sandbox Box, string Patch) = WithPatch(BuildPatch);
+		using Sandbox _ = Box;
+		Sandbox.Write(Path.Combine(Box.ProjectDirectory, file.Replace('/', Path.DirectorySeparatorChar)), "// a\n");
+		string Dll = WriteReceipt(Box);
+		// All it links is in the list, so only the kind of file patched can say the list isn't whole.
+		FakeProcessRunner Runner = new() { Behaviour = Plays("test-failed.log", 255, [0, 1], buildOutput: MutantThen(Dll, CompileLines)) };
+
+		int Exit = await new MutateCommand(Services(Runner)).RunAsync(Box.Context(), ["-name=X9", "-patch=" + Patch, "-filter=Project.Gameplay"], CancellationToken.None);
+
+		Assert.AreEqual(MutateCommand.CaughtExitCode, Exit, Box.Logger.Text);
+		Assert.Contains("uak doesn't know which", Box.Logger.Text);
+		Assert.IsNull(Record(Box, "X9").Binaries, "it may add a module or a plugin, whose binaries no receipt lists");
+	}
+
+	[TestMethod]
+	[DataRow("Foo.Build.cs", true)]
+	[DataRow("Game.Target.cs", true)]
+	[DataRow("Tool.UPLUGIN", true)]
+	[DataRow("Game.uproject", true)]
+	[DataRow("Foo.cs", false)]
+	[DataRow("Foo.cpp", false)]
+	public void TheFilesThatSayWhatABuildIsMadeOfAreKnown(string path, bool expected)
+	{
+		Assert.AreEqual(expected, MutateCommand.IsBuildDescription(path));
+	}
+
+	[TestMethod]
+	public async Task ARestoreRefusesWhileTheKilledChecksCommandStillRuns()
+	{
+		using Sandbox Box = new();
+		File.WriteAllText(Box.SourceFile, Original);
+		LeaveJournal(Box, "O", 0, null);
+		string Mutant = File.ReadAllText(Box.SourceFile);
+		FakeLock Lock = new() { OrphanedCommand = "PID 42", OrphanedHoldIds = ["abc"] };
+		FakeProcessRunner Runner = new() { Behaviour = Plays("test-passed.log", 0, [0]) };
+
+		Assert.AreEqual(2, await new MutateCommand(Services(Runner, Lock)).RunAsync(Box.Context(), ["-restore"], CancellationToken.None), Box.Logger.Text);
+
+		Assert.Contains("the killed check's command still runs (PID 42)", Box.Logger.Text);
+		Assert.Contains("`uak lock forget-orphan -hold=abc`", Box.Logger.Text);
+		Assert.Contains("may have been reused", Box.Logger.Text);
+		Assert.AreEqual(Mutant, File.ReadAllText(Box.SourceFile));
+		Assert.IsEmpty(Runner.Invocations);
+		Assert.AreEqual(1, Lock.Released);
+		Lock.OrphanedCommand = null;
+		Assert.AreEqual(0, await new MutateCommand(Services(Runner, Lock)).RunAsync(Box.Context(), ["-restore"], CancellationToken.None), Box.Logger.Text);
+		Assert.AreEqual(Original, File.ReadAllText(Box.SourceFile));
+	}
+
+	[TestMethod]
+	public async Task ACheckRefusesWhileADeadHoldsCommandStillRuns()
+	{
+		(Sandbox Box, string Patch) = WithPatch();
+		using Sandbox _ = Box;
+		FakeLock Lock = new() { OrphanedCommand = "PID 42", OrphanedHoldIds = ["abc", "def"] };
+		FakeProcessRunner Runner = new() { Behaviour = Plays("test-passed.log", 0, [0, 0]) };
+
+		Assert.AreEqual(2, await new MutateCommand(Services(Runner, Lock)).RunAsync(Box.Context(), ["-name=O2", "-patch=" + Patch, "-filter=Project.Math"], CancellationToken.None), Box.Logger.Text);
+
+		Assert.Contains("a dead hold's command still runs (PID 42)", Box.Logger.Text);
+		Assert.Contains("`uak lock forget-orphan -hold=abc` and `uak lock forget-orphan -hold=def`", Box.Logger.Text);
+		Assert.Contains("may have been reused", Box.Logger.Text);
+		Assert.AreEqual(Original, File.ReadAllText(Box.SourceFile));
+		Assert.IsEmpty(Runner.Invocations);
+		Assert.IsFalse(File.Exists(JournalFile(Box, "O2")));
+		Assert.AreEqual(1, Lock.Released);
+	}
+
+	/// <summary>The real lock, with the wait for a dead holder's command cut short.</summary>
+	sealed class ShortWaitLock : IEditorLockProvider
+	{
+		public async Task<IAsyncDisposable> AcquireAsync(UakContext context, string name, CancellationToken cancellationToken)
+		{
+			EditorLockOptions Options = new() { PollInterval = TimeSpan.FromMilliseconds(50), OrphanedCommandTimeout = TimeSpan.FromMilliseconds(100) };
+			return await EditorLock.AcquireAsync(context, name, null, Options, cancellationToken).ConfigureAwait(false);
+		}
+	}
+
+	[TestMethod]
+	public async Task ForgetOrphanLetsARestoreThroughThatTheRealLockRefused()
+	{
+		using Sandbox Box = new();
+		File.WriteAllText(Box.SourceFile, Original);
+		LeaveJournal(Box, "O3", 0, null);
+		string Mutant = File.ReadAllText(Box.SourceFile);
+		// This process stands for a reused PID: it runs, and it won't end.
+		ProcessIdentity Self = ProcessIdentity.Current;
+		EditorLockScope Scope = EditorLock.GetScope(Box.Context());
+		LockHolderInfo Record = new()
+		{
+			Name = "uak mutate O3",
+			Pid = 1,
+			Machine = Environment.MachineName,
+			HoldId = Guid.NewGuid().ToString("N"),
+			Scope = Scope.ToString(),
+			ScopeKey = Scope.Key,
+			CommandPid = Self.Pid,
+			CommandProcessStart = Self.StartTimeUtc,
+		};
+		StateFiles.WriteJson(Path.Combine(Box.StateDirectory, "Lock", "Orphans", Record.HoldId + ".json"), Record);
+		FakeProcessRunner Runner = new() { Behaviour = Plays("test-passed.log", 0, [0]) };
+		UnrealServices Real = Services(Runner, new ShortWaitLock());
+
+		Assert.AreEqual(2, await new MutateCommand(Real).RunAsync(Box.Context(), ["-restore"], CancellationToken.None), Box.Logger.Text);
+		Assert.Contains($"`uak lock forget-orphan -hold={Record.HoldId}`", Box.Logger.Text);
+		Assert.AreEqual(Mutant, File.ReadAllText(Box.SourceFile));
+
+		Assert.AreEqual(0, await new LockForgetOrphanCommand().RunAsync(Box.Context(), ["-hold=" + Record.HoldId], CancellationToken.None), Box.Logger.Text);
+
+		Assert.AreEqual(0, await new MutateCommand(Real).RunAsync(Box.Context(), ["-restore"], CancellationToken.None), Box.Logger.Text);
+		Assert.AreEqual(Original, File.ReadAllText(Box.SourceFile));
+	}
+
+	[TestMethod]
+	[DataRow("Proto/Foo.proto", "Foo.pb.cc")]
+	[DataRow("Foo.swift", "Foo.swift Bar.swift")]
+	[DataRow("Foo.rc", "Resource [x64] Foo.rc")]
+	public void ASourceNoCompileIsNamedAfterNeedsOneCompile(string name, string item)
+	{
+		List<DiffFile> Files = UnifiedDiff.Parse($"--- a/{name}\n+++ b/{name}\n@@ -1 +1 @@\n-a\n+b\n");
+		MutationFile Entry = new() { Path = name, Existed = true };
+		BuildOutcome Built = new(true, false, [item], []);
+		BuildOutcome Nothing = new(true, true, [], []);
+
+		Assert.IsEmpty(MutateCommand.FindUncompiled(Built, Files, [name]));
+		Assert.HasCount(1, MutateCommand.FindUncompiled(Nothing, Files, [name]), "the patch never reached the binaries");
+		Assert.IsTrue(MutateCommand.ShowsRecompile(Built with { CompiledClean = [item] }, Entry));
+		Assert.IsFalse(MutateCommand.ShowsRecompile(Nothing, Entry));
+	}
+
+	[TestMethod]
+	public void AResourceCompileIsACompileItemThatNamesItsFile()
+	{
+		BuildLogSummary Summary = BuildLogParser.Parse(["[1/1] Compile Resource [x64] Foo.rc"]);
+
+		Assert.AreEqual("Compile", Summary.Actions.Single().Kind);
+		Assert.Contains("Foo.rc", Summary.Actions.Single().Item);
+	}
+
+	[TestMethod]
+	public async Task AStampThatThrowsLeavesTheJournalAndTheRunStillReportsIt()
+	{
+		(Sandbox Box, string Patch) = WithPatch();
+		using Sandbox _ = Box;
+		FakeProcessRunner Runner = new() { Behaviour = Plays("test-passed.log", 0, [0, 0]) };
+		static Task<bool> Throws(UakContext _) => throw new InvalidOperationException("the compiles can't be listed");
+
+		Assert.AreEqual(MutateCommand.RestoreFailedExitCode, await new MutateCommand(Services(Runner, waitForCompiles: Throws)).RunAsync(Box.Context(), ["-name=N10", "-patch=" + Patch, "-filter=Project.Math"], CancellationToken.None), Box.Logger.Text);
+
+		Assert.Contains("could not mark the files for a recompile: the compiles can't be listed", Box.Logger.Text);
+		Assert.AreEqual(Original, File.ReadAllText(Box.SourceFile));
+		Assert.IsTrue(File.Exists(JournalFile(Box, "N10")));
+		Assert.AreEqual(0, await new MutateCommand(Services(Runner)).RunAsync(Box.Context(), ["-restore"], CancellationToken.None), Box.Logger.Text);
+	}
+
+	[TestMethod]
+	public void ADotFolderIsNeverTakenForTheWorkTreeOfAPatch()
+	{
+		using Sandbox Box = new();
+		const string Path_ = "Source/Tool/Tool.cpp";
+		List<DiffFile> Files = UnifiedDiff.Parse($"--- a/{Path_}\n+++ b/{Path_}\n@@ -1 +1 @@\n-a\n+b\n");
+		string Plugin = Path.Combine(Box.ProjectDirectory, "Plugins", "Tool");
+		string Worktree = Path.Combine(Box.ProjectDirectory, ".claude", "worktree");
+		foreach (string Folder in new[] { Plugin, Worktree })
+		{
+			Sandbox.Write(Path.Combine(Folder, ".git"), "gitdir: elsewhere\n");
+			Sandbox.Write(Path.Combine(Folder, "Source", "Tool", "Tool.cpp"), "a\n");
+		}
+
+		Assert.AreEqual(Plugin, MutateCommand.FindNestedGitRoot(Files, Box.ProjectDirectory, Box.ProjectDirectory), "or two fit, and the patch is refused");
 	}
 }

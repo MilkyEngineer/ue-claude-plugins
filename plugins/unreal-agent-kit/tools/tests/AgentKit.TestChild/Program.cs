@@ -88,6 +88,10 @@ internal static class Program
 		}
 		await using (hold)
 		{
+			if (hold.OrphanedCommand is string orphaned)
+			{
+				Append(log, $"orphaned {name} {orphaned}");
+			}
 			Append(log, $"enter {name}");
 			await Task.Delay(holdMilliseconds < 0 ? Timeout.Infinite : holdMilliseconds).ConfigureAwait(false);
 			Append(log, $"leave {name}");

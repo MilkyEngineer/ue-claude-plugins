@@ -33,6 +33,9 @@ public interface IPreflightWorkspace : IDisposable
 
 	/// <summary>The files on the shelf of a pending change of this client that are not opened in it.</summary>
 	Task<IReadOnlyList<string>> GetShelvedNotOpenedAsync(int change, CancellationToken cancellationToken);
+
+	/// <summary>The depot files opened in a pending change of this client, which <see cref="ShelveAsync"/> would shelve.</summary>
+	Task<IReadOnlyList<string>> GetOpenedAsync(int change, CancellationToken cancellationToken);
 }
 
 /// <summary>uak refuses to go on, to protect what Horde would submit (exit 5: an error, not a usage problem).</summary>
@@ -106,6 +109,10 @@ public sealed class PerforcePreflightWorkspace : IPreflightWorkspace
 
 	/// <inheritdoc/>
 	public Task<IReadOnlyList<string>> GetShelvedNotOpenedAsync(int change, CancellationToken cancellationToken) => _p4.GetShelvedNotOpenedAsync(change, cancellationToken);
+
+	/// <inheritdoc/>
+	public async Task<IReadOnlyList<string>> GetOpenedAsync(int change, CancellationToken cancellationToken) =>
+		(await _p4.GetOwnPendingChangeAsync(change, cancellationToken).ConfigureAwait(false)).Files;
 
 	/// <inheritdoc/>
 	public void Dispose() => _p4.Dispose();
@@ -1255,6 +1262,12 @@ public sealed class HordePreflightCommand : HordeCommandBase
 					if (MutationFolders.DescribeLeft(context.StateDirectory, "shelve") is string lateMutation)
 					{
 						throw new HordeRefusedException(lateMutation);
+					}
+					// A run whose files are back may have left its patch in binaries, which a project that versions them would ship.
+					if (MutationFolders.HasBinariesPending(context.StateDirectory) && MutationFolders.DescribeBinariesIn(context.StateDirectory,
+						await workspace!.GetOpenedAsync(change, cancellationToken).ConfigureAwait(false), "shelve") is string heldBinaries)
+					{
+						throw new HordeRefusedException(heldBinaries);
 					}
 					shelved = await workspace!.ShelveAsync(change, shelveMode, cancellationToken).ConfigureAwait(false);
 					string how = shelveMode == ShelveMode.Replace ? "p4 shelve -r: the shelf is now exactly the opened files" : "p4 shelve -f";

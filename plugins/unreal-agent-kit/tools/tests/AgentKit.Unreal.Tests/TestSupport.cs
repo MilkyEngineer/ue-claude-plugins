@@ -136,6 +136,12 @@ internal sealed class FakeLock : IEditorLockProvider
 	/// <summary>How many others wait in line (CountWaiting).</summary>
 	public int Waiting { get; set; }
 
+	/// <summary>What of a dead holder's command the hold says still runs.</summary>
+	public string? OrphanedCommand { get; set; }
+
+	/// <summary>The holds whose records keep it.</summary>
+	public IReadOnlyList<string> OrphanedHoldIds { get; set; } = [];
+
 	public Task<IAsyncDisposable> AcquireAsync(UakContext context, string name, CancellationToken cancellationToken)
 	{
 		Names.Add(name);
@@ -151,8 +157,12 @@ internal sealed class FakeLock : IEditorLockProvider
 
 	public int CountWaiting(UakContext context) => Waiting;
 
-	sealed class Hold(FakeLock owner) : IAsyncDisposable
+	sealed class Hold(FakeLock owner) : IAsyncDisposable, AgentKit.Locking.IOrphanedCommandHold
 	{
+		public string? OrphanedCommand => owner.OrphanedCommand;
+
+		public IReadOnlyList<string> OrphanedHoldIds => owner.OrphanedHoldIds;
+
 		public ValueTask DisposeAsync()
 		{
 			owner.Held--;

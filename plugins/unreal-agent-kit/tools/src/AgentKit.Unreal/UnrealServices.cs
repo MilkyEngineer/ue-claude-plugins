@@ -112,6 +112,32 @@ public sealed class UnrealServices
 	/// <summary>The clock, for log names and progress echoes.</summary>
 	public TimeProvider Clock { get; init; } = TimeProvider.System;
 
+	/// <summary>
+	/// How far past the newest clock and anything the mutant build wrote <c>uak mutate</c> sets the write time of the files it
+	/// put back: more than UBT's one second of slop, so the next build recompiles them (<see cref="MutationJournal.StampForRecompile"/>).
+	/// </summary>
+	public TimeSpan RecompileMargin { get; init; } = TimeSpan.FromSeconds(2);
+
+	/// <summary>
+	/// The longest <c>uak mutate</c> waits, under the lock, for the time it sets to pass. Only a binary dated ahead of every
+	/// clock takes more than <see cref="RecompileMargin"/>; past this, the time is set anyway: a file in the future is
+	/// recompiled by each build until then, which is slow, not wrong.
+	/// </summary>
+	public TimeSpan MaxRecompileWait { get; init; } = TimeSpan.FromSeconds(60);
+
+	/// <summary>Waits real time: <c>uak mutate</c> waits until the time it sets has passed, so it is never in the future (tests skip the wait).</summary>
+	public Func<TimeSpan, Task> Delay { get; init; } = Wait => Task.Delay(Wait);
+
+	/// <summary>Reads the clock of the file system a file is on (<see cref="MutationJournal.ProbeFileTime"/>).</summary>
+	public Func<string, DateTime?> ProbeFileTime { get; init; } = MutationJournal.ProbeFileTime;
+
+	/// <summary>
+	/// Waits for running <c>uak compile</c>s: one that read the mutant must write its object before <c>uak mutate</c> stamps
+	/// the files, or that object would count as newer than them. Returns whether none is left (<see cref="QuietRuns.WaitForCompilesAsync"/>).
+	/// </summary>
+	public Func<UakContext, Task<bool>> WaitForCompiles { get; init; } = Context => QuietRuns.WaitForCompilesAsync(Context, QuietRuns.DefaultPollInterval,
+		QuietRuns.DefaultCompileWaitTimeout, CancellationToken.None, "so one may still write an object of the mutant, which a build would take as up to date");
+
 	/// <summary>Reads the version-control state of the tree a build or test runs on (<see cref="VcsTreeState"/>).</summary>
 	public Func<UakContext, CancellationToken, Task<VcsTreeState>> CaptureTree { get; init; } = VcsTreeState.CaptureAsync;
 

@@ -128,6 +128,7 @@ public sealed class BuildCommand : IUakCommand
 		int ExitCode;
 		Stopwatch Timer;
 		Task<VcsTreeState>? TreeTask;
+		BuildOutcome Outcome;
 		await using (StreamWriter Log = new(LogFile, append: false, new System.Text.UTF8Encoding(false)) { AutoFlush = true })
 		{
 			await Log.WriteLineAsync("> " + Invocation).ConfigureAwait(false);
@@ -153,6 +154,20 @@ public sealed class BuildCommand : IUakCommand
 					Progress.AddLine(Line);
 				}, Lock, cancellationToken).ConfigureAwait(false);
 				Timer.Stop();
+				Outcome = BuildOutcome.From(Parser.Summary, ExitCode);
+				// Still under the lock: a stopped mutation run whose files are back and stamped for a recompile waits for a whole build
+				// of its target to recompile them and succeed. UBT arguments may build part of it: such a build doesn't count.
+				if (heldLock is null && request.PassThrough.Count == 0)
+				{
+					try
+					{
+						MutationJournal.ClearAfterBuild(context, Target, request.Platform.Name, request.Configuration, Outcome.Built, Entry => MutateCommand.ShowsRecompile(Outcome, Entry));
+					}
+					catch (Exception Exception) when (Exception is IOException or UnauthorizedAccessException)
+					{
+						context.Logger.LogWarning("Could not look for mutation journals this build clears: {Message}", Exception.Message);
+					}
+				}
 			}
 		}
 
@@ -166,8 +181,8 @@ public sealed class BuildCommand : IUakCommand
 		{
 			context.Logger.LogError("    ... and {More} more errors", Summary.Errors.Count - request.MaxErrors);
 		}
-		bool Built = ExitCode == 0 && Summary.Errors.Count == 0;
-		int Compiled = Summary.Actions.Count(Action => Action.Kind.Equals("Compile", StringComparison.OrdinalIgnoreCase));
+		bool Built = Outcome.Built;
+		int Compiled = Outcome.Compiled.Count;
 		SummaryWriter Out = new(context.Logger);
 		if (Tree is not null)
 		{
@@ -206,8 +221,7 @@ public sealed class BuildCommand : IUakCommand
 			Errors = Summary.Errors.Select(Error => Error.ToString()).ToList(),
 			Warnings = Summary.Warnings.Count,
 		});
-		return new BuildOutcome(Built, Summary.UpToDate,
-			[.. Summary.Actions.Where(Action => Action.Kind.Equals("Compile", StringComparison.OrdinalIgnoreCase)).Select(Action => Action.Item)], Summary.Errors);
+		return Outcome;
 	}
 }
 
@@ -215,7 +229,48 @@ public sealed class BuildCommand : IUakCommand
 /// What a build did, for <c>uak mutate</c>: whether it built, whether UBT found it up to date, the items its Compile actions
 /// named ("Foo.cpp", "Module.Game.2.cpp"), and its errors.
 /// </summary>
-internal sealed record BuildOutcome(bool Built, bool UpToDate, IReadOnlyList<string> Compiled, IReadOnlyList<CompileDiagnostic> Errors);
+internal sealed record BuildOutcome(bool Built, bool UpToDate, IReadOnlyList<string> Compiled, IReadOnlyList<CompileDiagnostic> Errors)
+{
+	/// <summary>
+	/// The files its link actions wrote or tried to ("UnrealEditor-Game.dll", "libUnrealEditor-Game.so"): Link and its
+	/// variants (Link-LTO, Link-PGO, Relink), not a stub (LinkStub) nor an archive.
+	/// </summary>
+	public IReadOnlyList<string> Linked { get; init; } = [];
+
+	/// <summary>
+	/// The items of <see cref="Compiled"/> that surely compiled: those no error was reported under, and none after a build
+	/// that failed with no error its log names, or with any failure it can't lay on an action
+	/// (<see cref="BuildLogSummary.EveryFailureAttributed"/>), where any action may have failed. A failed compile leaves the
+	/// old object, so it is no evidence that the object is gone.
+	/// </summary>
+	public IReadOnlyList<string> CompiledClean { get; init; } = [];
+
+	/// <summary>
+	/// Whether UBT stopped part way: it failed with no "Result:" line and no error parsed, so it was killed, or crashed, or never
+	/// got that far, and an action that was running may have written its output without its line ever being printed. The items
+	/// above then say what UBT finished, not what it did.
+	/// </summary>
+	public bool StoppedPartWay { get; init; }
+
+	/// <summary>What a UBT run's log and exit code say.</summary>
+	public static BuildOutcome From(BuildLogSummary summary, int exitCode)
+	{
+		bool Built = exitCode == 0 && summary.Errors.Count == 0;
+		List<string> Compiled = [.. summary.Actions.Where(Action => Action.Kind.Equals("Compile", StringComparison.OrdinalIgnoreCase)).Select(Action => Action.Item)];
+		return new BuildOutcome(Built, summary.UpToDate, Compiled, summary.Errors)
+		{
+			Linked = [.. summary.Actions.Where(Action => IsLink(Action.Kind)).Select(Action => Action.Item)],
+			CompiledClean = Built || (summary.Errors.Count > 0 && summary.EveryFailureAttributed) ? [.. Compiled.Where(Item => !summary.FailedActions.Contains(Item))] : [],
+			StoppedPartWay = !Built && summary.Result is null && summary.Errors.Count == 0,
+		};
+	}
+
+	static bool IsLink(string kind)
+	{
+		return (kind.StartsWith("Link", StringComparison.OrdinalIgnoreCase) || kind.StartsWith("Relink", StringComparison.OrdinalIgnoreCase))
+			&& !kind.Equals("LinkStub", StringComparison.OrdinalIgnoreCase);
+	}
+}
 
 /// <summary>What <see cref="BuildCommand.BuildAsync"/> builds.</summary>
 internal sealed record BuildRequest

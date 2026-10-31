@@ -88,6 +88,8 @@ public sealed class LockUnitTests
 	{
 		Assert.AreEqual("lock run", new LockRunCommand().Name);
 		Assert.AreEqual("lock status", new LockStatusCommand().Name);
+		Assert.AreEqual("lock forget-orphan", new LockForgetOrphanCommand().Name);
+		Assert.IsFalse(((IUakCommand)new LockForgetOrphanCommand()).RequiresEngine);
 		Assert.IsFalse(((IUakCommand)new LockRunCommand()).RequiresEngine);
 		Assert.IsFalse(((IUakCommand)new LockStatusCommand()).RequiresEngine);
 	}

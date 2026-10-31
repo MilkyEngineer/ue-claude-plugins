@@ -103,6 +103,63 @@ public sealed class LockRunCommand : IUakCommand
 	}
 }
 
+/// <summary><c>uak lock forget-orphan -hold=&lt;id&gt;</c>: drops a kept record of a dead holder's command (<see cref="OrphanRecords"/>).</summary>
+public sealed class LockForgetOrphanCommand : IUakCommand
+{
+	/// <inheritdoc />
+	public string Name => "lock forget-orphan";
+
+	/// <inheritdoc />
+	public string Summary => "Drop the record of a dead holder's command that can't be seen to end (a reused PID).";
+
+	/// <inheritdoc />
+	public string Usage => """
+		uak lock forget-orphan -hold=<id>
+		  -hold=          the hold whose record to drop, as `uak lock status` and the refusals of `uak mutate` name it
+		  A dead holder's command that outlives the wait for it is kept in <State>/Lock/Orphans/<id>.json: every hold waits
+		  for it, and `uak mutate` and its -restore refuse, until the process with that start time has gone. This is the way
+		  out when that can't be seen, as when another process reused the PID and its start time can't be read.
+		  Use it only once the process is known to be gone, or its PID known to be reused: a build that really still runs
+		  could write mutant objects past the stamp. It takes the editor lock, drops the record, and says what it dropped and
+		  the PID; it does not stop anything. Exit 2 when no kept record has that id, listing those that are kept.
+		""";
+
+	/// <inheritdoc />
+	public bool RequiresEngine => false;
+
+	/// <inheritdoc />
+	public async Task<int> RunAsync(UakContext context, IReadOnlyList<string> arguments, CancellationToken cancellationToken)
+	{
+		ArgumentNullException.ThrowIfNull(context);
+		UakArguments parsed = new(arguments);
+		string? holdId = parsed.GetString("hold");
+		parsed.ThrowIfUnknown();
+		parsed.ThrowIfMorePositionalThan(0);
+		if (string.IsNullOrWhiteSpace(holdId))
+		{
+			throw new UakUsageException("lock forget-orphan needs -hold=<id>: `uak lock status` names the kept records.");
+		}
+
+		// Only a holder changes the records. The record itself is why this runs, so waiting for its command would be 30 s for nothing.
+		await using EditorLockHold hold = await EditorLock.AcquireAsync(context, "uak lock forget-orphan", null, new EditorLockOptions { OrphanedCommandTimeout = TimeSpan.Zero }, cancellationToken).ConfigureAwait(false);
+		List<OrphanRecord> records = OrphanRecords.List(new LockPaths(context.StateDirectory), hold.Scope, context.Logger);
+		OrphanRecord? record = records.Find(kept => string.Equals(kept.Holder.HoldId, holdId, StringComparison.OrdinalIgnoreCase));
+		if (record?.File is null)
+		{
+			string kept = records.Count == 0 ? "none" : string.Join(", ", records.Select(other => other.Holder.HoldId));
+			throw new UakUsageException($"no kept record of this lock has the hold id '{holdId}' (a record goes by itself once its command has ended). Kept: {kept}.");
+		}
+		if (!StateFiles.TryDelete(record.File))
+		{
+			context.Logger.LogError("Could not delete {File}: the record is still kept.", record.File);
+			return UakExitCodes.Failure;
+		}
+		context.Logger.LogInformation("Dropped the record of hold {HoldId}: '{Name}' (PID {Pid}), command {Command}. Nothing was stopped.",
+			record.Holder.HoldId, record.Holder.Name, record.Holder.Pid, EditorLock.DescribeCommand(record.Holder));
+		return UakExitCodes.Success;
+	}
+}
+
 /// <summary><c>uak lock status</c>: who holds the editor lock, for how long, and who waits.</summary>
 public sealed class LockStatusCommand : IUakCommand
 {
@@ -186,6 +243,10 @@ public sealed class LockStatusCommand : IUakCommand
 				text.Append(CultureInfo.InvariantCulture, $"  {position,2}. {ticket.Name,-40} PID {ticket.Pid,-6} {ticket.Priority,-6} waiting {FormatSpan(nowUtc - ticket.Queued)}\n");
 				position++;
 			}
+		}
+		foreach (LockHolderInfo orphan in status.OrphanedCommands)
+		{
+			text.Append(CultureInfo.InvariantCulture, $"Orphaned  {orphan.Name}  PID {orphan.Pid} has gone, but its command still runs ({EditorLock.DescribeCommand(orphan)}): each hold waits for it and warns, and `uak mutate` refuses, until it ends. {EditorLock.DescribeForgetOrphan([orphan.HoldId])}\n");
 		}
 		foreach (LockTicketInfo ticket in status.OtherMachineTickets)
 		{

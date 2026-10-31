@@ -77,6 +77,31 @@ public sealed class ProcessIdentityTests
 	}
 
 	[TestMethod]
+	[DataRow("12 (UnrealBuildTool) Z 1 12 12", true)]
+	[DataRow("12 (a) b) Z (c) Z 1 12", true)]
+	[DataRow("12 (dotnet) S 1 12 12", false)]
+	[DataRow("12 (Z) R 1 12 12", false)]
+	[DataRow("12 (cut", false)]
+	[DataRow("12 (end)", false)]
+	public void AZombieIsReadFromTheStateAfterTheName(string stat, bool zombie)
+	{
+		Assert.AreEqual(zombie, ProcessIdentity.IsZombieStat(stat));
+	}
+
+	[TestMethod]
+	public void AWiderToleranceTakesAStartTimeTheDefaultDoesNot()
+	{
+		DateTime start = ProcessIdentity.Current.StartTimeUtc!.Value.AddSeconds(30);
+		ProcessIdentity stepped = new(Environment.ProcessId, start);
+
+		Assert.IsFalse(stepped.IsAlive());
+		Assert.IsTrue(stepped.IsAlive(TimeSpan.FromSeconds(60)));
+		Assert.IsFalse(stepped.IsAlive(TimeSpan.FromSeconds(10)));
+		Assert.IsTrue(ProcessIdentity.StartTimesMatch(start, start.AddSeconds(59), TimeSpan.FromSeconds(60)));
+		Assert.IsFalse(ProcessIdentity.StartTimesMatch(start, start.AddSeconds(61), TimeSpan.FromSeconds(60)));
+	}
+
+	[TestMethod]
 	public void StartTimesMatchWithinTheTolerance()
 	{
 		DateTime time = new(2026, 10, 1, 6, 5, 0, DateTimeKind.Utc);

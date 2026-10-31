@@ -3,6 +3,7 @@
 using System.Globalization;
 using System.Text.Json.Serialization;
 using AgentKit.Core;
+using Microsoft.Extensions.Logging;
 
 namespace AgentKit.Locking;
 
@@ -89,6 +90,7 @@ public sealed class LockHolderInfo
 	/// Addition: the process of the command the holder runs (<c>uak lock run</c>'s child, or the UBT or editor process of
 	/// <c>uak build</c> and <c>uak test</c>). If the holder dies, the next holder waits for it to end before it goes ahead.
 	/// </summary>
+	/// <remarks>One that outlives that wait is kept in a record of its own (<see cref="OrphanRecords"/>), for every hold after.</remarks>
 	public int? CommandPid { get; set; }
 
 	/// <summary>Addition: the start time (UTC) of <see cref="CommandPid"/>, or null when unknown.</summary>
@@ -124,6 +126,7 @@ internal sealed class LockPaths
 		QueueDirectory = Path.Combine(LockDirectory, "Queue");
 		HolderFile = Path.Combine(LockDirectory, "holder.json");
 		CompilesDirectory = Path.Combine(LockDirectory, "Compiles");
+		OrphansDirectory = Path.Combine(LockDirectory, "Orphans");
 	}
 
 	/// <summary>&lt;State&gt;/Lock.</summary>
@@ -137,6 +140,85 @@ internal sealed class LockPaths
 
 	/// <summary>&lt;State&gt;/Lock/Compiles: one marker per running <c>uak compile</c>, which a quiet hold waits for.</summary>
 	public string CompilesDirectory { get; }
+
+	/// <summary>&lt;State&gt;/Lock/Orphans: one record per command that outlived its dead holder and the wait for it (<see cref="OrphanRecords"/>).</summary>
+	public string OrphansDirectory { get; }
+}
+
+/// <summary>A dead holder's record, as the lock's wait for its command sees it.</summary>
+/// <param name="Holder">What the holder recorded.</param>
+/// <param name="File">The file that keeps it in <see cref="LockPaths.OrphansDirectory"/>; null while only holder.json holds it.</param>
+internal sealed record OrphanRecord(LockHolderInfo Holder, string? File);
+
+/// <summary>
+/// The commands that outlived their dead holder and the wait for them (on Linux and Mac, where nothing stops a command with
+/// its holder): the holder's <see cref="LockHolderInfo"/>, as a file named after its hold in
+/// <c>&lt;State&gt;/Lock/Orphans/</c>. holder.json can't keep this: the next hold writes over it, and deletes it on release, so a
+/// record there lasts one hold, while such a command may run through any number of them. Only a holder of the lock writes
+/// here, and it deletes a record once that command has ended: its process, with that start time, has gone, and its job is
+/// empty. Another lock's and another machine's records are left alone, as they are in holder.json.
+/// </summary>
+internal static class OrphanRecords
+{
+	/// <summary>The records kept for this lock on this machine. One that can't be read is left out, with a warning: each is written whole.</summary>
+	public static List<OrphanRecord> List(LockPaths paths, EditorLockScope scope, ILogger logger)
+	{
+		string[] files;
+		try
+		{
+			files = Directory.Exists(paths.OrphansDirectory) ? Directory.GetFiles(paths.OrphansDirectory, "*.json") : [];
+		}
+		catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+		{
+			logger.LogWarning("Could not list {Directory}, so a command that still runs may go unnoticed: {Message}", paths.OrphansDirectory, exception.Message);
+			return [];
+		}
+		Array.Sort(files, StringComparer.Ordinal);
+		List<OrphanRecord> records = [];
+		foreach (string file in files)
+		{
+			LockHolderInfo? holder = StateFiles.ReadJson<LockHolderInfo>(file);
+			if (holder is null)
+			{
+				// A holder may have deleted it since the listing: that is no failure.
+				if (File.Exists(file))
+				{
+					logger.LogWarning("Could not read {File}, so the command it records, if it still runs, goes unnoticed.", file);
+				}
+				continue;
+			}
+			if (!LockQueue.IsOtherMachine(holder.Machine) && EditorLock.IsSameScope(holder, scope))
+			{
+				records.Add(new OrphanRecord(holder, file));
+			}
+		}
+		return records;
+	}
+
+	/// <summary>
+	/// Writes a dead holder's record, unless it has one. Before the new hold writes over holder.json, so a kill between the two
+	/// loses neither. A hold ID that can't name a file is replaced: the record's ID is what <c>uak lock forget-orphan</c> takes.
+	/// </summary>
+	public static void Keep(LockPaths paths, OrphanRecord record, ILogger logger)
+	{
+		if (record.File is not null)
+		{
+			return;
+		}
+		if (!Guid.TryParseExact(record.Holder.HoldId, "N", out _))
+		{
+			record.Holder.HoldId = Guid.NewGuid().ToString("N");
+		}
+		string file = Path.Combine(paths.OrphansDirectory, record.Holder.HoldId + ".json");
+		try
+		{
+			StateFiles.WriteJson(file, record.Holder);
+		}
+		catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+		{
+			logger.LogWarning("Could not record the command that still runs in {File}, so the holds after this one won't know of it: {Message}", file, exception.Message);
+		}
+	}
 }
 
 /// <summary>The queue's tickets: naming, listing (with dead tickets removed) and creating.</summary>

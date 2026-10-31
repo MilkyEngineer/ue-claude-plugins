@@ -235,6 +235,11 @@ internal sealed class FakeWorkspace : IPreflightWorkspace
 
 	public Task<IReadOnlyList<string>> GetShelvedNotOpenedAsync(int change, CancellationToken cancellationToken) => Task.FromResult<IReadOnlyList<string>>(ShelvedNotOpened);
 
+	/// <summary>The files opened in the change.</summary>
+	public List<string> Opened { get; } = ["//Project/Main/Docs/Notes.md"];
+
+	public Task<IReadOnlyList<string>> GetOpenedAsync(int change, CancellationToken cancellationToken) => Task.FromResult<IReadOnlyList<string>>(Opened);
+
 	public void Dispose()
 	{
 	}

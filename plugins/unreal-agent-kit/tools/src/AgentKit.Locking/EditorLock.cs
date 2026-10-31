@@ -28,7 +28,8 @@ public sealed class EditorLockOptions
 
 	/// <summary>
 	/// How long a new holder waits for the command of a holder that died (<see cref="LockHolderInfo.CommandPid"/>) to end
-	/// before it goes ahead anyway, with a warning.
+	/// before it goes ahead anyway, with a warning. Every hold waits this long again while such a command runs
+	/// (<see cref="OrphanRecords"/>).
 	/// </summary>
 	public TimeSpan OrphanedCommandTimeout { get; init; } = TimeSpan.FromSeconds(30);
 
@@ -105,6 +106,14 @@ public static class EditorLock
 	public const string MutexBaseName = "UnrealAgentKit_EditorLock";
 
 	/// <summary>
+	/// How far a dead holder's command's start time may read from what it recorded and still be that command. On Linux the start
+	/// time follows the wall clock, so a clock step over <see cref="ProcessIdentity.StartTimeTolerance"/> would read a live build
+	/// as gone and drop its record. The cost is on the safe side: a process that takes the ID within this of the command's
+	/// start reads as the command, and <c>uak lock forget-orphan</c> is the way out of that.
+	/// </summary>
+	internal static readonly TimeSpan CommandStartTolerance = TimeSpan.FromSeconds(60);
+
+	/// <summary>
 	/// Waits in the queue and takes the editor lock. Dispose the returned hold to release it; if the process dies, the kernel
 	/// releases the mutex and the next waiter takes it.
 	/// </summary>
@@ -144,6 +153,8 @@ public static class EditorLock
 		if (nested is not null)
 		{
 			CheckJoinable(nested, options, resolvedName);
+			// The hold it joined waited, and warned: this only says what may still run beside it.
+			nested.SetOrphanedCommands([.. OrphanRecords.List(paths, scope, logger).Where(record => IsCommandRunning(record.Holder))]);
 			return nested;
 		}
 
@@ -174,8 +185,10 @@ public static class EditorLock
 					ticket.Dispose();
 					try
 					{
-						await WaitForOrphanedCommandAsync(paths, scope, options.OrphanedCommandTimeout, poll, logger, cancellationToken).ConfigureAwait(false);
-						return EditorLockHold.Create(mutex, paths, mutexName, scope, resolvedName, resolvedPriority, self, queued, options.Command, options.Quiet, logger);
+						List<OrphanRecord> orphaned = await WaitForOrphanedCommandsAsync(paths, scope, options.OrphanedCommandTimeout, poll, logger, cancellationToken).ConfigureAwait(false);
+						EditorLockHold hold = EditorLockHold.Create(mutex, paths, mutexName, scope, resolvedName, resolvedPriority, self, queued, options.Command, options.Quiet, logger);
+						hold.SetOrphanedCommands(orphaned);
+						return hold;
 					}
 					catch
 					{
@@ -231,45 +244,114 @@ public static class EditorLock
 	/// command it ran still runs, waits for that command to end, so the new hold never overlaps it. The command is the
 	/// recorded process (<see cref="LockHolderInfo.CommandPid"/>: the child of <c>uak lock run</c>, UBT, or the editor) and,
 	/// for <c>uak lock run</c> on Windows, every process still in its named job (<see cref="LockHolderInfo.CommandJob"/>). On
-	/// Windows the job dies with its holder, so this takes moments. After the timeout it goes ahead, with a warning.
+	/// Windows the job dies with its holder, so this takes moments. After the timeout it goes ahead, with a warning, and
+	/// returns what still runs (<see cref="IOrphanedCommandHold.OrphanedCommand"/>).
+	/// <para>
+	/// What still runs then is kept (<see cref="OrphanRecords"/>), and every hold after this one waits for it and warns in
+	/// the same way, so the warning, and the refusal of <c>uak mutate</c>, last as long as the command, and no hold ever
+	/// waits for more than the timeout. A kept record goes when its command has ended, whichever hold sees that first, or
+	/// when <c>uak lock forget-orphan</c> drops it, for one that can't be seen to end (a reused PID).
+	/// </para>
 	/// <para>
 	/// A record of a holder that still runs, or of another lock (a state folder that several locks share), is never waited
 	/// for: that holder's command is not this lock's.
 	/// </para>
 	/// </summary>
-	private static async Task WaitForOrphanedCommandAsync(LockPaths paths, EditorLockScope scope, TimeSpan timeout, TimeSpan poll, ILogger logger, CancellationToken cancellationToken)
+	private static async Task<List<OrphanRecord>> WaitForOrphanedCommandsAsync(LockPaths paths, EditorLockScope scope, TimeSpan timeout, TimeSpan poll, ILogger logger, CancellationToken cancellationToken)
 	{
+		List<OrphanRecord> records = OrphanRecords.List(paths, scope, logger);
 		LockHolderInfo? previous = StateFiles.ReadJson<LockHolderInfo>(paths.HolderFile);
-		if (previous is null || LockQueue.IsOtherMachine(previous.Machine) || !IsSameScope(previous, scope) || previous.Process.IsAlive())
+		if (previous is not null && !LockQueue.IsOtherMachine(previous.Machine) && IsSameScope(previous, scope) && !previous.Process.IsAlive()
+			&& !records.Exists(record => record.Holder.HoldId == previous.HoldId))
 		{
-			return;
+			records.Add(new OrphanRecord(previous, null));
 		}
-		ProcessIdentity? command = previous.CommandProcess;
-		string? job = previous.CommandJob;
-		bool Running() => (command?.IsAlive() ?? false) || (job is not null && CommandJobs.GetActiveProcesses(job) > 0);
-		if (!Running())
+		List<OrphanRecord> running = DropEnded(records);
+		if (running.Count == 0)
 		{
-			return;
+			return running;
 		}
-		string what = command is ProcessIdentity process ? $"{process}" : "";
-		if (job is not null)
+		foreach (OrphanRecord record in running)
 		{
-			what += (what.Length > 0 ? ", " : "") + $"job {job}";
+			logger.LogWarning("The previous holder '{Name}' (PID {Pid}) has gone, but its command ({Command}) still runs: waiting for it to end.",
+				record.Holder.Name, record.Holder.Pid, DescribeCommand(record.Holder));
 		}
-		logger.LogWarning("The previous holder '{Name}' (PID {Pid}) has gone, but its command ({Command}) still runs: waiting for it to end.",
-			previous.Name, previous.Pid, what);
 		DateTime deadline = DateTime.UtcNow + timeout;
 		TimeSpan step = poll < TimeSpan.FromMilliseconds(100) ? poll : TimeSpan.FromMilliseconds(100);
-		while (Running())
+		while (running.Count > 0)
 		{
 			if (DateTime.UtcNow > deadline)
 			{
+				string? what = DescribeCommands(running);
+				foreach (OrphanRecord record in running)
+				{
+					OrphanRecords.Keep(paths, record, logger);
+				}
 				// TODO(unix): without PDEATHSIG an orphaned command can outlive its holder on Linux and Mac.
-				logger.LogWarning("The previous holder's command ({Command}) still runs after {Seconds:0} s: going ahead without it ending.", what, timeout.TotalSeconds);
-				return;
+				logger.LogWarning("The previous holder's command ({Command}) still runs after {Seconds:0} s: going ahead without it ending. Every hold of this lock waits for it like this,"
+					+ " and `uak mutate` refuses, until it ends: stop it if it hangs. {WayOut}", what, timeout.TotalSeconds, DescribeForgetOrphan([.. running.Select(record => record.Holder.HoldId)]));
+				return running;
 			}
 			await Task.Delay(step, cancellationToken).ConfigureAwait(false);
+			running = DropEnded(running);
 		}
+		return running;
+	}
+
+	/// <summary>The records whose command still runs. Those whose command has ended lose the file that kept them, if one did.</summary>
+	private static List<OrphanRecord> DropEnded(List<OrphanRecord> records)
+	{
+		List<OrphanRecord> running = [];
+		foreach (OrphanRecord record in records)
+		{
+			if (IsCommandRunning(record.Holder))
+			{
+				running.Add(record);
+			}
+			else if (record.File is not null)
+			{
+				StateFiles.TryDelete(record.File);
+			}
+		}
+		return running;
+	}
+
+	/// <summary>
+	/// Whether a holder's command still runs: the process it recorded, with that start time (one that reuses the ID isn't it,
+	/// <see cref="ProcessIdentity.IsAlive(TimeSpan)"/>, within <see cref="CommandStartTolerance"/>), or any process in the job it recorded.
+	/// </summary>
+	internal static bool IsCommandRunning(LockHolderInfo holder)
+	{
+		return (holder.CommandProcess?.IsAlive(CommandStartTolerance) ?? false) || (holder.CommandJob is string job && CommandJobs.GetActiveProcesses(job) > 0);
+	}
+
+	/// <summary>
+	/// The way out of a kept record that can't be seen to end, for a message: the command that drops each of these holds' records,
+	/// and when it is safe. For the refusals of <c>uak mutate</c>, the hold's warning and <c>uak lock status</c>.
+	/// </summary>
+	public static string DescribeForgetOrphan(IReadOnlyList<string> holdIds)
+	{
+		ArgumentNullException.ThrowIfNull(holdIds);
+		string commands = string.Join(" and ", holdIds.Select(id => $"`uak lock forget-orphan -hold={id}`"));
+		return $"The PID may have been reused, so this may be another process. Only once the process is known to be gone, or its PID known to be reused, run {commands}:"
+			+ " a build that really still runs could write mutant objects past the stamp.";
+	}
+
+	/// <summary>"PID 12 (started ...), job Global\...": a holder's command, for a message.</summary>
+	internal static string DescribeCommand(LockHolderInfo holder)
+	{
+		string what = holder.CommandProcess is ProcessIdentity process ? $"{process}" : "";
+		if (holder.CommandJob is string job)
+		{
+			what += (what.Length > 0 ? ", " : "") + $"job {job}";
+		}
+		return what;
+	}
+
+	/// <summary>The commands of <paramref name="records"/>, for a message; null when there are none.</summary>
+	internal static string? DescribeCommands(List<OrphanRecord> records)
+	{
+		return records.Count == 0 ? null : string.Join("; ", records.Select(record => DescribeCommand(record.Holder)));
 	}
 
 	/// <summary>
@@ -423,15 +505,17 @@ public static class EditorLock
 		LockPaths paths = new(context.StateDirectory);
 		LockHolderInfo? holder = StateFiles.ReadJson<LockHolderInfo>(paths.HolderFile);
 		List<LockTicketInfo> queue = LockQueue.List(paths, out List<LockTicketInfo> otherMachines);
+		EditorLockScope scope = GetScope(context);
 		return new EditorLockStatus
 		{
 			LockDirectory = paths.LockDirectory,
 			MutexName = GetMutexName(context),
-			Scope = GetScope(context),
+			Scope = scope,
 			Holder = holder,
 			HolderAlive = holder is not null && !LockQueue.IsOtherMachine(holder.Machine) && holder.Process.IsAlive(),
 			Queue = queue,
 			OtherMachineTickets = otherMachines,
+			OrphanedCommands = [.. OrphanRecords.List(paths, scope, context.Logger).Select(record => record.Holder).Where(IsCommandRunning)],
 		};
 	}
 }
@@ -462,6 +546,24 @@ public sealed class EditorLockStatus
 
 	/// <summary>Tickets another machine wrote: the state directory is shared, which the lock does not support.</summary>
 	public IReadOnlyList<LockTicketInfo> OtherMachineTickets { get; init; } = [];
+
+	/// <summary>The dead holders whose command outlived the wait for it and still runs (<see cref="OrphanRecords"/>).</summary>
+	public IReadOnlyList<LockHolderInfo> OrphanedCommands { get; init; } = [];
+}
+
+/// <summary>A held lock that knows whether a dead holder's command outlived the wait for it.</summary>
+public interface IOrphanedCommandHold
+{
+	/// <summary>
+	/// What of a dead holder's command still ran when the wait for it timed out, so may still run beside this hold; null when
+	/// nothing did. This hold may be any after the one that holder died in: the record lasts until the command has ended
+	/// (<see cref="OrphanRecords"/>). <c>uak mutate</c> and its <c>-restore</c> refuse then: a killed check's build may still be
+	/// writing the mutant, and any build that outlives a stamp can leave an object newer than it.
+	/// </summary>
+	string? OrphanedCommand { get; }
+
+	/// <summary>The holds whose records keep <see cref="OrphanedCommand"/>, for <see cref="EditorLock.DescribeForgetOrphan"/>; empty when it is null.</summary>
+	IReadOnlyList<string> OrphanedHoldIds { get; }
 }
 
 /// <summary>
@@ -469,12 +571,25 @@ public sealed class EditorLockStatus
 /// Disposing it releases the lock. Dispose it on any thread: the mutex is released on the thread that took it. A nested hold
 /// (<see cref="IsNested"/>) joined an ancestor's hold: disposing it releases nothing.
 /// </summary>
-public sealed class EditorLockHold : IAsyncDisposable, IDisposable
+public sealed class EditorLockHold : IAsyncDisposable, IDisposable, IOrphanedCommandHold
 {
 	private readonly IDisposable? _mutex;
 	private readonly LockPaths _paths;
 	private readonly ILogger _logger;
 	private int _released;
+
+	/// <inheritdoc/>
+	public string? OrphanedCommand { get; private set; }
+
+	/// <inheritdoc/>
+	public IReadOnlyList<string> OrphanedHoldIds { get; private set; } = [];
+
+	/// <summary>Sets what may still run beside this hold.</summary>
+	internal void SetOrphanedCommands(List<OrphanRecord> records)
+	{
+		OrphanedCommand = EditorLock.DescribeCommands(records);
+		OrphanedHoldIds = [.. records.Select(record => record.Holder.HoldId)];
+	}
 
 	private EditorLockHold(IDisposable? mutex, LockPaths paths, LockHolderInfo info, string mutexName, EditorLockScope scope, ILogger logger)
 	{

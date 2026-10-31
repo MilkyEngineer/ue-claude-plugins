@@ -54,6 +54,32 @@ public sealed class BuildLogSummary
 	/// <summary>The actions UBT ran.</summary>
 	public List<UbtAction> Actions { get; } = [];
 
+	/// <summary>
+	/// The items of the actions an error was reported under, even one that repeats another's (<see cref="Errors"/> keeps the
+	/// first): UBT prints an action's output straight after its line, whole (ActionLogger).
+	/// </summary>
+	public HashSet<string> FailedActions { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+	/// <summary>
+	/// The items of the actions with a line in their output that reads as a failure, but that no pattern parsed (MSVC's
+	/// "c1xx: fatal error C1083: ...", "cl : Command line error D8021 : ...", a crashed compiler's own words). Not in
+	/// <see cref="Errors"/>: it is only a guess, which a build that succeeds shows was wrong.
+	/// </summary>
+	public HashSet<string> UnparsedFailures { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+	/// <summary>
+	/// Whether UBT said an action exited with an error code: its own line for a tool that crashed with no output
+	/// (ActionLogger), which isn't under that action's line for sure, as tool output goes through a parser that holds lines
+	/// back. So it tells no action.
+	/// </summary>
+	public bool ActionExitedWithError { get; set; }
+
+	/// <summary>
+	/// Whether each failure the log shows is known by its action: an action that failed with nothing parsed may be any of those
+	/// the log lists, so a failed build's list of them says nothing of which compiled.
+	/// </summary>
+	public bool EveryFailureAttributed => !ActionExitedWithError && UnparsedFailures.IsSubsetOf(FailedActions);
+
 	/// <summary>UBT's "Result: X" word (Succeeded, Failed, Cancelled), or null when it printed none.</summary>
 	public string? Result { get; set; }
 
@@ -99,6 +125,15 @@ public sealed partial class BuildLogParser
 	{
 		string Text = line.TrimEnd();
 		Match M;
+		if (RetriedPattern().IsMatch(Text))
+		{
+			// UBA's own note: the action runs again, and that run says how it ended. Neither a failure nor a word that tells of one.
+			return;
+		}
+		if (ExitedPattern().IsMatch(Text))
+		{
+			Summary.ActionExitedWithError = true;
+		}
 		if ((M = ActionPattern().Match(Text)).Success)
 		{
 			UbtAction Action = new(M.Groups["kind"].Value, M.Groups["item"].Value.Trim());
@@ -127,12 +162,20 @@ public sealed partial class BuildLogParser
 		{
 			Summary.TotalSeconds = double.Parse(M.Groups["seconds"].Value, CultureInfo.InvariantCulture);
 		}
+		else if (CurrentUnit is not null && FailureWordPattern().IsMatch(Text) && !NotePattern().IsMatch(Text))
+		{
+			Summary.UnparsedFailures.Add(CurrentUnit);
+		}
 	}
 
 	void Add(string file, int? line, int? column, string severity, string? code, string message)
 	{
 		DiagnosticSeverity Severity = severity.Contains("error", StringComparison.OrdinalIgnoreCase) ? DiagnosticSeverity.Error : DiagnosticSeverity.Warning;
 		List<CompileDiagnostic> List = Severity == DiagnosticSeverity.Error ? Summary.Errors : Summary.Warnings;
+		if (Severity == DiagnosticSeverity.Error && CurrentUnit is not null)
+		{
+			Summary.FailedActions.Add(CurrentUnit);
+		}
 		string Key = $"{Severity}|{file.ToUpperInvariant()}|{line}|{column}|{code}|{message}";
 		if (Seen.TryGetValue(Key, out int Index))
 		{
@@ -173,4 +216,22 @@ public sealed partial class BuildLogParser
 
 	[GeneratedRegex(@"^Total execution time:\s*(?<seconds>[\d.]+)\s*seconds")]
 	private static partial Regex TotalTimePattern();
+
+	// "Compile [x64] Foo.cpp: Exited with error code -1073741819 (Access violation). The build will fail." (ActionLogger.cs).
+	[GeneratedRegex(@"\bExited with error code\b")]
+	private static partial Regex ExitedPattern();
+
+	// "Compile [x64] Foo.cpp: Exited with error code 9001. This action will retry (More info in uba trace)", "... This action will
+	// retry without UBA", "... with no output. This action will retry locally" (UBAExecutor.cs).
+	[GeneratedRegex(@"\bExited with error code\b.*\bThis action will retry\b")]
+	private static partial Regex RetriedPattern();
+
+	// A word that may tell of a failure, in a line no pattern above took. Wide on purpose: a source line a warning quotes may
+	// match, which at worst takes a failed build's compiles from the evidence (BuildOutcome.CompiledClean).
+	[GeneratedRegex(@"\b(?:error|fatal|crash(?:ed)?|abort(?:ed)?|failed|failure|segmentation fault|access violation|out of memory|stack dump)\b", RegexOptions.IgnoreCase)]
+	private static partial Regex FailureWordPattern();
+
+	// A compiler's context line ("Foo.h(3): note: see declaration of 'Error'"), which fails nothing.
+	[GeneratedRegex(@"\bnote\s*:", RegexOptions.IgnoreCase)]
+	private static partial Regex NotePattern();
 }

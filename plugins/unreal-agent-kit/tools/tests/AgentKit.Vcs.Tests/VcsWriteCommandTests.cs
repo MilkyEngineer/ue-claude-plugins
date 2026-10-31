@@ -489,6 +489,29 @@ public sealed class VcsWriteCommandTests
 	}
 
 	[TestMethod]
+	public async Task AShelfWithABinaryThatMayHoldAMutationIsRefusedThoughTheFilesAreBack()
+	{
+		using TempDirectory root = new();
+		string game = root.Write("Source/Game/Game.cpp").Replace("\\", "\\\\", StringComparison.Ordinal);
+		string dll = root.Write("Binaries/Win64/UnrealEditor-Game.dll");
+		string record = "{ \"Name\": \"M1\", \"Phase\": \"Restored\", \"Files\": [ { \"Path\": \"" + game + "\" } ]";
+		string journal = "Saved/AgentKit/Mutations/M1/journal.json";
+		FakePerforceConnection connection = new FakePerforceConnection(root.Path).On("change", "change-o-pending-binary").On("shelve", "shelve").On("describe", "describe-s-pending");
+
+		// It doesn't know which binaries it wrote: any file that loads as code.
+		root.Write(journal, record + " }");
+		(int exitCode, _, string errors, List<string> log) = await RunCapturedAsync(new VcsShelveCommand { Guards = () => [] }, root, connection, Token, "-c=12346");
+		Assert.AreEqual(UakExitCodes.Failure, exitCode);
+		StringAssert.Contains(errors + string.Join("\n", log), "//Game/main/Binaries/Win64/UnrealEditor-Game.dll");
+		Assert.IsFalse(connection.Calls.Any(call => call.Command == "shelve"));
+		StringAssert.Contains((await Assert.ThrowsExactlyAsync<UakUsageException>(() => RunAsync(new VcsShelveCommand { Guards = () => [] }, root, connection, Token, dll))).Message, "may have left its patch in these binaries");
+
+		// It wrote another: this shelf is safe.
+		root.Write(journal, record + ", \"Binaries\": [ { \"Path\": \"" + dll.Replace("Game.dll", "Other.dll", StringComparison.Ordinal).Replace("\\", "\\\\", StringComparison.Ordinal) + "\" } ] }");
+		Assert.AreEqual(UakExitCodes.Success, (await RunAsync(new VcsShelveCommand { Guards = () => [] }, root, connection, Token, "-c=12346")).ExitCode);
+	}
+
+	[TestMethod]
 	public async Task ShelveWarnsThatItCannotSeeMutationsWithoutAProject()
 	{
 		using TempDirectory root = new();

@@ -4,6 +4,7 @@ using System.Globalization;
 using System.Security.Cryptography;
 using System.Text.Json;
 using AgentKit.Core;
+using Microsoft.Extensions.Logging;
 
 namespace AgentKit.Locking;
 
@@ -120,6 +121,81 @@ public sealed class MutationRecord
 
 	/// <summary>The SHA-256 of <see cref="PatchCopy"/>'s bytes.</summary>
 	public string? PatchHash { get; set; }
+
+	/// <summary>
+	/// The UBT target the mutant was built as (the project's editor target), with <see cref="BuildPlatform"/> and
+	/// <see cref="BuildConfiguration"/>: only a later <c>uak build</c> of the same shows what became of the mutant build's
+	/// objects (<see cref="AwaitingRecompile"/>). Null when not recorded (a journal of 0.4.0, until a <c>-restore</c> records it).
+	/// </summary>
+	public string? BuildTarget { get; set; }
+
+	/// <summary>The platform of <see cref="BuildTarget"/>'s build ("Win64").</summary>
+	public string? BuildPlatform { get; set; }
+
+	/// <summary>The configuration of <see cref="BuildTarget"/>'s build ("Development").</summary>
+	public string? BuildConfiguration { get; set; }
+
+	/// <summary>
+	/// When the files, once back, were given a write time that is newer, by more than UBT's slop, than anything the mutant
+	/// build wrote (<see cref="MutationJournal.StampForRecompile"/>), so the next build recompiles them and what includes
+	/// them; null while they weren't. Only a journal in phase <see cref="MutationPhase.Restored"/> has one.
+	/// </summary>
+	public DateTime? RecompileStamp { get; set; }
+
+	/// <summary>
+	/// The patched files a build must still be seen recompiling after the stamp: the evidence that the stamp worked, without
+	/// which a build that succeeds proves nothing (it may be up to date, with the mutant's objects). Empty when none is
+	/// (<see cref="MutationJournal.HasRecompiled"/>): nothing a mutant build could compile was left, or every later build of
+	/// <see cref="BuildTarget"/> together showed each one (a build that failed elsewhere may show some, and the next one the
+	/// rest). A file the mutant build shows no compile of is left out: no binary can hold it, and no build may ever compile
+	/// it. Null when not known yet, or a mutant build may have stopped part way, when the stamp makes it all of them.
+	/// </summary>
+	public List<string>? AwaitingRecompile { get; set; }
+
+	/// <summary>
+	/// The binaries the mutant build wrote (in the folders of its target's build products: changed or new since just before
+	/// it), as they were once the files were back: while one of them isn't newer than the stamp, it may hold the mutation.
+	/// Empty when it wrote none; null when unknown (no list of the target's binaries was found, the patch adds or deletes a
+	/// file or changes what the build is made of, the mutant build linked a file not among them, or the run stopped before
+	/// its files were back), when only a build that recompiles the files clears the journal.
+	/// </summary>
+	public List<MutationBinary>? Binaries { get; set; }
+}
+
+/// <summary>A binary the mutant build wrote, as it was once the files were back.</summary>
+public sealed class MutationBinary
+{
+	/// <summary>The file's full path.</summary>
+	public string Path { get; set; } = "";
+
+	/// <summary>Its last write time (UTC).</summary>
+	public DateTime LastWriteTimeUtc { get; set; }
+
+	/// <summary>Its length in bytes.</summary>
+	public long Length { get; set; }
+
+	/// <summary>The binary as it is now; null when it doesn't exist (or can't be read).</summary>
+	public static MutationBinary? Read(string path)
+	{
+		try
+		{
+			FileInfo file = new(path);
+			return file.Exists ? new MutationBinary { Path = file.FullName, LastWriteTimeUtc = file.LastWriteTimeUtc, Length = file.Length } : null;
+		}
+		catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentException)
+		{
+			return null;
+		}
+	}
+
+	/// <summary>
+	/// Whether <paramref name="other"/> is the same file as written then: the same length, and the same write time to the
+	/// millisecond, as far as a journal keeps times (<see cref="UakJson.FormatTime"/>). A file rewritten within the same
+	/// millisecond with the same length counts as the same: the safe way.
+	/// </summary>
+	public bool SameAs(MutationBinary? other) => other is not null && other.Length == Length && ToMilliseconds(other.LastWriteTimeUtc) == ToMilliseconds(LastWriteTimeUtc);
+
+	static long ToMilliseconds(DateTime time) => (time.Kind == DateTimeKind.Local ? time.ToUniversalTime() : time).Ticks / TimeSpan.TicksPerMillisecond;
 }
 
 /// <summary>A folder under <c>&lt;State&gt;/Mutations</c> that holds a journal or copies uak can't read.</summary>
@@ -317,6 +393,10 @@ public sealed class MutationJournal
 				return $"names a copy of {entry.Path} ({entry.Backup}) that isn't in its folder";
 			}
 		}
+		if (record.Binaries is not null && record.Binaries.Any(binary => binary is null || string.IsNullOrEmpty(binary.Path) || !Path.IsPathFullyQualified(binary.Path)))
+		{
+			return "lists a binary without a full path";
+		}
 		return null;
 	}
 
@@ -336,7 +416,9 @@ public sealed class MutationJournal
 	/// For a command that holds the editor lock: refuses (a usage error) while a mutation journal is left, or a folder under
 	/// <c>Mutations</c> can't be read, unless the journal is the run of the holder whose hold this process joined
 	/// (<see cref="IsRunOf"/>). With <paramref name="building"/>, a journal whose files are restored is allowed: a build is
-	/// what takes the mutation out of the binaries.
+	/// what takes the mutation out of the binaries. A journal whose files are back and stamped for a recompile, and none of
+	/// whose binaries may still hold the mutation (<see cref="StillHeldBinaries"/>), is spent: it is cleared
+	/// (<see cref="ClearFolder"/>), and allowed.
 	/// </summary>
 	public static void ThrowIfUnfinished(UakContext context, bool building = false)
 	{
@@ -361,8 +443,274 @@ public sealed class MutationJournal
 			{
 				continue;
 			}
+			if (journal.IsSpent())
+			{
+				// Under the lock, so no run of its own is mid-way: its files are back and no binary may hold its patch.
+				TryClear(context, journal, "no binary the mutant build wrote is left as it wrote it");
+				continue;
+			}
 			throw new UakUsageException(journal.DescribeStopped());
 		}
+	}
+
+	/// <summary>
+	/// Whether the journal's files are back (phase <see cref="MutationPhase.Restored"/>), stamped for a recompile, and none of
+	/// the binaries its mutant build wrote may still hold the mutation (its list known, <see cref="StillHeldBinaries"/>):
+	/// neither the tree nor the binaries can hold the patch, and the next build recompiles what the mutant build compiled.
+	/// </summary>
+	public bool IsSpent()
+	{
+		return Record.Phase == MutationPhase.Restored && Record.RecompileStamp is not null && StillHeldBinaries() is { Count: 0 };
+	}
+
+	/// <summary>
+	/// The binaries the mutant build wrote that may still hold the mutation: those that exist and aren't newer than the stamp
+	/// (<see cref="MutationRecord.RecompileStamp"/>); null when the journal doesn't know which it wrote
+	/// (<see cref="MutationRecord.Binaries"/>), when any binary may. Only the write time is read, so any write after the stamp
+	/// counts as taking the mutation out, as a link then does (UBT makes it from recompiled files), though a copy, a sync or a
+	/// touch after the stamp would count too; a write time that merely changed to one before the stamp doesn't. A binary
+	/// deleted holds none.
+	/// </summary>
+	public List<MutationBinary>? StillHeldBinaries()
+	{
+		return Record.Binaries is null ? null : [.. Record.Binaries.Where(binary => MutationBinary.Read(binary.Path) is MutationBinary now
+			&& !(Record.RecompileStamp is DateTime stamp && now.LastWriteTimeUtc > stamp))];
+	}
+
+	/// <summary>
+	/// Whether the files are stamped and builds since showed each patched file recompiled (<see cref="MutationRecord.AwaitingRecompile"/>):
+	/// the objects of the mutant build are gone, so a build that succeeds has relinked them.
+	/// </summary>
+	public bool HasRecompiled() => Record.RecompileStamp is not null && Record.AwaitingRecompile is { Count: 0 };
+
+	/// <summary>The patched files no build has been seen recompiling since the stamp, for a message.</summary>
+	public string DescribeAwaitingRecompile() => Record.AwaitingRecompile is { Count: > 0 } awaiting ? string.Join(", ", awaiting) : DescribeFiles();
+
+	/// <summary>
+	/// After a build of <see cref="MutationRecord.BuildTarget"/> ran past the stamp: takes the files <paramref name="recompiled"/>
+	/// says it compiled out of <see cref="MutationRecord.AwaitingRecompile"/>. It tells a file by its name in the build's log,
+	/// so uak's own check (MutateCommand) gives it. With <paramref name="save"/> false the journal isn't saved: the caller
+	/// saves it only if it stays (<see cref="SetAwaitingRecompile"/>).
+	/// </summary>
+	public void NoteRecompiled(Func<MutationFile, bool> recompiled, bool save = true)
+	{
+		ArgumentNullException.ThrowIfNull(recompiled);
+		if (Record.RecompileStamp is null || Record.AwaitingRecompile is not { Count: > 0 } awaiting)
+		{
+			return;
+		}
+		if (awaiting.RemoveAll(path => Record.Files.Find(file => file.Path == path) is not MutationFile entry || recompiled(entry)) > 0 && save)
+		{
+			Save();
+		}
+	}
+
+	/// <summary>Records which patched files the mutant build may have compiled (<see cref="MutationRecord.AwaitingRecompile"/>).</summary>
+	public void SetAwaitingRecompile(List<string>? files)
+	{
+		Record.AwaitingRecompile = files;
+		Save();
+	}
+
+	/// <summary>Records the binaries the mutant build wrote, as they are now that the files are back (<see cref="MutationRecord.Binaries"/>).</summary>
+	public void SetBinaries(List<MutationBinary>? binaries)
+	{
+		Record.Binaries = binaries;
+		Save();
+	}
+
+	/// <summary>Records the build the mutant was built with (<see cref="MutationRecord.BuildTarget"/>); saved with the next change.</summary>
+	public void SetBuild(string target, string platform, string configuration)
+	{
+		Record.BuildTarget = target;
+		Record.BuildPlatform = platform;
+		Record.BuildConfiguration = configuration;
+	}
+
+	/// <summary>
+	/// UBT's slop: a direct prerequisite of an action counts as newer than its output only when it is more than this newer
+	/// (ActionGraph.cs, "allow a 1 second slop for network copies"; in Actions/ since UE 5.8, System/ before). A file from a
+	/// dependency list, such as a header, or a source in a unity file, counts as soon as it is newer.
+	/// </summary>
+	public static readonly TimeSpan UbtTimestampSlop = TimeSpan.FromSeconds(1);
+
+	/// <summary>
+	/// Once the files are back: gives each of them that exists (but those in <paramref name="untouched"/>, which this process
+	/// never wrote) the write time <paramref name="stamp"/> (<see cref="StampFiles"/>), so UBT counts each of them, and so
+	/// every object that includes them, as newer than what the mutant build compiled, and recompiles them: written back
+	/// within a second of a mutant object, a file would count as up to date, and the binaries keep the mutant. Records the
+	/// stamp (<see cref="MutationRecord.RecompileStamp"/>) once every file took it, and that a build must now show each
+	/// recompiled (<see cref="MutationRecord.AwaitingRecompile"/>, all the files when it isn't known which the mutant build
+	/// compiled).
+	/// </summary>
+	/// <exception cref="IOException">A file's time can't be set, or didn't take: nothing is recorded, and the next restore tries again.</exception>
+	public void StampForRecompile(DateTime stamp, DateTime reference, IReadOnlySet<string>? untouched = null, Action<string, DateTime>? setTime = null)
+	{
+		StampFiles(Record.Files.Select(file => file.Path).Where(path => untouched is null || !untouched.Contains(path)), stamp, reference, setTime);
+		Record.RecompileStamp = stamp;
+		Record.AwaitingRecompile ??= [.. Record.Files.Select(file => file.Path)];
+		Save();
+	}
+
+	/// <summary>
+	/// Gives each of <paramref name="paths"/> that exists the write time <paramref name="stamp"/>, and checks that it took:
+	/// each must now be more than <see cref="UbtTimestampSlop"/> newer than <paramref name="reference"/>, a time no earlier
+	/// than anything the mutant build wrote. Only the write time changes: a file's bytes and attributes (the read-only flag
+	/// among them) stay. Where the time can't be set (a share or an ACL that allows writes and no change of attributes), the
+	/// file's own bytes are written whole instead (<see cref="WriteFile"/>), which gives it the clock's time, past the stamp
+	/// once the caller has waited; that needs no such right, unless the file is read-only, hidden or system, when it fails
+	/// too. A probe a run killed before its stamp left beside a file (<see cref="ProbeFileTime"/>) is deleted on the way:
+	/// the journal is past the restore that deletes such files. <paramref name="setTime"/> sets a time (for tests).
+	/// </summary>
+	/// <exception cref="IOException">A file's time can't be set, or didn't take.</exception>
+	public static void StampFiles(IEnumerable<string> paths, DateTime stamp, DateTime reference, Action<string, DateTime>? setTime = null)
+	{
+		ArgumentNullException.ThrowIfNull(paths);
+		setTime ??= File.SetLastWriteTimeUtc;
+		List<string> failed = [];
+		foreach (string path in paths)
+		{
+			DeleteLeftoverTemporaryFiles(path);
+			if (!File.Exists(path))
+			{
+				continue;
+			}
+			try
+			{
+				try
+				{
+					setTime(path, stamp);
+				}
+				catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+				{
+					WriteFile(path, File.ReadAllBytes(path));
+				}
+				DateTime written = File.GetLastWriteTimeUtc(path);
+				if (written - reference <= UbtTimestampSlop)
+				{
+					failed.Add($"{path} (its write time is {UakJson.FormatTime(written)}, not more than {UbtTimestampSlop.TotalSeconds:0} s after {UakJson.FormatTime(reference)})");
+				}
+			}
+			catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+			{
+				failed.Add($"{path} ({exception.Message})");
+			}
+		}
+		if (failed.Count > 0)
+		{
+			throw new IOException($"could not mark {string.Join(", ", failed)} for a recompile");
+		}
+	}
+
+	/// <summary>
+	/// The time of the file system a file is on: a temporary file written beside it, its write time read back, and deleted
+	/// (named as <see cref="WriteFile"/>'s are, so a run killed here leaves one the next stamp deletes, <see cref="StampFiles"/>). A
+	/// file server's clock may run ahead of this machine's, and it stamps what the build writes there. Null when it can't be told.
+	/// </summary>
+	public static DateTime? ProbeFileTime(string path)
+	{
+		ArgumentException.ThrowIfNullOrEmpty(path);
+		if (!System.IO.Directory.Exists(Path.GetDirectoryName(path)))
+		{
+			return null;
+		}
+		string probe = $"{path}.{Environment.ProcessId.ToString(CultureInfo.InvariantCulture)}.{Guid.NewGuid():N}.tmp";
+		try
+		{
+			File.WriteAllBytes(probe, []);
+			return File.GetLastWriteTimeUtc(probe);
+		}
+		catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+		{
+			return null;
+		}
+		finally
+		{
+			StateFiles.TryDelete(probe);
+		}
+	}
+
+	/// <summary>
+	/// Clears a journal whose run is over: deletes its folder (<see cref="DeleteFolder"/>), or sets it aside
+	/// (<see cref="SetAside"/>) when it holds bytes saved beside it (<c>&lt;n&gt;.&lt;time&gt;.current</c>, by -force or
+	/// -accept), so nothing it saved is lost. Returns where it was set aside, or null when deleted.
+	/// </summary>
+	/// <exception cref="IOException">It can't be moved: it stays whole, as it was.</exception>
+	public static string? ClearFolder(UakContext context, string folder, bool setAside = false)
+	{
+		ArgumentNullException.ThrowIfNull(context);
+		if (!setAside && !System.IO.Directory.EnumerateFiles(folder, "*.current").Any())
+		{
+			DeleteFolder(folder);
+			return null;
+		}
+		return SetAside(context, folder);
+	}
+
+	/// <summary>Clears a spent journal (<see cref="ClearFolder"/>), saying so; one that can't be cleared stays, with a warning.</summary>
+	private static bool TryClear(UakContext context, MutationJournal journal, string why)
+	{
+		try
+		{
+			string? aside = ClearFolder(context, journal.Directory);
+			context.Logger.LogInformation("Cleared the mutation journal '{Name}' ({Why}){Aside}.", journal.Record.Name, why, aside is null ? "" : $"; set aside in {aside}");
+			return true;
+		}
+		catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+		{
+			context.Logger.LogWarning("The mutation journal '{Name}' is spent ({Why}) but could not be cleared ({Message}): the next command under the lock tries again.",
+				journal.Record.Name, why, exception.Message);
+			return false;
+		}
+	}
+
+	/// <summary>
+	/// After a build, under the lock it held, for every stopped run's journal whose files are back and stamped for a recompile
+	/// and whose mutant was built as this build's target, platform and configuration (a build given other UBT arguments, which
+	/// may build part of it, doesn't count: don't call this for one): notes the files it recompiled (<see cref="NoteRecompiled"/>, by
+	/// <paramref name="recompiled"/>; a build that failed elsewhere counts for those), and, when it
+	/// <paramref name="succeeded"/> and every file has been seen recompiled (<see cref="HasRecompiled"/>), clears the journal:
+	/// that build relinked what the mutant build linked. A build that succeeded without that evidence may be up to date with
+	/// the mutant's objects, so the journal stays, with a warning. Any journal that is spent (<see cref="IsSpent"/>) goes too.
+	/// A journal not stamped (of 0.4.0, or one whose stamp didn't take) needs <c>uak mutate -restore</c>, which stamps first.
+	/// A build never waits for <see cref="StillHeldBinaries"/>: a binary the mutant build wrote may be one an unrelated change
+	/// made it link, which no later build relinks, so no journal could ever clear. Returns the names cleared.
+	/// </summary>
+	public static List<string> ClearAfterBuild(UakContext context, string target, string platform, string configuration, bool succeeded, Func<MutationFile, bool> recompiled)
+	{
+		ArgumentNullException.ThrowIfNull(context);
+		LockHolderInfo? holder = EditorLock.GetInheritedHolder(context);
+		(List<MutationJournal> journals, _) = List(context);
+		List<string> cleared = [];
+		foreach (MutationJournal journal in journals)
+		{
+			MutationRecord record = journal.Record;
+			if (IsRunOf(record, holder) || record.Phase != MutationPhase.Restored || record.RecompileStamp is null)
+			{
+				continue;
+			}
+			bool sameBuild = target.Equals(record.BuildTarget, StringComparison.OrdinalIgnoreCase)
+				&& platform.Equals(record.BuildPlatform, StringComparison.OrdinalIgnoreCase) && configuration.Equals(record.BuildConfiguration, StringComparison.OrdinalIgnoreCase);
+			if (sameBuild)
+			{
+				journal.NoteRecompiled(recompiled);
+			}
+			bool rebuilt = sameBuild && succeeded && journal.HasRecompiled();
+			if (rebuilt || journal.IsSpent())
+			{
+				if (TryClear(context, journal, rebuilt ? $"this build of {target} recompiled what its mutant build compiled" : "no binary the mutant build wrote is left as it wrote it"))
+				{
+					cleared.Add(record.Name);
+				}
+			}
+			else if (sameBuild && succeeded)
+			{
+				context.Logger.LogWarning("The mutation journal '{Name}' stays: this build shows no compile of {Files}, so {Which} may still hold its patch. `uak mutate -restore -name={Name}`"
+					+ " marks them again and rebuilds; if no build compiles them, `-restore -name={Name} -force` sets the journal aside.", record.Name, journal.DescribeAwaitingRecompile(),
+					journal.DescribeHeld(), record.Name, record.Name);
+			}
+		}
+		return cleared;
 	}
 
 	/// <summary>
@@ -421,6 +769,15 @@ public sealed class MutationJournal
 	public string DescribeStopped()
 	{
 		string run = $"run `uak mutate -restore -name={Record.Name}` on its own (not inside `uak lock run`: it takes the editor lock itself)";
+		if (Record.Phase == MutationPhase.Restored && Record.RecompileStamp is not null)
+		{
+			string build = Record.BuildTarget is null ? "" : $" of {Record.BuildTarget} ({Record.BuildPlatform} {Record.BuildConfiguration})";
+			string clears = HasRecompiled() ? $"the next `uak build`{build} that succeeds clears this (once the tree builds again), as does {run}"
+				: $"a `uak build`{build} that shows a compile of {DescribeAwaitingRecompile()} and succeeds clears this, as does {run}, which marks them again; if no build"
+					+ $" compiles them, `uak mutate -restore -name={Record.Name} -force` sets the journal aside";
+			return $"the mutation run '{Record.Name}' put its files back (the tree holds no mutation) and marked them so the next build recompiles them, but"
+				+ $" no build since has recompiled them and succeeded, so {DescribeHeld()} may still hold its patch ({Record.Patch}): {clears}";
+		}
 		if (Record.Phase == MutationPhase.Restored)
 		{
 			return $"the mutation run '{Record.Name}' put its files back, but its journal was not cleared (it stopped before its rebuild, or a reader"
@@ -436,11 +793,20 @@ public sealed class MutationJournal
 		ArgumentNullException.ThrowIfNull(folder);
 		return $"the mutation journal in {folder.Directory} can't be trusted ({folder.Problem}), so uak can't tell whether a patch is still in the tree:"
 			+ $" check the files that mutation run touched by hand (each *{BackupExtension} file there is the original of the file it is named after,"
-			+ $" <n>.<file name>{BackupExtension}), then run `uak mutate -restore -name={folder.Name} -accept` on its own (it takes the editor lock itself),"
-			+ " which keeps the tree as it is, rebuilds and sets the folder aside";
+			+ $" <n>.<file name>{BackupExtension}). Give each file you put back a new write time (save it in an editor: a copy keeps the old time of its"
+			+ $" {BackupExtension}, older than what the mutant build compiled, so a build keeps the mutant). Then run `uak mutate -restore -name={folder.Name} -accept`"
+			+ " on its own (it takes the editor lock itself), which keeps the tree as it is, gives the files it can still name a new write time, rebuilds, and sets"
+			+ " the folder aside once the rebuild compiled something (it refuses a rebuild that was up to date)";
 	}
 
 	private string DescribeFiles() => string.Join(", ", Record.Files.Select(file => file.Path));
+
+	/// <summary>The binaries that may still hold the mutation (<see cref="StillHeldBinaries"/>), for a message.</summary>
+	public string DescribeHeld()
+	{
+		List<MutationBinary>? held = StillHeldBinaries();
+		return held is null ? "the binaries its mutant build wrote (uak doesn't know which)" : string.Join(", ", held.Select(binary => binary.Path));
+	}
 
 	/// <summary>
 	/// Starts a journal: copies each file's bytes and records them (phase <see cref="MutationPhase.Applying"/>), and a copy of
@@ -858,9 +1224,11 @@ public sealed class MutationJournal
 			throw new IOException($"{path} is {link}, so uak doesn't write it");
 		}
 		FileAttributes? attributes = File.Exists(path) ? File.GetAttributes(path) : null;
-		if (attributes is not null)
+		bool hard = attributes is FileAttributes held && (held & HardAttributes) != 0;
+		if (hard)
 		{
-			// Windows replaces no read-only file, and may refuse a hidden or system one.
+			// Windows replaces no read-only file, and may refuse a hidden or system one. Only then: it takes the right to change
+			// attributes, which a share may not give, and StampFiles comes here because it doesn't.
 			File.SetAttributes(path, FileAttributes.Normal);
 		}
 		try
@@ -869,12 +1237,22 @@ public sealed class MutationJournal
 		}
 		finally
 		{
-			if (attributes is FileAttributes kept && File.Exists(path))
+			if (attributes is FileAttributes kept && File.Exists(path) && File.GetAttributes(path) != kept)
 			{
-				File.SetAttributes(path, kept);
+				try
+				{
+					File.SetAttributes(path, kept);
+				}
+				catch (Exception exception) when (!hard && exception is IOException or UnauthorizedAccessException)
+				{
+					// An attribute such as "not indexed", which the bytes just written don't depend on.
+				}
 			}
 		}
 	}
+
+	/// <summary>The attributes that keep <see cref="WriteFile"/> from replacing a file, or that must not be lost when it does.</summary>
+	private const FileAttributes HardAttributes = FileAttributes.ReadOnly | FileAttributes.Hidden | FileAttributes.System;
 
 	/// <summary>
 	/// Why <see cref="WriteFile"/> can't write a file of the tree, or null: it is a symbolic link (or a junction), which a new

@@ -56,7 +56,7 @@ Below, `<dotnet>` means that program. Running the engine's own `dotnet` is enoug
 ```
 
 - **What it makes.** A self-contained `uak` for this machine's platform. It runs with no installed .NET and no `DOTNET_ROOT`.
-- **Where it goes.** `$UAK_HOME/<kit version>/`, where `UAK_HOME` defaults to `~/.unreal-agent-kit`. The kit version is the `version` in `<kit>/.claude-plugin/plugin.json`. For kit version 0.4.0 that is `~/.unreal-agent-kit/0.4.0/uak.exe` on Windows, and `~/.unreal-agent-kit/0.4.0/uak` on Linux and Mac. The examples below use 0.4.0: use your kit's version.
+- **Where it goes.** `$UAK_HOME/<kit version>/`, where `UAK_HOME` defaults to `~/.unreal-agent-kit`. The kit version is the `version` in `<kit>/.claude-plugin/plugin.json`. For kit version 0.4.1 that is `~/.unreal-agent-kit/0.4.1/uak.exe` on Windows, and `~/.unreal-agent-kit/0.4.1/uak` on Linux and Mac. The examples below use 0.4.1: use your kit's version.
   - The folder is outside the plugin, which Claude Code replaces on every update.
   - Each kit version gets its own folder, so publishing a new version never overwrites a `uak` that is running.
   - Republishing the same version over itself can fail while a detached run is going, because the run's wrapper keeps that folder's files open. Wait until `uak runs list` shows nothing running.
@@ -91,10 +91,10 @@ engine="$HOME/UnrealEngine"   # your engine root
 
 **Outside Claude Code** (a terminal, CI, a scheduled task), add the publish folder to `PATH` in your user environment, or call `uak` by its full path:
 
-- **Windows:** add `%USERPROFILE%\.unreal-agent-kit\0.4.0` to your user `Path` (Settings, System, About, Advanced system settings, Environment Variables), or from PowerShell:
+- **Windows:** add `%USERPROFILE%\.unreal-agent-kit\0.4.1` to your user `Path` (Settings, System, About, Advanced system settings, Environment Variables), or from PowerShell:
 
   ```powershell
-  $dir = "$env:USERPROFILE\.unreal-agent-kit\0.4.0"
+  $dir = "$env:USERPROFILE\.unreal-agent-kit\0.4.1"
   $key = Get-Item "HKCU:\Environment"
   # Read the raw value, so entries such as %USERPROFILE%\bin stay unexpanded.
   $path = $key.GetValue("Path", "", [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
@@ -108,9 +108,9 @@ engine="$HOME/UnrealEngine"   # your engine root
 
   This writes the user `Path` only, keeps its existing entries as they were (including unexpanded ones like `%USERPROFILE%\bin`), and does nothing if the folder is already there. Programs started before the change keep the old `Path`: open a new terminal, and restart Claude Code from it, to pick it up.
 
-  By full path: `& "$env:USERPROFILE\.unreal-agent-kit\0.4.0\uak.exe" env` in PowerShell, or `~/.unreal-agent-kit/0.4.0/uak.exe env` in Git Bash.
-- **Linux:** add `export PATH="$HOME/.unreal-agent-kit/0.4.0:$PATH"` to `~/.profile` (or your shell's profile). By full path: `~/.unreal-agent-kit/0.4.0/uak env`.
-- **Mac:** add the same line to `~/.zprofile`. By full path: `~/.unreal-agent-kit/0.4.0/uak env`.
+  By full path: `& "$env:USERPROFILE\.unreal-agent-kit\0.4.1\uak.exe" env` in PowerShell, or `~/.unreal-agent-kit/0.4.1/uak.exe env` in Git Bash.
+- **Linux:** add `export PATH="$HOME/.unreal-agent-kit/0.4.1:$PATH"` to `~/.profile` (or your shell's profile). By full path: `~/.unreal-agent-kit/0.4.1/uak env`.
+- **Mac:** add the same line to `~/.zprofile`. By full path: `~/.unreal-agent-kit/0.4.1/uak env`.
 
 Restart Claude Code afterwards, so it sees the new `PATH`. When you publish a new kit version, point `PATH` (or CLAUDE.md) at the new version's folder. Then check:
 
@@ -185,7 +185,7 @@ Loading a command runs its code, so `uak` loads these folders lazily: only to ru
 - **git and p4 come from `PATH` only.** `uak` never runs a `git` or `p4` found in the project or current folder.
 - **Perforce detection.** `uak` finds a Perforce workspace through a `P4CONFIG` file at or above the project. Global settings alone (a `P4PORT` or `P4CLIENT` set machine-wide, with no `P4CONFIG` file) are not used, and `uak` does not run `p4` then, so it never contacts a server just because one is set machine-wide. To use those global settings, pass `-vcs=p4` (or set `UAK_VCS=p4`).
 - **Timeout.** Each `p4` command may take `UAK_P4_TIMEOUT` seconds (default 15). After that `p4` is stopped, so an unreachable server cannot hang a command. Each `git` command may take `UAK_GIT_TIMEOUT` seconds (default 30), for the same reason.
-- **Perforce writes.** `uak vcs edit|add|reopen <file>... [-c=<changelist>|default]`, `uak vcs change new -description=<text>`, `uak vcs change describe -c=<changelist> -description=<text>` and `uak vcs shelve -c=<changelist> [-keep-unopened]` (or `uak vcs shelve <file>... [-description=]`, which moves opened files into a new changelist and shelves it) work on this client's pending changelists only, and check each file afterwards. A shelve replaces the shelf (p4 shelve -r): the shelf becomes exactly the opened files, so shelved files that were reverted or moved out of the changelist are deleted from it, and uak prints every file the shelf loses. `-keep-unopened` (p4 shelve -f, the default before 0.3.3) keeps them instead; use it when the shelf is the only copy of that work. `-replace` and `-drop-unopened` are still accepted, and do nothing. Shelving files that sit in a numbered changelist needs `-force`, and half of a move is refused. They never revert or submit. `reopen` and `edit` refuse wildcards and directories unless `-folders` is given, because a directory also takes every other file opened under it. A shelve may run up to 30 minutes, since it sends file contents. A shelve is refused while a `uak mutate` journal is left (`uak mutate -status`): a mutation check's patch may be in the files, and `uak vcs status` and `uak vcs changed` warn then. Git workspaces get a clear "Perforce only" error.
+- **Perforce writes.** `uak vcs edit|add|reopen <file>... [-c=<changelist>|default]`, `uak vcs change new -description=<text>`, `uak vcs change describe -c=<changelist> -description=<text>` and `uak vcs shelve -c=<changelist> [-keep-unopened]` (or `uak vcs shelve <file>... [-description=]`, which moves opened files into a new changelist and shelves it) work on this client's pending changelists only, and check each file afterwards. A shelve replaces the shelf (p4 shelve -r): the shelf becomes exactly the opened files, so shelved files that were reverted or moved out of the changelist are deleted from it, and uak prints every file the shelf loses. `-keep-unopened` (p4 shelve -f, the default before 0.3.3) keeps them instead; use it when the shelf is the only copy of that work. `-replace` and `-drop-unopened` are still accepted, and do nothing. Shelving files that sit in a numbered changelist needs `-force`, and half of a move is refused. They never revert or submit. `reopen` and `edit` refuse wildcards and directories unless `-folders` is given, because a directory also takes every other file opened under it. A shelve may run up to 30 minutes, since it sends file contents. A shelve is refused while a `uak mutate` journal is left whose files aren't back (`uak mutate -status`): a mutation check's patch may be in the files, and `uak vcs status` and `uak vcs changed` warn then. Git workspaces get a clear "Perforce only" error.
 
 ## Horde
 
