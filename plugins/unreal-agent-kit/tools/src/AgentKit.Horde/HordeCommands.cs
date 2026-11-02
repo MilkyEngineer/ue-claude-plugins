@@ -214,7 +214,7 @@ public abstract class HordeCommandBase : IUakCommand
 	/// <inheritdoc/>
 	public async Task<int> RunAsync(UakContext context, IReadOnlyList<string> arguments, CancellationToken cancellationToken)
 	{
-		UakArguments parsed = new(arguments);
+		UakArguments parsed = new(arguments, DotSplitRule.Options);
 		Func<UakContext, CancellationToken, Task<int>> run = Parse(parsed);
 		parsed.ThrowIfUnknown();
 		parsed.ThrowIfMorePositionalThan(0);

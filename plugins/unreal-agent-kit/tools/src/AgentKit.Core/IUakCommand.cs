@@ -29,6 +29,6 @@ public interface IUakCommand
 	/// </summary>
 	bool Hidden => false;
 
-	/// <summary>Runs the command. Returns the process exit code: 0 success, 1 failure, 2 usage or setup error.</summary>
+	/// <summary>Runs the command. Returns the process exit code: 0 success, 1 failure, 2 usage or setup error, or a refusal.</summary>
 	Task<int> RunAsync(UakContext context, IReadOnlyList<string> arguments, CancellationToken cancellationToken);
 }

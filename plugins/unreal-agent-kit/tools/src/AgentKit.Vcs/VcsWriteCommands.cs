@@ -44,7 +44,7 @@ public abstract class PerforceCommandBase : IUakCommand
 	public async Task<int> RunAsync(UakContext context, IReadOnlyList<string> arguments, CancellationToken cancellationToken)
 	{
 		Context = context;
-		UakArguments parsed = new(arguments);
+		UakArguments parsed = new(arguments, DotSplitRule.Paths);
 		string? kind = parsed.GetString("vcs");
 		Json = parsed.GetFlag("json");
 		Func<PerforceVersionControl, CancellationToken, Task<int>> run = Parse(parsed);
@@ -239,9 +239,9 @@ public sealed class VcsShelveCommand : PerforceCommandBase
 
 	/// <summary>
 	/// Refuses while a <c>uak mutate</c> journal is left (<see cref="MutationFolders.DescribeLeft"/>): a mutation run's patch may be
-	/// in the files, and a shelf would ship it. First (nothing changed yet) a usage error; <paramref name="late"/>, just before
-	/// p4 shelves, a <see cref="VcsException"/>, so a changelist uak created is named. Without a project it can't see the
-	/// journals: the first check warns so (<see cref="MutationFolders.DescribeUnchecked"/>).
+	/// in the files, and a shelf would ship it. First (nothing changed yet) a refusal (<see cref="UakRefusalException"/>, exit 2);
+	/// <paramref name="late"/>, just before p4 shelves, a <see cref="VcsException"/> (exit 1), so a changelist uak created is
+	/// named. Without a project it can't see the journals: the first check warns so (<see cref="MutationFolders.DescribeUnchecked"/>).
 	/// </summary>
 	void CheckNoMutation(bool late)
 	{
@@ -251,20 +251,20 @@ public sealed class VcsShelveCommand : PerforceCommandBase
 		}
 		if (MutationFolders.DescribeLeft(Context.StateDirectory, "shelve") is string refusal)
 		{
-			throw late ? new VcsException(refusal) : new UakUsageException(refusal);
+			throw late ? new VcsException(refusal) : new UakRefusalException(refusal);
 		}
 	}
 
 	/// <summary>
 	/// Refuses a shelf that holds a binary a <c>uak mutate</c> mutant build may have left its patch in
 	/// (<see cref="MutationFolders.DescribeBinariesIn"/>): the source files are back, so <see cref="CheckNoMutation"/> lets the
-	/// journal through, but a project that versions its binaries would ship the mutant.
+	/// journal through, but a project that versions its binaries would ship the mutant. Refuses as <see cref="CheckNoMutation"/> does.
 	/// </summary>
 	void CheckNoMutantBinaries(IEnumerable<string> files, bool late)
 	{
 		if (MutationFolders.DescribeBinariesIn(Context.StateDirectory, files, "shelve") is string refusal)
 		{
-			throw late ? new VcsException(refusal) : new UakUsageException(refusal);
+			throw late ? new VcsException(refusal) : new UakRefusalException(refusal);
 		}
 	}
 

@@ -56,19 +56,35 @@ public sealed class ExpectedTests
 	/// <summary>The listed names the run's filter matches: the tests this run must pass.</summary>
 	public IReadOnlyList<string> Names { get; }
 
-	/// <summary>Reads an -expect file and keeps the names <paramref name="filter"/> matches.</summary>
+	/// <summary>Reads an -expect file and keeps the names <paramref name="filter"/> matches; a relative path is looked for in the current folder only.</summary>
 	/// <exception cref="UakUsageException">The file is missing or lists no names, the filter is a "Group:" one, or it matches none of the names.</exception>
-	public static ExpectedTests Load(string path, string filter)
+	public static ExpectedTests Load(string path, string filter) => Load(path, filter, null);
+
+	/// <summary>
+	/// Reads an -expect file and keeps the names <paramref name="filter"/> matches. A relative path is looked for in the current
+	/// folder, then in <paramref name="projectDirectory"/>, so a project-relative path works wherever the shell has moved to.
+	/// </summary>
+	/// <exception cref="UakUsageException">The file is missing or lists no names, the filter is a "Group:" one, or it matches none of the names.</exception>
+	public static ExpectedTests Load(string path, string filter, string? projectDirectory)
 	{
 		string Full = Path.GetFullPath(path);
 		if (!System.IO.File.Exists(Full))
 		{
-			throw new UakUsageException($"-expect file not found: {Full}");
+			string? InProject = projectDirectory is null ? null : Path.GetFullPath(path, projectDirectory);
+			if (InProject is null || InProject == Full)
+			{
+				throw new UakUsageException($"-expect file not found: {Full}");
+			}
+			if (!System.IO.File.Exists(InProject))
+			{
+				throw new UakUsageException($"-expect file not found: {Full}, nor {InProject}");
+			}
+			Full = InProject;
 		}
 		return Parse(Full, System.IO.File.ReadAllLines(Full), filter);
 	}
 
-	/// <summary>As <see cref="Load"/>, from the file's lines.</summary>
+	/// <summary>As <see cref="Load(string, string, string?)"/>, from the file's lines.</summary>
 	public static ExpectedTests Parse(string file, IEnumerable<string> lines, string filter)
 	{
 		AutomationFilter Filter = AutomationFilter.Parse(filter);

@@ -10,7 +10,7 @@ using AgentKit.Vcs;
 namespace AgentKit.Unreal.Tests;
 
 [TestClass]
-public sealed class MutateTests
+public sealed partial class MutateTests
 {
 	// ---- UnifiedDiff ----
 
@@ -217,7 +217,7 @@ public sealed class MutateTests
 		string Created = Path.Combine(NewFolder, "Deeper", "New.cpp");
 
 		MutationJournal Journal = MutationJournal.Begin(Box.Context(), "J", "p.diff", [ReadOnly, Created]);
-		Assert.ThrowsExactly<UakUsageException>(() => MutationJournal.Begin(Box.Context(), "J", "p.diff", [ReadOnly]));
+		Assert.ThrowsExactly<UakRefusalException>(() => MutationJournal.Begin(Box.Context(), "J", "p.diff", [ReadOnly]));
 		MutationJournal.MakeWritable(ReadOnly);
 		File.WriteAllText(ReadOnly, "mutated\n");
 		Directory.CreateDirectory(Path.GetDirectoryName(Created)!);
@@ -309,8 +309,9 @@ public sealed class MutateTests
 	/// then up to <paramref name="recompileMargin"/> ahead of the clock) unless <paramref name="realDelay"/>.
 	/// </summary>
 	static UnrealServices Services(FakeProcessRunner runner, IEditorLockProvider? lockProvider = null, bool realDelay = false, TimeSpan? recompileMargin = null,
-		Func<string, DateTime?>? probe = null, List<TimeSpan>? delays = null, Func<UakContext, Task<bool>>? waitForCompiles = null) => new()
+		Func<string, DateTime?>? probe = null, List<TimeSpan>? delays = null, Func<UakContext, Task<bool>>? waitForCompiles = null, Action<string, DateTime>? setWriteTime = null) => new()
 	{
+		SetWriteTime = setWriteTime ?? File.SetLastWriteTimeUtc,
 		Runner = runner,
 		Lock = lockProvider ?? new FakeLock(),
 		HostPlatform = UnrealPlatform.Win64,
@@ -773,8 +774,8 @@ public sealed class MutateTests
 		LockHolderInfo Joined = new() { Pid = Self.Pid, ProcessStart = Self.StartTimeUtc, HoldId = "h" };
 
 		MutationJournal.ThrowIfUnfinished(Box.Context(), Joined, building: false);
-		Assert.ThrowsExactly<UakUsageException>(() => MutationJournal.ThrowIfUnfinished(Box.Context(), null, building: false));
-		Assert.ThrowsExactly<UakUsageException>(() => MutationJournal.ThrowIfUnfinished(Box.Context(), new LockHolderInfo { Pid = 1, ProcessStart = Self.StartTimeUtc }, building: false));
+		Assert.ThrowsExactly<UakRefusalException>(() => MutationJournal.ThrowIfUnfinished(Box.Context(), null, building: false));
+		Assert.ThrowsExactly<UakRefusalException>(() => MutationJournal.ThrowIfUnfinished(Box.Context(), new LockHolderInfo { Pid = 1, ProcessStart = Self.StartTimeUtc }, building: false));
 		Assert.AreEqual(0, await new MutateCommand(Services(new FakeProcessRunner { Behaviour = Plays("test-passed.log", 0, [0]) })).RunAsync(Box.Context(), ["-restore"], CancellationToken.None));
 		Assert.AreEqual(Original, File.ReadAllText(Box.SourceFile));
 	}
@@ -805,7 +806,7 @@ public sealed class MutateTests
 		Assert.AreEqual(2, await new TestCommand(Services(Later)).RunAsync(Box.Context(), ["-filter=Project.Math"], CancellationToken.None), why);
 		Assert.Contains("can't be trusted", Box.Logger.Text, why);
 		Assert.AreEqual(2, await new BuildCommand(Services(Later)).RunAsync(Box.Context(), [], CancellationToken.None), why);
-		Assert.ThrowsExactly<UakUsageException>(() => MutationJournal.CheckForCompile(Box.Context()), why);
+		Assert.ThrowsExactly<UakRefusalException>(() => MutationJournal.CheckForCompile(Box.Context()), why);
 		Assert.IsEmpty(Later.Invocations, why);
 		Assert.AreEqual(MutateCommand.RestoreFailedExitCode, await new MutateCommand(Services(Later)).RunAsync(Box.Context(), ["-restore"], CancellationToken.None), why);
 
@@ -1961,18 +1962,24 @@ public sealed class MutateTests
 			File.SetAttributes(Box.SourceFile, FileAttributes.Normal);
 		}
 
-		// A temporary file a killed write left beside a file goes with the next restore; a file merely named alike stays.
+		// A temporary file a killed write left beside a file goes with the next restore, once its process has ended and it is more
+		// than an hour old; a recent one may be a live write's on another machine (K8), and a file merely named alike stays.
 		File.WriteAllText(Box.SourceFile, Original);
 		MutationJournal Journal = MutationJournal.Begin(Box.Context(), "TF", "p.diff", [Box.SourceFile]);
 		File.WriteAllText(Box.SourceFile, "mutant\r\n");
 		Journal.MarkApplied();
-		string Leftover = Sandbox.Write($"{Box.SourceFile}.1234.{Guid.NewGuid():N}.tmp", "part of a write");
+		DateTime Old = DateTime.UtcNow - MutationJournal.LeftoverAge - TimeSpan.FromMinutes(10);
+		string Leftover = Sandbox.Write($"{Box.SourceFile}.{int.MaxValue}.{Guid.NewGuid():N}.tmp", "part of a write");
+		File.SetLastWriteTimeUtc(Leftover, Old);
+		string Recent = Sandbox.Write($"{Box.SourceFile}.{int.MaxValue}.{Guid.NewGuid():N}.tmp", "part of a write");
 		string Alike = Sandbox.Write(Box.SourceFile + ".notes.tmp", "someone's");
+		File.SetLastWriteTimeUtc(Alike, Old);
 
 		Assert.IsEmpty(Journal.Restore().Conflicts);
 
 		Assert.AreEqual(Original, File.ReadAllText(Box.SourceFile));
 		Assert.IsFalse(File.Exists(Leftover));
+		Assert.IsTrue(File.Exists(Recent));
 		Assert.IsTrue(File.Exists(Alike));
 	}
 
@@ -3266,6 +3273,7 @@ public sealed class MutateTests
 		Assert.AreEqual(2, await new MutateCommand(Services(Runner, Lock)).RunAsync(Box.Context(), ["-restore"], CancellationToken.None), Box.Logger.Text);
 
 		Assert.Contains("the killed check's command still runs (PID 42)", Box.Logger.Text);
+		AssertLoggedAsARefusal(Box);
 		Assert.Contains("`uak lock forget-orphan -hold=abc`", Box.Logger.Text);
 		Assert.Contains("may have been reused", Box.Logger.Text);
 		Assert.AreEqual(Mutant, File.ReadAllText(Box.SourceFile));
@@ -3287,6 +3295,7 @@ public sealed class MutateTests
 		Assert.AreEqual(2, await new MutateCommand(Services(Runner, Lock)).RunAsync(Box.Context(), ["-name=O2", "-patch=" + Patch, "-filter=Project.Math"], CancellationToken.None), Box.Logger.Text);
 
 		Assert.Contains("a dead hold's command still runs (PID 42)", Box.Logger.Text);
+		AssertLoggedAsARefusal(Box);
 		Assert.Contains("`uak lock forget-orphan -hold=abc` and `uak lock forget-orphan -hold=def`", Box.Logger.Text);
 		Assert.Contains("may have been reused", Box.Logger.Text);
 		Assert.AreEqual(Original, File.ReadAllText(Box.SourceFile));

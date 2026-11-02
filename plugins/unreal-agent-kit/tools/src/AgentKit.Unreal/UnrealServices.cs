@@ -166,11 +166,21 @@ public sealed class UnrealServices
 	}
 
 	/// <summary>
-	/// For <c>uak compile</c>: waits while a quiet run holds the lock (<see cref="QuietRuns"/>), then records the compile until
-	/// the result is disposed.
+	/// For <c>uak compile</c>: waits while a quiet run holds the lock or a cooked run has reserved UBT (<see cref="QuietRuns"/>),
+	/// then records the compile until the result is disposed.
 	/// </summary>
 	public Func<UakContext, CancellationToken, Task<IDisposable>> EnterCompile { get; init; } =
 		(Context, Token) => QuietRuns.EnterCompileAsync(Context, QuietRuns.DefaultPollInterval, Token);
+
+	/// <summary>Sets a file's write time (<see cref="BuildEdits"/>).</summary>
+	public Action<string, DateTime> SetWriteTime { get; init; } = File.SetLastWriteTimeUtc;
+
+	/// <summary>
+	/// For a cooked run that builds, under its lock: reserves UBT until the result is disposed, and waits for running compiles
+	/// (<see cref="QuietRuns.ReserveUbtAsync"/>). The second argument names the run.
+	/// </summary>
+	public Func<UakContext, string, CancellationToken, Task<IDisposable>> ReserveUbt { get; init; } =
+		(Context, Name, Token) => QuietRuns.ReserveUbtAsync(Context, Name, QuietRuns.DefaultPollInterval, QuietRuns.DefaultCompileWaitTimeout, Token);
 
 	/// <summary>The free physical memory as UBT measures it (<see cref="MemoryLimits.GetFreeMemoryBytes"/>), or null when unknown.</summary>
 	public Func<long?> FreeMemoryBytes { get; init; } = MemoryLimits.GetFreeMemoryBytes;
@@ -226,14 +236,14 @@ public sealed class UnrealServices
 	/// Runs a command body whose -resultfile= must never be read as this run's while it holds an earlier one: the file (read
 	/// from the raw arguments, before anything else is checked) is deleted first, refused (a usage error) when it can't be; when
 	/// the command is refused or stops before it writes its own, it gets <c>{ Command, Outcome: "refused" | "stopped",
-	/// ExitCode, Message }</c>.
+	/// ExitCode, Message }</c>. <paramref name="dotSplit"/> is the rule the command parses its arguments with (<see cref="UakArguments"/>).
 	/// </summary>
-	internal static async Task<int> WithFreshResultFileAsync(string command, IReadOnlyList<string> arguments, Func<Task<int>> body)
+	internal static async Task<int> WithFreshResultFileAsync(string command, IReadOnlyList<string> arguments, Func<Task<int>> body, DotSplitRule dotSplit = DotSplitRule.Options)
 	{
 		string? ResultFile;
 		try
 		{
-			ResultFile = new UakArguments(arguments).GetString("resultfile") is string Given ? Path.GetFullPath(Given) : null;
+			ResultFile = new UakArguments(arguments, dotSplit).GetString("resultfile") is string Given ? Path.GetFullPath(Given) : null;
 		}
 		catch (Exception Exception) when (Exception is UakUsageException or ArgumentException or NotSupportedException or PathTooLongException)
 		{
@@ -293,8 +303,14 @@ public sealed class UnrealServices
 		}
 		catch (UakUsageException Exception)
 		{
-			// Also catches UakSetupException, which derives from it.
-			context.Logger.LogError("{Kind}: {Message}", Exception is UakSetupException ? "setup" : "usage", Exception.Message);
+			// Also catches UakSetupException and UakRefusalException, which derive from it.
+			string Kind = Exception switch
+			{
+				UakSetupException => "setup",
+				UakRefusalException => "refused",
+				_ => "usage",
+			};
+			context.Logger.LogError("{Kind}: {Message}", Kind, Exception.Message);
 			return UakExitCodes.UsageError;
 		}
 		catch (ProcessStartException Exception)

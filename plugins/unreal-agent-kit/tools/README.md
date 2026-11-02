@@ -35,7 +35,7 @@ With UE 5.7's SDK (8.0), which predates `--solution`, the test command is `<dotn
 ```
 
 - **What it makes.** A self-contained `uak` for this machine. It needs no installed .NET, and no `DOTNET_ROOT`.
-- **Where it goes.** To `$UAK_HOME/<kit version>/`, where `UAK_HOME` defaults to `~/.unreal-agent-kit`. The kit version is the `version` in `.claude-plugin/plugin.json` (and `<Version>` in `Directory.Build.props`). For kit version 0.4.1: `~/.unreal-agent-kit/0.4.1/uak.exe` on Windows, `~/.unreal-agent-kit/0.4.1/uak` elsewhere.
+- **Where it goes.** To `$UAK_HOME/<kit version>/`, where `UAK_HOME` defaults to `~/.unreal-agent-kit`. The kit version is the `version` in `.claude-plugin/plugin.json` (and `<Version>` in `Directory.Build.props`). For kit version 0.4.2: `~/.unreal-agent-kit/0.4.2/uak.exe` on Windows, `~/.unreal-agent-kit/0.4.2/uak` elsewhere.
   - The folder is outside the plugin, which Claude Code replaces on every update.
   - Each kit version gets its own folder, so publishing never overwrites a `uak` that is running.
 - **What to do next.** In Claude Code sessions, the plugin's `bin/` puts it on `PATH`. Elsewhere, put that folder on `PATH`, or call `uak` by its full path. Then check it with `uak env`.
@@ -52,5 +52,7 @@ A project can add its own `uak` commands without changing the kit:
 3. `<Project>/.uak/commands/` is off by default. Turn it on with `UAK_PROJECT_COMMANDS=1` (or `true`), or by listing it in `UAK_COMMAND_PATHS`.
 
 Loading a command runs its code, so these folders load lazily: only to run a command the kit does not have, or for `uak help -all`, which lists the new commands. The host loads only the DLLs in those folders that reference `AgentKit.Core`. The other DLLs there are loaded when a command needs them.
+
+Windows PowerShell 5.1 splits an argument at a dot (`-key=a.b` arrives as `-key=a` and `.b`). A command's `new UakArguments(arguments)` takes the tokens as they came, as it did in 0.4.1. To have them joined, pass a rule: `new UakArguments(arguments, DotSplitRule.Options)`. `DotSplitRule.Paths` is for a command that takes paths as positional arguments, so `.\Foo.cpp` after an option stays a path, and `DotSplitRule.Command` for one whose words start a command, which reads no disk and refuses a dotted word it can't place. A command that hands arguments on to another tool reads `PassThrough`, which `Rest`'s verbatim tokens are joined for.
 
 **Trust:** a command DLL runs as you, with your rights. Turn project commands on only for a project whose `.uak/commands/` you trust as much as its build scripts.

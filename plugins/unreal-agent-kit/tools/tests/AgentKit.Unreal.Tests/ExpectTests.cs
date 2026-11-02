@@ -67,6 +67,12 @@ public sealed class ExpectTests
 	}
 
 	[TestMethod]
+	public void AProjectCommandBuiltAgainstAnOlderKitStillFindsLoad()
+	{
+		Assert.IsNotNull(typeof(ExpectedTests).GetMethod(nameof(ExpectedTests.Load), [typeof(string), typeof(string)]));
+	}
+
+	[TestMethod]
 	public void AFileWithoutNamesOrWithoutAMatchIsAUsageError()
 	{
 		Assert.ThrowsExactly<UakUsageException>(() => ExpectedTests.Parse("expect.txt", ["# nothing", "", "  "], "Project."));
@@ -74,6 +80,58 @@ public sealed class ExpectTests
 		Assert.Contains("matches none of the 3 test names", Error.Message);
 		Assert.ThrowsExactly<UakUsageException>(() => ExpectedTests.Parse("expect.txt", File, "Group:Smoke"));
 		Assert.ThrowsExactly<UakUsageException>(() => ExpectedTests.Load(Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"), "expect.txt"), "Project."));
+	}
+
+	[TestMethod]
+	public void ARelativeFileIsLookedForInTheProjectToo()
+	{
+		string Project = Path.Combine(Path.GetTempPath(), "uak-unreal-tests", Guid.NewGuid().ToString("N"));
+		string Relative = Path.Combine("Plugins", "Tests", Guid.NewGuid().ToString("N") + ".txt");
+		string InProject = Path.Combine(Project, Relative);
+		Directory.CreateDirectory(Path.GetDirectoryName(InProject)!);
+		System.IO.File.WriteAllLines(InProject, File);
+		try
+		{
+			Assert.HasCount(3, ExpectedTests.Load(Relative, "Project.", Project).Names);
+			UakUsageException Error = Assert.ThrowsExactly<UakUsageException>(() => ExpectedTests.Load(Relative, "Project."));
+			Assert.AreEqual($"-expect file not found: {Path.GetFullPath(Relative)}", Error.Message);
+		}
+		finally
+		{
+			Directory.Delete(Project, recursive: true);
+		}
+	}
+
+	[TestMethod]
+	public void TheCurrentFolderComesFirst()
+	{
+		string Project = Path.Combine(Path.GetTempPath(), "uak-unreal-tests", Guid.NewGuid().ToString("N"));
+		string Name = Guid.NewGuid().ToString("N") + ".txt";
+		string Here = Path.GetFullPath(Name);
+		Directory.CreateDirectory(Project);
+		System.IO.File.WriteAllLines(Path.Combine(Project, Name), File);
+		System.IO.File.WriteAllLines(Here, ["Project.Only.One"]);
+		try
+		{
+			Assert.HasCount(1, ExpectedTests.Load(Name, "Project.", Project).Names);
+		}
+		finally
+		{
+			System.IO.File.Delete(Here);
+			Directory.Delete(Project, recursive: true);
+		}
+	}
+
+	[TestMethod]
+	public void AMissingFileIsReportedWithBothPlaces()
+	{
+		string Project = Path.Combine(Path.GetTempPath(), "uak-unreal-tests", Guid.NewGuid().ToString("N"));
+		string Name = Guid.NewGuid().ToString("N") + ".txt";
+
+		UakUsageException Error = Assert.ThrowsExactly<UakUsageException>(() => ExpectedTests.Load(Name, "Project.", Project));
+
+		Assert.Contains(Path.GetFullPath(Name), Error.Message);
+		Assert.Contains(Path.Combine(Project, Name), Error.Message);
 	}
 
 	static AutomationLogSummary Run(params string[] completed)

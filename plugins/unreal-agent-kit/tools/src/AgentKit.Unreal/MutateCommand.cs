@@ -31,8 +31,8 @@ public sealed partial class MutateCommand : IUakCommand
 	public const int NotBuiltExitCode = 3;
 
 	/// <summary>
-	/// The run says nothing about the mutation: the build compiled nothing or failed elsewhere, or the tests didn't start, ran
-	/// nothing, or ended without a failed test but not cleanly (a crash, the editor's exit code).
+	/// The run says nothing about the mutation: the build compiled nothing, failed elsewhere or overlapped an edit, or the tests
+	/// didn't start, ran nothing, or ended without a failed test but not cleanly (a crash, the editor's exit code).
 	/// </summary>
 	public const int InconclusiveExitCode = 4;
 
@@ -45,7 +45,7 @@ public sealed partial class MutateCommand : IUakCommand
 	/// compiles them), and .swift, .proto and .rc (<see cref="UnnamedSourceExtensions"/>), and any file by the name a compile
 	/// includes as a dependency. It compiles no .asm or .S file.
 	/// </summary>
-	static readonly HashSet<string> SourceExtensions = new(StringComparer.OrdinalIgnoreCase)
+	internal static readonly HashSet<string> SourceExtensions = new(StringComparer.OrdinalIgnoreCase)
 	{
 		".cpp", ".c", ".cc", ".cxx", ".m", ".mm", ".ixx", ".cppm", ".ispc", ".swift", ".proto", ".rc",
 		".h", ".hpp", ".hh", ".hxx", ".inl", ".inc", ".ipp", ".tpp", ".def", ".isph",
@@ -127,7 +127,8 @@ public sealed partial class MutateCommand : IUakCommand
 		  -resx, -resy, and -- editor arguments). Not -cooked: a staged game would keep the mutation after the files
 		  are put back. Not -quiet.
 		  -resultfile=<path>    Writes this check's result as JSON (Verdict, ExitCode, BinariesPending, the files and
-		                        their +/- lines, the tests' counts, Problems): deleted first, written at every exit.
+		                        their +/- lines, the tests' counts, Problems, EditedDuringBuild, EditNotMarked): deleted
+		                        first, written at every exit.
 		  -restore              Finish a mutation run that was killed: put its files back from its journal (those that
 		                        still hold the mutation, or, for a run killed while it wrote the patch, the bytes the
 		                        patch was to give them), mark them for a recompile, rebuild, and clear the journal, as
@@ -169,8 +170,9 @@ public sealed partial class MutateCommand : IUakCommand
 		  -force                puts the originals back over every file, saving the bytes it overwrites beside the
 		                        journal (<n>.<time>.current, never over bytes saved before), rebuilds, and sets the
 		                        journal aside, even when the rebuild shows no compile of them (with a warning: it is
-		                        then the way out for a file no build of this target compiles), though not when the
-		                        rebuild fails.
+		                        then the way out for a file no build of this target compiles) or the journal holds an
+		                        overlap RebuildNeeded.json couldn't record (the warning names those files), though not
+		                        when the rebuild fails.
 		                        Set aside: moved to <State>/DiscardedMutations/<name>-<time>, with its copies; printed.
 		  -status               Lists the journals left, running or stopped, without the lock: exit 0 when none is
 		                        whose files may hold its patch (one whose files are back is listed as a warning: only
@@ -201,7 +203,14 @@ public sealed partial class MutateCommand : IUakCommand
 		it wrote isn't known (no receipt, a link outside those folders, or a patch that adds or deletes a file, or
 		changes a .Build.cs, .Target.cs, .uplugin or .uproject): such a `uak build` clears it, as does the next `uak test`,
 		`uak lock run` or `uak mutate` once each such binary is rewritten, or `uak mutate -restore`, which marks the
-		files again and rebuilds; when no build compiles a file (another target builds it, say), `-restore -force`.
+		files again and rebuilds; when no build compiles a file (another target builds it, say), `-restore -force`. The
+		refusals name the file that stopped the rebuild, whose run left the journal and the next command, and `uak test`
+		and `uak mutate` (not `uak lock run`'s own check, not -quiet) retry that build themselves once a source file has
+		changed since it failed: the same build, with the same rule for clearing the journal. When a source file changes
+		while its own retry runs, `uak mutate` goes on, as its mutant build recompiles what uses that file; it refuses
+		only a file it could not mark for that recompile. Like `uak test`, it refuses while a rebuild by an earlier command
+		overlapped an edit, until a whole `uak build` of that target (no UBT arguments) succeeds with no edit overlapping
+		it. An edit that overlaps the rebuild after a check leaves that same refusal.
 		While a stopped run's journal is left, `uak test`, `uak lock run` and `uak mutate` refuse to run; `uak compile`
 		and `uak build` refuse until its files are put back (then a build is what clears the binaries); `uak vcs shelve`
 		and `uak horde preflight -shelve` refuse while any journal is left whose files aren't back, a running one's too
@@ -215,15 +224,17 @@ public sealed partial class MutateCommand : IUakCommand
 		1 no verdict (uak failed or was cancelled; the files were put back), 2 usage error or refused, 3 the mutant
 		didn't build (an error in a patched file or one that includes it directly), 4 inconclusive (the build shows no
 		compile of a patched source file, by its name or its module's Module.<name>.cpp unity file, <name> being the
-		ShortName its Build.cs sets, if any, or no compile at all for a patched header; or it failed elsewhere; or the
-		tests didn't start, ran nothing, skipped a listed test, or ended without a failed test but not cleanly), 5
+		ShortName its Build.cs sets, if any, or no compile at all for a patched header; or it failed elsewhere; or
+		another agent's edit overlapped it, however the tests ended; or the tests didn't start, ran nothing, skipped a
+		listed test, or ended without a failed test but not cleanly), 5
 		restore failed (a file changed since the patch was applied, or the files put back could not be stamped for a
 		recompile: run uak mutate -restore), 6 survived (the tests passed; not 1, so a killed run never reads as
 		survived). A compile matched by the file's name alone while the project has another file of that name is warned
 		about: it may be the other's.
 		-restore: 0 restored and rebuilt, or restored with a rebuild that failed but no binary holding the mutation (or
 		nothing to restore), 2 refused, 5 not (or its journal could not be cleared, or binaries may still hold the
-		mutation: the rebuild failed, or shows no compile of a patched file).
+		mutation: the rebuild failed, or shows no compile of a patched file; or the journal holds an overlap the
+		marker can't take yet).
 		-status: 0 when no journal left has its patch in the tree (one whose files are back is listed, as a warning),
 		5 when one may.
 		""";
@@ -240,7 +251,7 @@ public sealed partial class MutateCommand : IUakCommand
 	{
 		try
 		{
-			UakArguments Arguments = new(arguments);
+			UakArguments Arguments = new(arguments, DotSplitRule.Options);
 			return Arguments.GetFlag("restore") || Arguments.GetFlag("status") ? null : Arguments.GetString("name");
 		}
 		catch (UakUsageException)
@@ -251,7 +262,7 @@ public sealed partial class MutateCommand : IUakCommand
 
 	async Task<int> RunCheckedAsync(UakContext context, IReadOnlyList<string> arguments, CancellationToken cancellationToken)
 	{
-		UakArguments Arguments = new(arguments);
+		UakArguments Arguments = new(arguments, DotSplitRule.Options);
 		if (Arguments.GetFlag("restore"))
 		{
 			return await RestoreCommandAsync(context, Arguments, cancellationToken).ConfigureAwait(false);
@@ -301,7 +312,7 @@ public sealed partial class MutateCommand : IUakCommand
 		{
 			throw new UakUsageException("-quiet is for benchmarks (uak test -quiet), not mutation runs");
 		}
-		ExpectedTests? Expected = Options.ExpectFile is null ? null : ExpectedTests.Load(Options.ExpectFile, Options.Filter);
+		ExpectedTests? Expected = Options.ExpectFile is null ? null : ExpectedTests.Load(Options.ExpectFile, Options.Filter, context.ProjectDirectory?.FullName);
 		if (!File.Exists(PatchFile))
 		{
 			throw new UakUsageException($"-patch file not found: {PatchFile}");
@@ -324,11 +335,24 @@ public sealed partial class MutateCommand : IUakCommand
 		string EditorTarget = TargetResolver.ResolveEditorTarget(ProjectFile);
 
 		await using IAsyncDisposable Lock = await Services.Lock.AcquireAsync(context, $"uak mutate {Options.Name}", cancellationToken).ConfigureAwait(false);
+		BuildEditReport Retried = await new BuildCommand(Services).RetryPendingRebuildAsync(context, Lock, cancellationToken).ConfigureAwait(false);
+		// What this retry overlapped, and what an earlier command's left. In the result first: the journal may be what refuses.
+		BuildEditReport Standing = RebuildNeeded.Read(context).Plus(Retried);
+		result.EditedDuringBuild = Standing.Overlapped;
+		result.EditNotMarked = Standing.NotMarked;
 		MutationJournal.ThrowIfUnfinished(context);
+		if (Standing.NotMarked.Count > 0 || Standing.Overlapped.Except(Retried.Overlapped, StringComparer.OrdinalIgnoreCase).Any())
+		{
+			throw new UakRefusalException(Standing.DescribeRetryOverlap());
+		}
+		// A marked edit of its own retry heals here: its stamp makes the mutant build recompile what uses it, and that build clears
+		// what the retry left. It isn't this check's: the result lists what overlapped its own build.
+		result.EditedDuringBuild = [];
+		result.EditNotMarked = [];
 		if (Lock is IOrphanedCommandHold { OrphanedCommand: string Running } Orphaned)
 		{
 			// Unlike a build or a test, which warn: a build that writes past this check's stamp can leave a mutant object newer than it.
-			throw new UakUsageException($"a dead hold's command still runs ({Running}), and would build beside this check, so an object it compiled from the mutant could outlive the"
+			throw new UakRefusalException($"a dead hold's command still runs ({Running}), and would build beside this check, so an object it compiled from the mutant could outlive the"
 				+ $" restore: nothing was changed. Wait for it to end, or stop it, then run this again. {EditorLock.DescribeForgetOrphan(Orphaned.OrphanedHoldIds)}");
 		}
 		VcsDetection Detection;
@@ -437,7 +461,7 @@ public sealed partial class MutateCommand : IUakCommand
 				{
 					// Their bytes, the edit's and the mutation's, are recorded as no mutation's, so the restore leaves them.
 					Journal.MarkApplied(EditedMeanwhile);
-					throw new UakUsageException($"{string.Join(", ", EditedMeanwhile)} changed while git wrote the patch: no verdict");
+					throw ChangedWhileGitWrote(EditedMeanwhile);
 				}
 			}
 			else
@@ -464,6 +488,10 @@ public sealed partial class MutateCommand : IUakCommand
 				Journal.SetAwaitingRecompile(null);
 				BuildStarted = true;
 				MutantBuild = await new BuildCommand(Services).BuildAsync(context, Build, Lock, cancellationToken).ConfigureAwait(false);
+				if (MutantBuild.NotKept is not null)
+				{
+					RebuildNeeded.HoldInJournal(context, Journal, MutantBuild.NotKept);
+				}
 				// The build may have rewritten the receipt, and made a plugin's binaries folder for the first time. One that stopped part
 				// way says nothing of what it wrote, as one that threw doesn't.
 				Binaries = MutantBuild.StoppedPartWay ? null : Binaries?.Union(FindBinaries());
@@ -534,15 +562,20 @@ public sealed partial class MutateCommand : IUakCommand
 			else
 			{
 				MutationJournal Pending = Restored.Pending[0];
-				string Why = Restored.RebuildFailed ? "failed (its errors are above: another change may have broken the tree)"
+				string? FailedIn = Pending.Record.RebuildFailure?.Where;
+				string Why = Restored.RebuildFailed ? $"failed{(FailedIn is null ? "" : " in " + FailedIn)} (its errors are above: another change may have broken the tree)"
 					: $"shows no compile of {Pending.DescribeAwaitingRecompile()}";
 				string Clears = Restored.RebuildFailed
 					? $"succeeds, which clears the journal (`uak mutate -restore -name={Options.Name}` rebuilds too)"
 					: $"compiles them and succeeds, which clears the journal (`uak mutate -restore -name={Options.Name}` marks them again and rebuilds; if no build compiles"
 						+ $" them, `-restore -name={Options.Name} -force` sets the journal aside)";
-				Note = $"BINARIES PENDING: the files are back (the tree holds no mutation) and marked so the next build recompiles them, but the rebuild after"
-					+ $" {Why}, so {Pending.DescribeHeld()} may still hold the mutation: `uak test`, `uak lock run` and `uak mutate` refuse until a `uak build` of"
-					+ $" {EditorTarget} {Clears}; builds, compiles, shelves and commits of source files aren't held up";
+				Note = Pending.WaitsOnlyOnUnkeptOverlap()
+					? $"BINARIES PENDING: the files are back and no binary holds the mutation, but {Pending.DescribeUnkeptOverlap()}: `uak test`, `uak lock run` and `uak mutate` refuse until a"
+						+ $" whole `uak build` of {EditorTarget} can write it, or `uak mutate -restore -name={Options.Name}` can; builds, compiles, shelves and commits of source files aren't held up"
+					: $"BINARIES PENDING: the files are back (the tree holds no mutation) and marked so the next build recompiles them, but the rebuild after"
+						+ $" {Why}, so {Pending.DescribeHeld()} may still hold the mutation: `uak test`, `uak lock run` and `uak mutate` refuse until a `uak build` of"
+						+ $" {EditorTarget} {Clears}; builds, compiles, shelves and commits of source files aren't held up"
+						+ (Restored.RebuildFailed ? "; `uak test` and `uak mutate` retry that build themselves once a source file changes" : "");
 				Out.Error("mutate: " + Note);
 			}
 			result.Problems.Add(Note);
@@ -596,7 +629,19 @@ public sealed partial class MutateCommand : IUakCommand
 			Out.Record(context, Services, "mutate", Options.Name, UakExitCodes.UsageError);
 			throw new UakUsageException($"-patch={PatchFile} changes nothing: each file holds the same bytes after it as before");
 		}
-		else if (!MutantBuild!.Built)
+		else if (MutantBuild!.EditedDuringBuild.Count > 0)
+		{
+			// However the tests ended: a patched file is the journal's, so this is someone else's edit, and a failed test or a failed
+			// compile may be that edit's, as a pass may be binaries that hold only part of it.
+			result.EditedDuringBuild = MutantBuild.EditedDuringBuild;
+			result.EditNotMarked = MutantBuild.Edits.NotMarked;
+			result.Problems.AddRange(MutantBuild.EditedDuringBuild.Select(File => $"changed while the mutant build ran: {File}"));
+			Out.Error($"mutate: INCONCLUSIVE: {BuildEdits.Name(MutantBuild.EditedDuringBuild)} changed while the mutant build ran, so its binaries may mix old and new text, and"
+				+ $" the run says nothing about the mutation: run it again once that edit is done ({Put}). {BuildEdits.OwnWritesHint}");
+			result.Verdict = "inconclusive";
+			ExitCode = InconclusiveExitCode;
+		}
+		else if (!MutantBuild.Built)
 		{
 			List<CompileDiagnostic> Blamed = [.. MutantBuild.Errors.Where(Error => BlamesPatch(Error, Paths))];
 			if (Blamed.Count > 0)
@@ -700,7 +745,7 @@ public sealed partial class MutateCommand : IUakCommand
 	}
 
 	/// <summary>Whether a file is one a C++ build compiles (a source or a header).</summary>
-	static bool IsSource(string path) => SourceExtensions.Contains(Path.GetExtension(path));
+	internal static bool IsSource(string path) => SourceExtensions.Contains(Path.GetExtension(path));
 
 	/// <summary>Whether no compile names a file, so any compile will do: a header (its includers show) or one of <see cref="UnnamedSourceExtensions"/>.</summary>
 	static bool NeedsOnlyACompile(string path) => HeaderExtensions.Contains(Path.GetExtension(path)) || UnnamedSourceExtensions.Contains(Path.GetExtension(path));
@@ -975,7 +1020,8 @@ public sealed partial class MutateCommand : IUakCommand
 	/// Refuses a file the patch creates that exists, and a file it changes or deletes that is a link (a symbolic link, or one
 	/// of several hard links to one file: <see cref="MutationJournal.DescribeLink"/>), which writing it whole, or deleting and
 	/// putting it back, would turn into a file of its own. A file it changes may have uncommitted changes: the journal's copy
-	/// keeps them, byte for byte, and puts them back.
+	/// keeps them, byte for byte, and puts them back. A refusal (<see cref="UakRefusalException"/>): what is on disk stands in
+	/// the way, and the message says what clears it.
 	/// </summary>
 	internal static void CheckFilesCanBeWritten(List<DiffFile> files, List<string> paths)
 	{
@@ -984,16 +1030,16 @@ public sealed partial class MutateCommand : IUakCommand
 		{
 			if (files[Index].IsNew && (File.Exists(paths[Index]) || Directory.Exists(paths[Index])))
 			{
-				Problems.Add($"{paths[Index]} exists, but the patch creates it");
+				Problems.Add($"{paths[Index]} exists, but the patch creates it: move or delete it first");
 			}
 			else if (!files[Index].IsNew && MutationJournal.DescribeLink(paths[Index]) is string Link)
 			{
-				Problems.Add($"{paths[Index]} is {Link}, so uak mutate doesn't patch it");
+				Problems.Add($"{paths[Index]} is {Link}, so uak mutate doesn't patch it: replace the link with a file of its own first");
 			}
 		}
 		if (Problems.Count > 0)
 		{
-			throw new UakUsageException("refused: " + string.Join("; ", Problems));
+			throw new UakRefusalException($"{string.Join("; ", Problems)}: nothing was changed");
 		}
 	}
 
@@ -1134,6 +1180,16 @@ public sealed partial class MutateCommand : IUakCommand
 			// The restore after finds it as it is, and says it may hold part of the patch.
 		}
 		return WriteOwner.Run;
+	}
+
+	/// <summary>
+	/// What stops a check once an edit got in while git wrote the patch (<see cref="CheckGitWrite"/>), when the files are back: a
+	/// refusal, as for a file changed while the patch was prepared (<see cref="MutationFileChangedException"/>). The command was
+	/// right, an edit on disk stopped it, and running it again once that edit is done clears it, which its help says nothing of.
+	/// </summary>
+	internal static UakUsageException ChangedWhileGitWrote(IEnumerable<string> files)
+	{
+		return new UakRefusalException($"{string.Join(", ", files)} changed while git wrote the patch: no verdict. Run the check again once that edit is done");
 	}
 
 	/// <summary>
@@ -1446,34 +1502,46 @@ public sealed partial class MutateCommand : IUakCommand
 			}
 			context.Logger.LogInformation("Rebuilding without the mutation...");
 			BuildOutcome? Rebuild = null;
+			MutationRebuildFailure? Failure = null;
 			try
 			{
-				Rebuild = await new BuildCommand(Services).BuildAsync(context, build, heldLock, CancellationToken.None).ConfigureAwait(false);
+				// Its overlap is kept as a retry's is: the journals clear below, and nothing else would stop the next command.
+				Rebuild = await new BuildCommand(Services).BuildAsync(context, build with { KeepsOverlap = true }, heldLock, CancellationToken.None).ConfigureAwait(false);
 				Result.RebuildFailed = !Rebuild.Built;
+				Failure = Rebuild.DescribeFailure();
 			}
 			catch (Exception Exception) when (Exception is not OutOfMemoryException)
 			{
 				Result.RebuildFailed = true;
+				Failure = new MutationRebuildFailure { Started = DateTime.UtcNow, Message = "it could not run: " + Exception.Message };
 				context.Logger.LogError("The rebuild could not run: {Message}", Exception.Message);
 			}
 			// Only what the build shows counts: one that says it succeeded may be up to date, with the mutant's objects.
 			Folders = [];
 			foreach (MutationJournal Journal in journals)
 			{
+				Journal.SetRebuildFailure(Failure);
 				if (Rebuild is not null)
 				{
 					Journal.NoteRecompiled(Entry => ShowsRecompile(Rebuild, Entry), save: false);
 				}
-				if ((!Result.RebuildFailed && Journal.HasRecompiled()) || Journal.IsSpent())
+				// An overlap the marker can't take stays in the journal; what it held already goes to the marker, if that can take it now.
+				if (Rebuild?.NotKept is not null)
+				{
+					RebuildNeeded.HoldInJournal(context, Journal, Rebuild.NotKept);
+				}
+				else
+				{
+					RebuildNeeded.KeepWhatItHolds(context, Journal);
+				}
+				if (Rebuild is not { OverlapNotKept: true } && Journal.Record.UnkeptOverlap is null && ((!Result.RebuildFailed && Journal.HasRecompiled()) || Journal.IsSpent()))
 				{
 					Folders.Add(Journal.Directory);
 				}
 				else if (!Result.RebuildFailed && mode == MutationRestoreMode.Force)
 				{
 					Folders.Add(Journal.Directory);
-					Result.Notes.Add($"'{Journal.Record.Name}': the rebuild shows no compile of {Journal.DescribeAwaitingRecompile()}, so {Journal.DescribeHeld()} may still hold"
-						+ " its patch: -force sets the journal aside all the same, so nothing will refuse to run them; if any held the mutant, change the file or delete its object,"
-						+ " and build");
+					Result.Notes.Add(DescribeForced(Journal));
 				}
 				else
 				{
@@ -1481,7 +1549,7 @@ public sealed partial class MutateCommand : IUakCommand
 					KeepRecompiled(context, Journal);
 				}
 			}
-			if (Rebuild is { Built: true })
+			if (Rebuild is { Built: true, OverlapNotKept: false })
 			{
 				foreach (UnreadableMutationJournal Folder in unreadable)
 				{
@@ -1513,6 +1581,18 @@ public sealed partial class MutateCommand : IUakCommand
 			}
 		}
 		return Result;
+	}
+
+	/// <summary>What <c>-force</c> set aside with a journal that still stood, for the warning it leaves.</summary>
+	static string DescribeForced(MutationJournal journal)
+	{
+		string Name = journal.Record.Name;
+		string Patch = journal.HasRecompiled() ? "" : $"'{Name}': the rebuild shows no compile of {journal.DescribeAwaitingRecompile()}, so {journal.DescribeHeld()} may still hold"
+			+ " its patch: -force sets the journal aside all the same, so nothing will refuse to run them; if any held the mutant, change the file or delete its object,"
+			+ " and build";
+		string Overlap = journal.Record.UnkeptOverlap is null ? "" : $"'{Name}': {journal.DescribeUnkeptOverlap()}: -force sets that aside too, and nothing remembers it now, so nothing"
+			+ " will refuse: save those files, and build, before you test";
+		return string.Join("; ", new[] { Patch, Overlap }.Where(Part => Part.Length > 0));
 	}
 
 	/// <summary>Whether a list of files is known and holds nothing a C++ build compiles.</summary>
@@ -1702,7 +1782,7 @@ public sealed partial class MutateCommand : IUakCommand
 		{
 			// TODO(unix): without PDEATHSIG, a killed check's UBT can outlive the wait on Linux and Mac. A build that goes on writing
 			// after the stamp could leave a mutant object newer than it.
-			throw new UakUsageException($"the killed check's command still runs ({Running}), and it may still be writing the mutant: nothing was restored. Wait for it to end,"
+			throw new UakRefusalException($"the killed check's command still runs ({Running}), and it may still be writing the mutant: nothing was restored. Wait for it to end,"
 				+ $" or stop it, then run -restore again: it refuses until that process has gone. {EditorLock.DescribeForgetOrphan(Orphaned.OrphanedHoldIds)}");
 		}
 		// Journals a killed run was writing or deleting: they hold no patch in the tree (the lock keeps out a live run's).
@@ -1764,17 +1844,28 @@ public sealed partial class MutateCommand : IUakCommand
 		}
 		if (Restored.Pending.Count > 0)
 		{
+			List<MutationJournal> Waiting = [.. Restored.Pending.Where(Journal => !Journal.WaitsOnlyOnUnkeptOverlap())];
 			foreach (MutationJournal Journal in Restored.Pending)
 			{
-				context.Logger.LogError("restore: '{Name}': {Which} may still hold the mutation", Journal.Record.Name, Journal.DescribeHeld());
+				if (Journal.WaitsOnlyOnUnkeptOverlap())
+				{
+					context.Logger.LogError("restore: '{Name}': {Overlap}", Journal.Record.Name, Journal.DescribeUnkeptOverlap());
+				}
+				else
+				{
+					context.Logger.LogError("restore: '{Name}': {Which} may still hold the mutation{Failure}", Journal.Record.Name, Journal.DescribeHeld(),
+						Journal.Record.RebuildFailure is null ? "" : $" ({Journal.DescribeRebuildFailure()})");
+				}
 			}
 			context.Logger.LogError(Restored.RebuildFailed
 				? "mutate: RESTORE FAILED: the files are back (the tree holds no mutation) and marked so the next build recompiles them, but the"
 					+ " rebuild failed, so the binaries above may still hold the mutation: `uak test`, `uak lock run` and `uak mutate` refuse until a `uak build`"
 					+ " recompiles them and succeeds (which clears the journal) or -restore runs again once the tree builds; builds, compiles, shelves and commits of"
 					+ " source files aren't held up"
+				: Waiting.Count == 0 ? $"mutate: RESTORE FAILED: the files are back and no binary holds the mutation, but what the journal holds in place of {RebuildNeededFile.FileName} can't go until"
+					+ " that file can be written: `uak test`, `uak lock run` and `uak mutate` refuse until a whole `uak build` or -restore can write it, or -force (with -name=) sets the journal aside"
 				: "mutate: RESTORE FAILED: the files are back (the tree holds no mutation) and marked so a build recompiles them, but the rebuild shows no compile of "
-					+ string.Join("; ", Restored.Pending.Select(Journal => Journal.DescribeAwaitingRecompile()))
+					+ string.Join("; ", Waiting.Select(Journal => Journal.DescribeAwaitingRecompile()))
 					+ ", so the binaries above may still hold the mutation: if another target builds those files, or nothing does, -force (with -name=) sets the journal aside");
 			return RestoreFailedExitCode;
 		}
@@ -1845,7 +1936,8 @@ public sealed partial class MutateCommand : IUakCommand
 				// Its files are back: a commit or a shelf ships none of its patch, but tests would run binaries that may hold it.
 				string Target = Record.BuildTarget is null ? "" : " of " + Record.BuildTarget;
 				context.Logger.LogWarning("mutate: '{Name}' (PID {Pid}, {Live}) has put its files back (the tree holds no mutation), but the binaries may hold its patch"
-					+ " {Patch} until a build: {Next}.", Record.Name, Record.Pid, Live ? "running" : "stopped", Record.Patch,
+					+ " {Patch} until a build{Failure}: {Next}.", Record.Name, Record.Pid, Live ? "running" : "stopped", Record.Patch,
+					Record.RebuildFailure is null ? "" : $" ({Journal.DescribeRebuildFailure()})",
 					Live ? "it rebuilds when it ends"
 						: Record.RecompileStamp is null ? $"run `uak mutate -restore -name={Record.Name}` on its own, which rebuilds"
 						: Journal.HasRecompiled() ? $"the next `uak build`{Target} that succeeds clears it; `uak test` refuses until then"
@@ -1903,6 +1995,12 @@ internal sealed class MutateResult
 	public bool BinariesPending { get; set; }
 
 	public List<string> Problems { get; set; } = [];
+
+	/// <summary>The source files that changed while the mutant build (or the retry that refused the check) ran: no verdict stands on such a build.</summary>
+	public IReadOnlyList<string> EditedDuringBuild { get; set; } = [];
+
+	/// <summary>Those of <see cref="EditedDuringBuild"/> that could not be marked for a recompile.</summary>
+	public IReadOnlyList<string> EditNotMarked { get; set; } = [];
 
 	/// <summary>Why it was refused or stopped.</summary>
 	public string? Message { get; set; }

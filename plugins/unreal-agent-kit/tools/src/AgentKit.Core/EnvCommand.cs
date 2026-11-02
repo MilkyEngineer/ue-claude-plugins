@@ -42,7 +42,7 @@ public sealed class EnvCommand : IUakCommand
 	/// <inheritdoc/>
 	public async Task<int> RunAsync(UakContext context, IReadOnlyList<string> arguments, CancellationToken cancellationToken)
 	{
-		UakArguments Arguments = new(arguments);
+		UakArguments Arguments = new(arguments, DotSplitRule.Options);
 		bool Json = Arguments.GetFlag("json");
 		Arguments.ThrowIfUnknown();
 		Arguments.ThrowIfMorePositionalThan(0);

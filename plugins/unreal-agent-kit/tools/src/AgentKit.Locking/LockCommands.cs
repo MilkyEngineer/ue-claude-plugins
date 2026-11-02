@@ -24,14 +24,18 @@ public sealed class LockRunCommand : IUakCommand
 		  -priority=      High goes ahead of every Normal waiter (default: $UAK_LOCK_PRIORITY, else Normal)
 		  -engine-scope   lock the engine instead of a project: only when no project is found (-project=, $UAK_PROJECT,
 		                  or a .uproject above the current directory). Without a project and without this, it refuses.
-		  Put the command after "--" when it has options of its own. Its arguments pass through untouched; a .ps1 runs
-		  through PowerShell, a .bat or .cmd through cmd.exe. Exits with the command's exit code.
+		  Put the command after "--" when it has options of its own, or its name starts with a dot: right after an option
+		  with a value, such a word could be that option's value split by Windows PowerShell 5.1, and is refused. Its
+		  arguments pass through untouched; a .ps1 runs through PowerShell, a .bat or .cmd through cmd.exe. Exits with the
+		  command's exit code.
 		  The command never outlives the lock: Ctrl+C, or uak being killed, stops it and everything it started, and
 		  anything it leaves running when it exits is stopped before the lock is released (a detached run, started with
 		  `uak runs start`, is not). Lock requests inside the command for the same lock join this hold ($UAK_LOCK_HELD);
 		  requests for another lock fail at once.
 		  It refuses (exit 2) while a stopped `uak mutate` run has left its patch in the tree or its binaries (`uak mutate
-		  -restore`, run on its own: inside `uak lock run` it is refused too).
+		  -restore`, run on its own: inside `uak lock run` it is refused too), and while a rebuild that overlapped an edit
+		  has left binaries that may mix old and new (the refusal names the `uak build` that clears it, run on its own).
+		  A lock run inside another hold leaves that to the holder, which may be that very `uak build`.
 		""";
 
 	/// <inheritdoc />
@@ -41,7 +45,7 @@ public sealed class LockRunCommand : IUakCommand
 	public async Task<int> RunAsync(UakContext context, IReadOnlyList<string> arguments, CancellationToken cancellationToken)
 	{
 		ArgumentNullException.ThrowIfNull(context);
-		UakArguments parsed = new(arguments);
+		UakArguments parsed = new(arguments, DotSplitRule.Command);
 		string? name = parsed.GetString("name");
 		LockPriority? priority = CommandArguments.GetPriority(parsed);
 		bool engineScope = parsed.GetFlag("engine-scope");
@@ -59,6 +63,11 @@ public sealed class LockRunCommand : IUakCommand
 		await using EditorLockHold hold = await EditorLock.AcquireAsync(context, name, priority, lockOptions, cancellationToken).ConfigureAwait(false);
 		// A stopped uak mutate run may have left its patch in the tree: the command would build or run the mutant.
 		MutationJournal.ThrowIfUnfinished(context);
+		// A joined hold is inside a command that answers for this, and that may be the `uak build` that clears it, whose pre-build step takes the lock.
+		if (!hold.IsNested)
+		{
+			RebuildNeededFile.ThrowIfStanding(context);
+		}
 		try
 		{
 			// A nested hold records nothing (the outer holder's command is the one that matters), so its job needs no name.
@@ -131,7 +140,7 @@ public sealed class LockForgetOrphanCommand : IUakCommand
 	public async Task<int> RunAsync(UakContext context, IReadOnlyList<string> arguments, CancellationToken cancellationToken)
 	{
 		ArgumentNullException.ThrowIfNull(context);
-		UakArguments parsed = new(arguments);
+		UakArguments parsed = new(arguments, DotSplitRule.Options);
 		string? holdId = parsed.GetString("hold");
 		parsed.ThrowIfUnknown();
 		parsed.ThrowIfMorePositionalThan(0);
@@ -182,7 +191,7 @@ public sealed class LockStatusCommand : IUakCommand
 	public Task<int> RunAsync(UakContext context, IReadOnlyList<string> arguments, CancellationToken cancellationToken)
 	{
 		ArgumentNullException.ThrowIfNull(context);
-		UakArguments parsed = new(arguments);
+		UakArguments parsed = new(arguments, DotSplitRule.Options);
 		parsed.ThrowIfUnknown();
 		parsed.ThrowIfMorePositionalThan(0);
 		Console.Out.Write(Format(EditorLock.GetStatus(context), DateTime.UtcNow));

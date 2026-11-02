@@ -6,7 +6,7 @@ using AgentKit.Core;
 namespace AgentKit.Unreal.Tests;
 
 [TestClass]
-public sealed class CookedTestTests
+public sealed partial class CookedTestTests
 {
 	static UnrealServices Services(FakeProcessRunner runner, FakeLock? lockProvider = null) => new()
 	{

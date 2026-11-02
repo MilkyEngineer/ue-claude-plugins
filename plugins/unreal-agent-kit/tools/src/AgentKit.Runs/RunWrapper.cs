@@ -133,6 +133,8 @@ public static class RunWrapper
 		startInfo.Environment[EditorLock.NameVariable] = record.Name;
 		// uak build, test and mutate record their summaries under the run's name too, for `uak runs show`.
 		startInfo.Environment[RunSummaries.RunNameVariable] = record.Name;
+		// uak mutate records it, so a journal left behind can say whose run it is.
+		startInfo.Environment[RunSummaries.RunOwnerVariable] = record.Owner;
 		if (record.Priority is LockPriority priority)
 		{
 			startInfo.Environment[EditorLock.PriorityVariable] = priority.ToString();

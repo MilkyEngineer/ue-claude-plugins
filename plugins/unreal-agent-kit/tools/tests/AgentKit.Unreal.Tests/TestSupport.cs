@@ -5,6 +5,19 @@ using Microsoft.Extensions.Logging;
 
 namespace AgentKit.Unreal.Tests;
 
+/// <summary>Runs once per test assembly.</summary>
+[TestClass]
+public sealed class TestEnvironment
+{
+	/// <summary>A test host started by <c>uak runs start</c> inherits its run's name, which a journal would then record.</summary>
+	[AssemblyInitialize]
+	public static void Initialize(TestContext context)
+	{
+		Environment.SetEnvironmentVariable(RunSummaries.RunNameVariable, null);
+		Environment.SetEnvironmentVariable(RunSummaries.RunOwnerVariable, null);
+	}
+}
+
 /// <summary>A temporary fake engine and project on disk, deleted on dispose.</summary>
 internal sealed class Sandbox : IDisposable
 {
@@ -37,6 +50,13 @@ internal sealed class Sandbox : IDisposable
 		SourceFile = Write(Path.Combine(ProjectDirectory, "Source", "Game", "Private", "Foo.cpp"), "#include \"Foo.h\"\n");
 		HeaderFile = Write(Path.Combine(ProjectDirectory, "Source", "Game", "Public", "Foo.h"), "#pragma once\n");
 		StateDirectory = Path.Combine(ProjectDirectory, "Saved", "AgentKit");
+
+		// Older than any build a test starts: a file time isn't the clock, and one written in the same tick counts as written during the build.
+		DateTime Earlier = DateTime.UtcNow.AddMinutes(-1);
+		foreach (string File in Directory.EnumerateFiles(Path.Combine(ProjectDirectory, "Source"), "*", SearchOption.AllDirectories))
+		{
+			System.IO.File.SetLastWriteTimeUtc(File, Earlier);
+		}
 	}
 
 	public UnrealPlatform Platform { get; }
@@ -70,6 +90,15 @@ internal sealed class Sandbox : IDisposable
 	{
 		try
 		{
+			Directory.Delete(Root, recursive: true);
+		}
+		catch (UnauthorizedAccessException)
+		{
+			// A test may leave a read-only file (a marker it made unwritable), which Windows won't delete.
+			foreach (string File in Directory.EnumerateFiles(Root, "*", SearchOption.AllDirectories))
+			{
+				System.IO.File.SetAttributes(File, FileAttributes.Normal);
+			}
 			Directory.Delete(Root, recursive: true);
 		}
 		catch (IOException)

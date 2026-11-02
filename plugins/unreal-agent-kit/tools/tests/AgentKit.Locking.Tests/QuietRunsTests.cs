@@ -26,7 +26,9 @@ public sealed class QuietRunsTests
 			Task<IDisposable> Compile = QuietRuns.EnterCompileAsync(State.Context, Poll, CancellationToken.None);
 			await Task.Delay(200);
 			Assert.IsFalse(Compile.IsCompleted, "a compile must wait while a quiet run holds the lock");
-			Assert.IsEmpty(QuietRuns.GetCompiles(State.Context));
+			// A waiting compile writes its marker each poll and deletes it while blocked: by the next look it is gone.
+			Assert.IsTrue(SpinWait.SpinUntil(() => QuietRuns.GetCompiles(State.Context).Count == 0, TimeSpan.FromSeconds(5)), "a waiting compile keeps no marker");
+			Assert.IsFalse(Compile.IsCompleted, "a compile must wait while a quiet run holds the lock");
 
 			await Hold.DisposeAsync();
 			using IDisposable Entered = await Compile.WaitAsync(TimeSpan.FromSeconds(10));
@@ -98,7 +100,8 @@ public sealed class QuietRunsTests
 		await using EditorLockHold Outer = await EditorLock.AcquireAsync(State.Context, "lock run", null, new EditorLockOptions { MutexName = Unique() }, CancellationToken.None);
 		using EditorLockHold Nested = EditorLockHold.CreateNested(Paths, Outer.MutexName, Outer.Scope, Outer.Info, Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance);
 
-		Assert.ThrowsExactly<UakUsageException>(() => EditorLock.CheckJoinable(Nested, new EditorLockOptions { Quiet = true }, "uak test -quiet"));
+		// A refusal, not a usage error: the host prints no pointer to the help.
+		Assert.ThrowsExactly<UakRefusalException>(() => EditorLock.CheckJoinable(Nested, new EditorLockOptions { Quiet = true }, "uak test -quiet"));
 		EditorLock.CheckJoinable(Nested, EditorLockOptions.Default, "uak test");
 	}
 

@@ -39,7 +39,7 @@ public sealed record SourceFile(string Path, string? Module, string? OwnerDirect
 /// <summary>Finds the files `uak compile` is given and the modules they belong to.</summary>
 public static class SourceFiles
 {
-	static readonly string[] SkippedDirectories = ["Intermediate", "Binaries", "Saved", "DerivedDataCache", ".git", ".vs"];
+	internal static readonly string[] SkippedDirectories = ["Intermediate", "Binaries", "Saved", "DerivedDataCache", ".git", ".vs"];
 
 	/// <summary>
 	/// Resolves a file argument: a path (absolute, or relative to <paramref name="currentDirectory"/>), or a bare file name

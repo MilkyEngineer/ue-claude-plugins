@@ -97,6 +97,9 @@ public static class RunSummaries
 	/// <summary>Set by a detached run's wrapper for its command: the run's name.</summary>
 	public const string RunNameVariable = "UAK_RUN_NAME";
 
+	/// <summary>Set by a detached run's wrapper for its command: the run's -owner=.</summary>
+	public const string RunOwnerVariable = "UAK_RUN_OWNER";
+
 	/// <summary>&lt;State&gt;/Summaries.</summary>
 	public static string GetDirectory(DirectoryInfo stateDirectory)
 	{

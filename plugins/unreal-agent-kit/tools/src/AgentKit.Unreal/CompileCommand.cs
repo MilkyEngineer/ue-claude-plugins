@@ -56,22 +56,24 @@ public sealed class CompileCommand : IUakCommand
 		  -- <UBT option>...        More UBT options, passed as given. Rejected as for uak build (see uak help build),
 		                            and -SingleFile, -File, -Files, -FileList and -SingleFileBuildDependents,
 		                            which uak sets (the files go to UBT in a list beside the log).
-		No editor lock is taken, but while a quiet run (uak test -quiet) holds the lock, the compile waits for it, for
-		up to 30 minutes, saying every 5 that it still waits; then it compiles, with a warning.
+		No editor lock is taken, but while a quiet run (uak test -quiet) holds the lock, or a uak test -cooked that builds
+		has UBT reserved (UAT's UBT stops if a compile holds UBT's mutex when it starts; the reservation ends with UAT's
+		build step), the compile waits for it, for up to 30 minutes, saying every 5 that it still waits; then it compiles,
+		with a warning.
 		While a uak mutate run has its patch in the tree, it warns that it compiles the mutant; it refuses while a
 		stopped mutation run has left its patch in the files (`uak mutate -restore`).
-		Exit code: 0 clean, 1 errors, 2 usage or setup error (including a file UBT did not compile).
+		Exit code: 0 clean, 1 errors, 2 usage or setup error (including a file UBT did not compile), or a refusal.
 		""";
 
 	/// <inheritdoc/>
 	public Task<int> RunAsync(UakContext context, IReadOnlyList<string> arguments, CancellationToken cancellationToken)
 	{
-		return UnrealServices.GuardAsync(context, () => UnrealServices.WithFreshResultFileAsync("compile", arguments, () => RunCheckedAsync(context, arguments, cancellationToken)));
+		return UnrealServices.GuardAsync(context, () => UnrealServices.WithFreshResultFileAsync("compile", arguments, () => RunCheckedAsync(context, arguments, cancellationToken), DotSplitRule.Paths));
 	}
 
 	async Task<int> RunCheckedAsync(UakContext context, IReadOnlyList<string> arguments, CancellationToken cancellationToken)
 	{
-		UakArguments Arguments = new(arguments);
+		UakArguments Arguments = new(arguments, DotSplitRule.Paths);
 		bool Dependents = Arguments.GetFlag("dependents");
 		string? Target = Arguments.GetString("target");
 		string Configuration = Arguments.GetString("config", "Development")!;
@@ -85,7 +87,7 @@ public sealed class CompileCommand : IUakCommand
 			throw new UakUsageException("give at least one file: uak compile <file>...");
 		}
 		// UBT reads -File=, -Files= and -FileList= into the same list as -SingleFile=: more files uak would not report on.
-		IReadOnlyList<string> PassThrough = UbtCommandLine.CheckPassThrough(Arguments.Rest, "SingleFile", "SingleFileBuildDependents", "File", "Files", "FileList");
+		IReadOnlyList<string> PassThrough = UbtCommandLine.CheckPassThrough(Arguments.PassThrough, "SingleFile", "SingleFileBuildDependents", "File", "Files", "FileList");
 
 		string Project = UnrealServices.RequireProject(context);
 		string ProjectDirectory = Path.GetDirectoryName(Project)!;

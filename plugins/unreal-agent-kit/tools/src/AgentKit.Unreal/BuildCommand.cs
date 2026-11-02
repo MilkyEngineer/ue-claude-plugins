@@ -51,9 +51,23 @@ public sealed class BuildCommand : IUakCommand
 		                            -NoMutex, -NoHotReloadFromIDE, -ForceHotReload, -LiveCoding, -MaxParallelActions.
 		The summary names the tree as the build found it once it held the lock: the revision and the changed files (or
 		their count and hash), read alongside the build.
+		A source file written while UBT ran may be older than what UBT made from its old text, which every later build
+		would keep. So after a build, even one that failed, such a file under the project's Source or Plugins gets a write
+		time past the build (its bytes aren't touched), and the next build recompiles what uses it. A warning names it:
+		build again before you test, as this build's binaries may mix old and new. A build that compiled nothing marks
+		such a file and says nothing, as its binaries mix nothing, but UBT rewrites UHT's timestamps even then.
+		A file the build writes itself (a pre-build step's output) counts until `uak test config -build-writes=` names
+		it; a file dated past the build's end doesn't count. A file whose time can't be set is reported too, even by a
+		build that compiled nothing, and -resultfile lists both: EditedDuringBuild has all of them, EditNotMarked those
+		that couldn't be marked.
+		A whole build (no UBT arguments) that succeeds and overlaps no edit also clears what an earlier build of its
+		target left (`uak test`'s help says what), and says so, but keeps a file that couldn't be marked unless it was
+		saved after the build that reported it and before this one, and tries that mark again. Any build that reports
+		such a file, with UBT arguments or not, leaves that refusal itself, as no later build would pick the file up;
+		a build given UBT arguments clears none, and says what it leaves standing.
 		It refuses to build while an interrupted `uak mutate` has left its patch in the tree (`uak mutate -restore`).
 		-name= is a plain file name without spaces.
-		Exit code: 0 built, 1 failed, 2 usage or setup error.
+		Exit code: 0 built, 1 failed, 2 usage or setup error, or a refusal.
 		""";
 
 	/// <inheritdoc/>
@@ -68,7 +82,7 @@ public sealed class BuildCommand : IUakCommand
 	{
 		try
 		{
-			return new UakArguments(arguments).GetString("name", "uak-build");
+			return new UakArguments(arguments, DotSplitRule.Options).GetString("name", "uak-build");
 		}
 		catch (UakUsageException)
 		{
@@ -78,7 +92,7 @@ public sealed class BuildCommand : IUakCommand
 
 	async Task<int> RunCheckedAsync(UakContext context, IReadOnlyList<string> arguments, CancellationToken cancellationToken)
 	{
-		UakArguments Arguments = new(arguments);
+		UakArguments Arguments = new(arguments, DotSplitRule.Options);
 		string? Target = Arguments.GetString("target");
 		string Configuration = Arguments.GetString("config", "Development")!;
 		UnrealPlatform Platform = UnrealServices.ParsePlatform(Arguments);
@@ -88,11 +102,8 @@ public sealed class BuildCommand : IUakCommand
 		RunSummaries.CheckName(Name);
 		string? ResultFile = Arguments.GetString("resultfile");
 		Arguments.ThrowIfUnknown();
-		if (Arguments.Positional.Count > 0)
-		{
-			throw new UakUsageException("uak build takes no positional arguments: " + string.Join(' ', Arguments.Positional));
-		}
-		IReadOnlyList<string> PassThrough = UbtCommandLine.CheckPassThrough(Arguments.Rest);
+		Arguments.ThrowIfPositional("uak build");
+		IReadOnlyList<string> PassThrough = UbtCommandLine.CheckPassThrough(Arguments.PassThrough);
 
 		BuildRequest Request = new()
 		{
@@ -129,6 +140,11 @@ public sealed class BuildCommand : IUakCommand
 		Stopwatch Timer;
 		Task<VcsTreeState>? TreeTask;
 		BuildOutcome Outcome;
+		BuildEditReport Edits;
+		List<string> MarkerNotes = [];
+		List<string> MarkerInfos = [];
+		// A build that asks to count clears journals as `uak build` does: a retry under another command's lock.
+		bool ClearsJournals = heldLock is null || request.ClearsJournals;
 		await using (StreamWriter Log = new(LogFile, append: false, new System.Text.UTF8Encoding(false)) { AutoFlush = true })
 		{
 			await Log.WriteLineAsync("> " + Invocation).ConfigureAwait(false);
@@ -138,7 +154,7 @@ public sealed class BuildCommand : IUakCommand
 			await using (OwnLock)
 			{
 				IAsyncDisposable Lock = heldLock ?? OwnLock!;
-				if (heldLock is null)
+				if (ClearsJournals)
 				{
 					MutationJournal.ThrowIfUnfinished(context, building: true);
 				}
@@ -146,6 +162,7 @@ public sealed class BuildCommand : IUakCommand
 				TreeTask = request.CaptureTree ? Services.StartCaptureTree(context, cancellationToken) : null;
 				context.Logger.LogInformation("Building {Target} {Platform} {Configuration}...", Target, request.Platform.Name, request.Configuration);
 				UbtProgress Progress = new(Services.Clock, UbtProgress.DefaultInterval, Text => context.Logger.LogInformation("  {Progress}", Text));
+				BuildEditWindow Window = BuildEditWindow.Open(context, Services);
 				Timer = Stopwatch.StartNew();
 				ExitCode = await Services.RunToolAsync(Invocation, Line =>
 				{
@@ -154,20 +171,67 @@ public sealed class BuildCommand : IUakCommand
 					Progress.AddLine(Line);
 				}, Lock, cancellationToken).ConfigureAwait(false);
 				Timer.Stop();
-				Outcome = BuildOutcome.From(Parser.Summary, ExitCode);
-				// Still under the lock: a stopped mutation run whose files are back and stamped for a recompile waits for a whole build
-				// of its target to recompile them and succeed. UBT arguments may build part of it: such a build doesn't count.
-				if (heldLock is null && request.PassThrough.Count == 0)
+				Window.Close();
+				Outcome = BuildOutcome.From(Parser.Summary, ExitCode) with { Started = Window.Opened, LogFile = LogFile };
+				// Still under the lock, so no build writes past the stamp. What journals look after is read first, as clearing one turns its
+				// stamp into an edit; and nothing that refuses goes before the stamp, so a kill or a throw up to there leaves all of it standing.
+				Dictionary<string, DateTime> Managed = BuildEdits.GetManaged(context);
+				// Up to date says nothing of the rest of the build: a pre-build step's own UBT prints it too.
+				Edits = BuildEdits.Reported(await BuildEdits.StampAsync(context, Services, Managed, Window).ConfigureAwait(false), Parser.Summary.UpToDate && Parser.Summary.Actions.Count == 0);
+				Outcome = Outcome with { Edits = Edits };
+				// UBT arguments may build part of the target: such a build clears neither a journal nor the marker, and a plain `uak build` is there for that.
+				bool Whole = request.PassThrough.Count == 0;
+				// Asked before this build keeps anything, for what it says of the marker at its end (RebuildNeeded.DescribeEntry).
+				bool StoodBefore = RebuildNeeded.Stands(context, Target, request.Platform.Name, request.Configuration);
+				// What the next command must be told is on disk before the journal that would have stopped it can go. A file that couldn't be
+				// marked is told too, after any build and with none standing: a stamped file recompiles at the next build, and nothing picks this one up.
+				bool Keeps = (Whole && (request.KeepsOverlap || (ClearsJournals && Managed.Count > 0)
+					|| RebuildNeeded.Stands(context, Target, request.Platform.Name, request.Configuration))) || Edits.NotMarked.Count > 0;
+				bool Kept = !Keeps || RebuildNeeded.Keep(context, Target, request.Platform.Name, request.Configuration, Edits);
+				// What a journal stands for goes to the marker first, so that the journal can go too.
+				bool HandedOver = !(ClearsJournals && Whole) || RebuildNeeded.KeepWhatJournalsHold(context);
+				Outcome = Outcome with { OverlapNotKept = !Kept || !HandedOver, NotKept = Kept ? null : RebuildNeeded.EntryOf(Target, request.Platform.Name, request.Configuration, Edits) };
+				if (ClearsJournals && Outcome.OverlapNotKept)
 				{
+					// Said only when a journal stands: with none, what wasn't kept is recorded nowhere, and HoldInJournals says that.
+					bool Held = Outcome.NotKept is not null && RebuildNeeded.HoldInJournals(context, Outcome.NotKept);
+					if (Held || !HandedOver)
+					{
+						context.Logger.LogWarning("The mutation journals stay, as nothing would refuse once they went.");
+					}
+				}
+				else if (ClearsJournals && Whole)
+				{
+					// A stopped mutation run whose files are back and stamped for a recompile waits for a whole build of its target to recompile them and succeed.
 					try
 					{
-						MutationJournal.ClearAfterBuild(context, Target, request.Platform.Name, request.Configuration, Outcome.Built, Entry => MutateCommand.ShowsRecompile(Outcome, Entry));
+						MutationJournal.ClearAfterBuild(context, Target, request.Platform.Name, request.Configuration, Outcome.Built, Entry => MutateCommand.ShowsRecompile(Outcome, Entry),
+							Outcome.DescribeFailure());
 					}
 					catch (Exception Exception) when (Exception is IOException or UnauthorizedAccessException)
 					{
 						context.Logger.LogWarning("Could not look for mutation journals this build clears: {Message}", Exception.Message);
 					}
 				}
+				if (Outcome.Built && Whole && Edits.Overlapped.Count == 0)
+				{
+					try
+					{
+						MarkerNotes = await RebuildNeeded.AfterBuildAsync(context, Services, Target, request.Platform.Name, request.Configuration, Window.Opened).ConfigureAwait(false);
+					}
+					catch (Exception Exception) when (Exception is not OutOfMemoryException && !(Exception is OperationCanceledException && cancellationToken.IsCancellationRequested))
+					{
+						// UBT succeeded, and nothing may throw that away. AfterBuildAsync writes the marker after what can throw, so it stands
+						// as it was. It is given no token, so an OperationCanceledException there is no cancel of this command: .NET throws
+						// one for ERROR_OPERATION_ABORTED, a query a file system or a share cancelled.
+						string MarkerFile = RebuildNeededFile.GetFile(context);
+						MarkerNotes = [$"build: could not clear what {MarkerFile} holds for {Target} {request.Platform.Name} {request.Configuration}, so it stays as it was,"
+							+ $" and `uak test`, `uak mutate` and `uak lock run` go on refusing: {Exception.Message}; if no build can clear it, delete {MarkerFile}"];
+					}
+				}
+				(MarkerInfos, List<string> EntryNotes) = RebuildNeeded.DescribeEntry(context, Target, request.Platform.Name, request.Configuration, StoodBefore, Whole,
+					Kept && Keeps ? Edits.NotMarked : []);
+				MarkerNotes.AddRange(EntryNotes);
 			}
 		}
 
@@ -193,6 +257,14 @@ public sealed class BuildCommand : IUakCommand
 		string UpToDate = Summary.UpToDate ? ", up to date" : "";
 		string Line = string.Create(CultureInfo.InvariantCulture,
 			$"build: {(Built ? "SUCCEEDED" : "FAILED")} ({Result}{Reason}; {Summary.Actions.Count} actions, {Compiled} compiles{UpToDate}) in {Timer.Elapsed.TotalSeconds:0.0} s. Log: {LogFile}");
+		foreach (string Warning in Edits.Warnings("build").Concat(MarkerNotes))
+		{
+			Out.Warning(Warning);
+		}
+		foreach (string Info in MarkerInfos)
+		{
+			Out.Info(Info);
+		}
 		if (Built)
 		{
 			Out.Info(Line);
@@ -220,8 +292,83 @@ public sealed class BuildCommand : IUakCommand
 			LogFile,
 			Errors = Summary.Errors.Select(Error => Error.ToString()).ToList(),
 			Warnings = Summary.Warnings.Count,
+			Outcome.EditedDuringBuild,
+			EditNotMarked = Edits.NotMarked,
 		});
 		return Outcome;
+	}
+
+	/// <summary>
+	/// For a command that needs the binaries, holding the lock, and about to be refused: retries the rebuild of mutation journals
+	/// whose rebuild failed (<see cref="MutationJournal.FindRebuildable"/>), once a source file changed since that failure, as
+	/// another agent's half-edited file is the usual cause. It is the very <c>uak build</c> the refusal asks for, with the same
+	/// checks and the same rule for clearing: the caller still calls <see cref="MutationJournal.ThrowIfUnfinished(UakContext, bool)"/>,
+	/// which refuses unless it cleared them. Nothing changed, or a dead hold's command still runs and may be building beside it:
+	/// nothing to try. A failed retry leaves the refusal, and records its own failure, as one that can't run at all does. Returns
+	/// the edits the retry overlapped: the retry fires because a file changed, so another agent is likely still at work, and
+	/// what those binaries are worth is the caller's to judge. The build keeps them (<see cref="RebuildNeeded"/>), before it can
+	/// clear the journal, for the commands after it, whom that journal no longer stops.
+	/// </summary>
+	internal async Task<BuildEditReport> RetryPendingRebuildAsync(UakContext context, IAsyncDisposable heldLock, CancellationToken cancellationToken)
+	{
+		List<MutationJournal> Pending = MutationJournal.FindRebuildable(context);
+		if (Pending.Count == 0 || heldLock is IOrphanedCommandHold { OrphanedCommand: not null })
+		{
+			return BuildEditReport.None;
+		}
+		// A file dated past now is no change, or every command would retry for it; the margin lets in what a build stamped with its
+		// wait cut short, and a clock behind the file system's.
+		DateTime Until = BuildEdits.End(context, Services) + Services.RecompileMargin;
+		if (BuildEdits.Find(context, BuildEdits.GetManaged(context), Pending.Min(Journal => Journal.Record.RebuildFailure!.Started), Until).Count == 0)
+		{
+			context.Logger.LogInformation("Mutation: not retrying the failed rebuild of {Names}: no source file changed since.", string.Join(", ", Pending.Select(Journal => Journal.Record.Name)));
+			return BuildEditReport.None;
+		}
+		BuildEditReport Edits = BuildEditReport.None;
+		foreach (MutationRecord Record in Pending.Select(Journal => Journal.Record).DistinctBy(Record => (Record.BuildTarget, Record.BuildPlatform, Record.BuildConfiguration)))
+		{
+			if (UnrealPlatform.FromName(Record.BuildPlatform!) != Services.HostPlatform)
+			{
+				continue;
+			}
+			context.Logger.LogInformation("Mutation: source files changed since the rebuild of '{Name}' failed: retrying it, as a `uak build` of {Target} would.", Record.Name, Record.BuildTarget);
+			BuildRequest Request = new()
+			{
+				Target = Record.BuildTarget,
+				Configuration = Record.BuildConfiguration!,
+				Platform = Services.HostPlatform,
+				MaxParallelActions = Services.MaxParallelActions(new UakArguments([])),
+				Name = "mutate-rebuild-" + Record.Name,
+				RecordSummary = false,
+				CaptureTree = false,
+				ClearsJournals = true,
+				KeepsOverlap = true,
+			};
+			DateTime Tried = BuildEdits.Start(context, Services);
+			try
+			{
+				Edits = Edits.Plus((await BuildAsync(context, Request, heldLock, cancellationToken).ConfigureAwait(false)).Edits);
+			}
+			catch (Exception Exception) when (Exception is not OperationCanceledException and not OutOfMemoryException and not UakUsageException)
+			{
+				context.Logger.LogWarning("The retried rebuild could not run: {Message}", Exception.Message);
+				RecordRetryFailure(context, Record, Tried, Exception.Message);
+			}
+		}
+		return Edits;
+	}
+
+	/// <summary>Records why a retry never ran, so the next command doesn't try again until a file changes since this one.</summary>
+	static void RecordRetryFailure(UakContext context, MutationRecord record, DateTime started, string why)
+	{
+		try
+		{
+			MutationJournal.RecordRebuildFailure(context, record.BuildTarget!, record.BuildPlatform!, record.BuildConfiguration!, new MutationRebuildFailure { Started = started, Message = why });
+		}
+		catch (Exception Exception) when (Exception is IOException or UnauthorizedAccessException)
+		{
+			context.Logger.LogWarning("Could not record that the retried rebuild could not run: {Message}", Exception.Message);
+		}
 	}
 }
 
@@ -251,6 +398,34 @@ internal sealed record BuildOutcome(bool Built, bool UpToDate, IReadOnlyList<str
 	/// above then say what UBT finished, not what it did.
 	/// </summary>
 	public bool StoppedPartWay { get; init; }
+
+	/// <summary>When its window for edits opened (<see cref="BuildEditWindow"/>): just before UBT ran.</summary>
+	public DateTime Started { get; init; }
+
+	/// <summary>Its log.</summary>
+	public string? LogFile { get; init; }
+
+	/// <summary>What <see cref="BuildEdits.StampAsync"/> found while it ran.</summary>
+	public BuildEditReport Edits { get; init; } = BuildEditReport.None;
+
+	/// <summary>Whether an overlap it had to keep (<see cref="RebuildNeeded.Keep"/>) couldn't be written: nothing that refuses may go then.</summary>
+	public bool OverlapNotKept { get; init; }
+
+	/// <summary>Its own overlap, when it couldn't be written; a journal holds it instead (<see cref="MutationRecord.UnkeptOverlap"/>). Null otherwise.</summary>
+	public RebuildNeededEntry? NotKept { get; init; }
+
+	/// <summary>
+	/// The source files that changed while it ran, marked for a recompile or not (<see cref="BuildEditReport.Overlapped"/>): its
+	/// binaries may mix their old and new text. A mutation journal's files never count: they are the journal's.
+	/// </summary>
+	public IReadOnlyList<string> EditedDuringBuild => Edits.Overlapped;
+
+	/// <summary>What stopped it, for a mutation journal; null when it built.</summary>
+	public MutationRebuildFailure? DescribeFailure()
+	{
+		CompileDiagnostic? First = Errors.Count > 0 ? Errors[0] : null;
+		return Built ? null : new MutationRebuildFailure { Started = Started, File = First?.File, Line = First?.Line, Message = First?.Message, LogFile = LogFile };
+	}
 
 	/// <summary>What a UBT run's log and exit code say.</summary>
 	public static BuildOutcome From(BuildLogSummary summary, int exitCode)
@@ -298,4 +473,13 @@ internal sealed record BuildRequest
 
 	/// <summary>Whether the build reads and prints the tree it built (<see cref="VcsTreeState"/>); <c>uak mutate</c> reads it once, for its tests.</summary>
 	public bool CaptureTree { get; init; } = true;
+
+	/// <summary>
+	/// With a held lock: whether the build counts for mutation journals as a <c>uak build</c> does, with its check first and
+	/// <see cref="AgentKit.Locking.MutationJournal.ClearAfterBuild"/> after. Without a lock it always does.
+	/// </summary>
+	public bool ClearsJournals { get; init; }
+
+	/// <summary>Whether what it overlaps is kept (<see cref="RebuildNeeded"/>), however it ends, as what clears the journal after it no longer stops the next command.</summary>
+	public bool KeepsOverlap { get; init; }
 }

@@ -108,6 +108,14 @@ public sealed class BuildLogParserTests
 	}
 
 	[TestMethod]
+	[DataRow("Target is up to date")]
+	[DataRow("Targets are up to date")]
+	public void EitherOfUbtsUpToDateLinesIsParsed(string line)
+	{
+		Assert.IsTrue(BuildLogParser.Parse([line, "Result: Succeeded"]).UpToDate);
+	}
+
+	[TestMethod]
 	public void UbtErrorsAndUpToDateAreParsed()
 	{
 		BuildLogSummary Summary = BuildLogParser.Parse(

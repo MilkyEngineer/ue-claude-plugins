@@ -11,8 +11,20 @@ using Microsoft.Extensions.Logging;
 namespace AgentKit.Runs;
 
 /// <summary><c>uak runs start</c>: starts a detached, recorded run.</summary>
-public sealed class RunsStartCommand : IUakCommand
+public sealed partial class RunsStartCommand : IUakCommand
 {
+	/// <summary>
+	/// How long the command stays to see whether the run ended at once, as one the child refused its arguments does. A run
+	/// that ends later (a slow machine's refusal too) shows in <c>uak runs wait</c> as before.
+	/// </summary>
+	public TimeSpan EarlyEndWait { get; init; } = TimeSpan.FromSeconds(3);
+
+	/// <summary>How often it looks at the run's record meanwhile.</summary>
+	public TimeSpan EarlyEndPoll { get; init; } = TimeSpan.FromMilliseconds(100);
+
+	/// <summary>Where it writes, for tests; null for the console.</summary>
+	public TextWriter? Output { get; init; }
+
 	/// <inheritdoc />
 	public string Name => "runs start";
 
@@ -29,8 +41,13 @@ public sealed class RunsStartCommand : IUakCommand
 		  -result-file=  a file whose last PASSED/FAILED line `uak runs list` shows when there is no output
 		  -force         replace the record of a finished run with the same name
 		  -allow-sleep   let the machine sleep during the run; by default it is kept awake (Windows: system and display)
+		  Without "--", a dotted word right after an option with a value is refused: it could be that option's value split
+		  by Windows PowerShell 5.1, or the start of the command.
 		  The run takes the editor lock only if the command does; its lock requests show as "<name>/...".
 		  `uak runs list` shows it; `uak runs wait -name=<name> -timeout=<seconds>` waits for it to end.
+		  It stays 3 seconds to see the run start: a run that has already ended (a command that refused its arguments, say)
+		  is reported with its exit code and its error, and uak runs start exits 2 for a child's usage error, else 1. A run
+		  that ended with 0 by then exits 0, and so does one that still runs.
 		""";
 
 	/// <inheritdoc />
@@ -40,7 +57,7 @@ public sealed class RunsStartCommand : IUakCommand
 	public async Task<int> RunAsync(UakContext context, IReadOnlyList<string> arguments, CancellationToken cancellationToken)
 	{
 		ArgumentNullException.ThrowIfNull(context);
-		UakArguments parsed = new(arguments);
+		UakArguments parsed = new(arguments, DotSplitRule.Command);
 		RunStartRequest request = new()
 		{
 			Name = parsed.GetRequiredString("name"),
@@ -82,9 +99,55 @@ public sealed class RunsStartCommand : IUakCommand
 		{
 			text.Append("  The wrapper has not recorded itself yet: check `uak runs list`.\n");
 		}
-		Console.Out.Write(text.ToString());
-		return UakExitCodes.Success;
+		TextWriter output = Output ?? Console.Out;
+		output.Write(text.ToString());
+		return result.Registered ? await WatchStartAsync(registry, request.Name, output, cancellationToken).ConfigureAwait(false) : UakExitCodes.Success;
 	}
+
+	/// <summary>
+	/// Watches a started run for <see cref="EarlyEndWait"/>, so a command that stops at once (a child's usage error, the usual
+	/// case) doesn't leave a bare "Started" behind. Returns the exit code for <c>uak runs start</c>: the run goes on whatever
+	/// this finds, and being stopped here (Ctrl+C) stops only the watching.
+	/// </summary>
+	internal async Task<int> WatchStartAsync(RunRegistry registry, string name, TextWriter output, CancellationToken cancellationToken)
+	{
+		DateTime deadline = DateTime.UtcNow + EarlyEndWait;
+		try
+		{
+			while (true)
+			{
+				if (registry.Read(name) is { ExitCode: int exitCode } record)
+				{
+					return ReportEnd(record, exitCode, output);
+				}
+				if (DateTime.UtcNow >= deadline)
+				{
+					return UakExitCodes.Success;
+				}
+				await Task.Delay(EarlyEndPoll, cancellationToken).ConfigureAwait(false);
+			}
+		}
+		catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+		{
+			return UakExitCodes.Success;
+		}
+	}
+
+	static int ReportEnd(RunRecord record, int exitCode, TextWriter output)
+	{
+		if (exitCode == 0)
+		{
+			output.WriteLine("  It has already ended, with exit code 0.");
+			return UakExitCodes.Success;
+		}
+		string line = RunRegistry.GetLastLine(record.OutputFile, ErrorLine());
+		output.WriteLine(string.Create(CultureInfo.InvariantCulture, $"  It stopped at once, with exit code {exitCode}{(line.Length > 0 ? ": " + line : "")}"));
+		return exitCode == UakExitCodes.UsageError ? UakExitCodes.UsageError : UakExitCodes.Failure;
+	}
+
+	/// <summary>The line a uak child reports a refusal on, which the "Run 'uak help ...'" line follows.</summary>
+	[GeneratedRegex("^error: ")]
+	private static partial Regex ErrorLine();
 
 	/// <summary>The command that runs this uak's wrapper for the same context: <c>[uak, -project=..., -engine=..., runs, _wrap]</c>.</summary>
 	internal static List<string> GetWrapperCommand(UakContext context)
@@ -119,7 +182,7 @@ public sealed class RunsListCommand : IUakCommand
 	public Task<int> RunAsync(UakContext context, IReadOnlyList<string> arguments, CancellationToken cancellationToken)
 	{
 		ArgumentNullException.ThrowIfNull(context);
-		UakArguments parsed = new(arguments);
+		UakArguments parsed = new(arguments, DotSplitRule.Options);
 		bool all = parsed.GetFlag("all");
 		string pattern = parsed.GetString("name") ?? "*";
 		parsed.ThrowIfUnknown();
@@ -241,7 +304,7 @@ public sealed class RunsWaitCommand : IUakCommand
 	public async Task<int> RunAsync(UakContext context, IReadOnlyList<string> arguments, CancellationToken cancellationToken)
 	{
 		ArgumentNullException.ThrowIfNull(context);
-		UakArguments parsed = new(arguments);
+		UakArguments parsed = new(arguments, DotSplitRule.Options);
 		string name = parsed.GetRequiredString("name");
 		int? timeoutSeconds = parsed.GetInt("timeout", 0);
 		parsed.ThrowIfUnknown();
@@ -401,7 +464,7 @@ public sealed class RunsShowCommand : IUakCommand
 	public Task<int> RunAsync(UakContext context, IReadOnlyList<string> arguments, CancellationToken cancellationToken)
 	{
 		ArgumentNullException.ThrowIfNull(context);
-		UakArguments parsed = new(arguments);
+		UakArguments parsed = new(arguments, DotSplitRule.Options);
 		string name = parsed.GetRequiredString("name");
 		parsed.ThrowIfUnknown();
 		parsed.ThrowIfMorePositionalThan(0);
@@ -496,7 +559,7 @@ public sealed class RunsAdoptCommand : IUakCommand
 	public Task<int> RunAsync(UakContext context, IReadOnlyList<string> arguments, CancellationToken cancellationToken)
 	{
 		ArgumentNullException.ThrowIfNull(context);
-		UakArguments parsed = new(arguments);
+		UakArguments parsed = new(arguments, DotSplitRule.Command);
 		int pid = parsed.GetInt("pid", 1) ?? throw new UakUsageException("-pid=... is required.");
 		string name = parsed.GetRequiredString("name");
 		string owner = parsed.GetRequiredString("owner");
@@ -575,7 +638,7 @@ public sealed class RunsWrapCommand : IUakCommand
 	/// <inheritdoc />
 	public Task<int> RunAsync(UakContext context, IReadOnlyList<string> arguments, CancellationToken cancellationToken)
 	{
-		UakArguments parsed = new(arguments);
+		UakArguments parsed = new(arguments, DotSplitRule.Options);
 		string record = parsed.GetRequiredString("record");
 		string? detach = parsed.GetString("detach");
 		parsed.ThrowIfUnknown();

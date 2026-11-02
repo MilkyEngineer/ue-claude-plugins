@@ -206,13 +206,14 @@ public static class EditorLock
 	/// <summary>
 	/// Refuses to join a hold that can't give what the request asks for: a quiet hold (<see cref="EditorLockOptions.Quiet"/>)
 	/// inside a hold that isn't quiet. The quiet flag is the holder's (holder.json), which a joined hold can't set, so
-	/// <c>uak compile</c> would not wait for it. A refusal: a usage error (exit 2), like the quiet run's other refusals.
+	/// <c>uak compile</c> would not wait for it. A refusal (<see cref="UakRefusalException"/>, exit 2): the command was given right,
+	/// but the hold it runs in stands in its way.
 	/// </summary>
 	internal static void CheckJoinable(EditorLockHold nested, EditorLockOptions options, string name)
 	{
 		if (options.Quiet && !nested.Info.Quiet)
 		{
-			throw new UakUsageException(
+			throw new UakRefusalException(
 				$"'{name}' asks for a quiet hold (-quiet), but it runs inside the hold of '{nested.Info.Name}', which is not quiet, and a joined hold " +
 				"can't make it quiet: `uak compile` would not wait for it. Run the quiet command on its own, outside `uak lock run`.");
 		}

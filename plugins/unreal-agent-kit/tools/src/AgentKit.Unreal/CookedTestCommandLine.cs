@@ -237,11 +237,26 @@ public static class CookedTestCommandLine
 /// <summary>What UAT's output says about a cooked test run (the game's results are in Client.log).</summary>
 public sealed class UatRunSummary
 {
+	/// <summary>UAT's exit code when UBT stopped with ConflictingInstance, which UAT prints as Error_SDKNotFound (both are 10).</summary>
+	public const int ConflictingInstanceExitCode = 10;
+
+	/// <summary>The step whose end means UAT runs no more UBT.</summary>
+	public const string BuildCompleted = "BUILD COMMAND COMPLETED";
+
+	/// <summary>Whether UAT's UBT said another UBT held its mutex ("A conflicting instance of ... is already running").</summary>
+	public bool UbtConflict { get; set; }
+
 	/// <summary>N of "Client exited with error code: N": reported, never judged, because UAT stops the game once the queue empties.</summary>
 	public int? ClientExitCode { get; set; }
 
 	/// <summary>N of "The run timed out after N seconds", or null.</summary>
 	public int? TimedOutAfterSeconds { get; set; }
+
+	/// <summary>Whether UAT's UBT said a target was up to date ("Target is up to date", "Targets are up to date").</summary>
+	public bool UbtUpToDate { get; set; }
+
+	/// <summary>Whether UAT's UBT said it runs actions: UAT may run one for each target, so "up to date" alone doesn't say that it compiled nothing.</summary>
+	public bool UbtRanActions { get; set; }
 
 	/// <summary>The steps UAT started and completed, in order ("BUILD COMMAND STARTED", ...).</summary>
 	public List<string> Steps { get; } = [];
@@ -271,6 +286,18 @@ public sealed partial class UatOutputParser
 		{
 			Summary.TimedOutAfterSeconds = int.Parse(M.Groups["seconds"].Value, CultureInfo.InvariantCulture);
 		}
+		else if (UbtConflictPattern().IsMatch(line))
+		{
+			Summary.UbtConflict = true;
+		}
+		else if (UpToDatePattern().IsMatch(line))
+		{
+			Summary.UbtUpToDate = true;
+		}
+		else if (ActionsPattern().IsMatch(line))
+		{
+			Summary.UbtRanActions = true;
+		}
 		return null;
 	}
 
@@ -282,4 +309,18 @@ public sealed partial class UatOutputParser
 
 	[GeneratedRegex(@"^\s*The run timed out after (?<seconds>\d+) seconds")]
 	private static partial Regex TimeoutPattern();
+
+	// GlobalSingleInstanceMutex.AcquireNowOrThrow; the mutex is named after UBT (UnrealBuildTool.cs), and the line may carry a log prefix.
+	[GeneratedRegex(@"A conflicting instance of \S*UnrealBuildTool\S* is already running")]
+	private static partial Regex UbtConflictPattern();
+
+	// BuildMode.cs: "Target is up to date", and for one run of several targets "Targets are up to date". The line may carry a prefix.
+	[GeneratedRegex(@"\bTargets? (?:is|are) up to date\b")]
+	private static partial Regex UpToDatePattern();
+
+	// ActionGraph.ExecuteActionsAsync prints the first for every executor ("Using Unreal Build Accelerator local executor to run
+	// 7 action(s)"; UE 5.7 and 5.8). ImmediateActionQueue prints the second under the parallel executor, and older engines the
+	// third; UBA prints only the first, so it carries the rule.
+	[GeneratedRegex(@"executor to run \d+ action\(s\)|Building \d+ action\(s\) started|Building \d+ actions? with")]
+	private static partial Regex ActionsPattern();
 }

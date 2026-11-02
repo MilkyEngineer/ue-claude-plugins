@@ -22,12 +22,12 @@ public sealed class TestEchoCommand : IUakCommand
 	}
 }
 
-/// <summary>Fails in the way its first argument asks: "usage", "throw", "cancel", or "code=N".</summary>
+/// <summary>Fails in the way its first argument asks: "usage", "refuse", "throw", "cancel", or "code=N".</summary>
 public sealed class TestFailCommand : IUakCommand
 {
 	public string Name => "test fail";
 	public string Summary => "Fails on request.";
-	public string Usage => "uak test fail usage|throw|cancel|code=N";
+	public string Usage => "uak test fail usage|refuse|throw|cancel|code=N";
 	public bool RequiresEngine => false;
 
 	public async Task<int> RunAsync(UakContext context, IReadOnlyList<string> arguments, CancellationToken cancellationToken)
@@ -36,6 +36,10 @@ public sealed class TestFailCommand : IUakCommand
 		if (Mode == "usage")
 		{
 			throw new UakUsageException("bad usage");
+		}
+		if (Mode == "refuse")
+		{
+			throw new UakRefusalException("something stands: clear it first");
 		}
 		if (Mode == "throw")
 		{
@@ -279,6 +283,22 @@ public sealed class UakHostTests
 		Run Result = await RunHost(Tree, "test", "fail", mode);
 		Assert.AreEqual(expected, Result.ExitCode);
 		StringAssert.Contains(Result.Err, message);
+	}
+
+	[TestMethod]
+	public async Task ARefusalIsNoUsageErrorAndPointsAtNoHelp()
+	{
+		// The command was given right: its help says nothing of what stands, and the message says what clears it.
+		using TempTree Tree = new();
+
+		Run Refused = await RunHost(Tree, "test", "fail", "refuse");
+		Run Usage = await RunHost(Tree, "test", "fail", "usage");
+
+		Assert.AreEqual(UakExitCodes.UsageError, Refused.ExitCode);
+		StringAssert.Contains(Refused.Err, "error: refused: something stands: clear it first");
+		Assert.IsFalse(Refused.Err.Contains("uak help", StringComparison.Ordinal), Refused.Err);
+		StringAssert.Contains(Usage.Err, "error: bad usage");
+		StringAssert.Contains(Usage.Err, "Run 'uak help test fail' for its usage.");
 	}
 
 	[TestMethod]

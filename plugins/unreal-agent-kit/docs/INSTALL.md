@@ -56,7 +56,7 @@ Below, `<dotnet>` means that program. Running the engine's own `dotnet` is enoug
 ```
 
 - **What it makes.** A self-contained `uak` for this machine's platform. It runs with no installed .NET and no `DOTNET_ROOT`.
-- **Where it goes.** `$UAK_HOME/<kit version>/`, where `UAK_HOME` defaults to `~/.unreal-agent-kit`. The kit version is the `version` in `<kit>/.claude-plugin/plugin.json`. For kit version 0.4.1 that is `~/.unreal-agent-kit/0.4.1/uak.exe` on Windows, and `~/.unreal-agent-kit/0.4.1/uak` on Linux and Mac. The examples below use 0.4.1: use your kit's version.
+- **Where it goes.** `$UAK_HOME/<kit version>/`, where `UAK_HOME` defaults to `~/.unreal-agent-kit`. The kit version is the `version` in `<kit>/.claude-plugin/plugin.json`. For kit version 0.4.2 that is `~/.unreal-agent-kit/0.4.2/uak.exe` on Windows, and `~/.unreal-agent-kit/0.4.2/uak` on Linux and Mac. The examples below use 0.4.2: use your kit's version.
   - The folder is outside the plugin, which Claude Code replaces on every update.
   - Each kit version gets its own folder, so publishing a new version never overwrites a `uak` that is running.
   - Republishing the same version over itself can fail while a detached run is going, because the run's wrapper keeps that folder's files open. Wait until `uak runs list` shows nothing running.
@@ -91,10 +91,10 @@ engine="$HOME/UnrealEngine"   # your engine root
 
 **Outside Claude Code** (a terminal, CI, a scheduled task), add the publish folder to `PATH` in your user environment, or call `uak` by its full path:
 
-- **Windows:** add `%USERPROFILE%\.unreal-agent-kit\0.4.1` to your user `Path` (Settings, System, About, Advanced system settings, Environment Variables), or from PowerShell:
+- **Windows:** add `%USERPROFILE%\.unreal-agent-kit\0.4.2` to your user `Path` (Settings, System, About, Advanced system settings, Environment Variables), or from PowerShell:
 
   ```powershell
-  $dir = "$env:USERPROFILE\.unreal-agent-kit\0.4.1"
+  $dir = "$env:USERPROFILE\.unreal-agent-kit\0.4.2"
   $key = Get-Item "HKCU:\Environment"
   # Read the raw value, so entries such as %USERPROFILE%\bin stay unexpanded.
   $path = $key.GetValue("Path", "", [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
@@ -108,9 +108,9 @@ engine="$HOME/UnrealEngine"   # your engine root
 
   This writes the user `Path` only, keeps its existing entries as they were (including unexpanded ones like `%USERPROFILE%\bin`), and does nothing if the folder is already there. Programs started before the change keep the old `Path`: open a new terminal, and restart Claude Code from it, to pick it up.
 
-  By full path: `& "$env:USERPROFILE\.unreal-agent-kit\0.4.1\uak.exe" env` in PowerShell, or `~/.unreal-agent-kit/0.4.1/uak.exe env` in Git Bash.
-- **Linux:** add `export PATH="$HOME/.unreal-agent-kit/0.4.1:$PATH"` to `~/.profile` (or your shell's profile). By full path: `~/.unreal-agent-kit/0.4.1/uak env`.
-- **Mac:** add the same line to `~/.zprofile`. By full path: `~/.unreal-agent-kit/0.4.1/uak env`.
+  By full path: `& "$env:USERPROFILE\.unreal-agent-kit\0.4.2\uak.exe" env` in PowerShell, or `~/.unreal-agent-kit/0.4.2/uak.exe env` in Git Bash.
+- **Linux:** add `export PATH="$HOME/.unreal-agent-kit/0.4.2:$PATH"` to `~/.profile` (or your shell's profile). By full path: `~/.unreal-agent-kit/0.4.2/uak env`.
+- **Mac:** add the same line to `~/.zprofile`. By full path: `~/.unreal-agent-kit/0.4.2/uak env`.
 
 Restart Claude Code afterwards, so it sees the new `PATH`. When you publish a new kit version, point `PATH` (or CLAUDE.md) at the new version's folder. Then check:
 
@@ -153,6 +153,7 @@ Usually nothing is needed. `uak` finds the project by walking up from the curren
 | `UAK_LOCK_PRIORITY` | the default lock priority, `High` or `Normal`; `uak runs start -priority=` sets it for a run |
 | `UAK_LOCK_NAME` | set by `uak runs start` to the run's name, so the run's lock requests show as `<run>/<name>` |
 | `UAK_RUN_NAME` | set by `uak runs start` to the run's name, so the run's `uak build`, `uak test` and `uak mutate` record their summaries under it for `uak runs show` |
+| `UAK_RUN_OWNER` | set by `uak runs start` to the run's owner, so a `uak mutate` journal can name whose run left it |
 
 The global options `-project=`, `-engine=` and `-vcs=` beat the variables. They go before the command, for example `uak -project=MyGame.uproject env`. `-verbose` prints more detail. `uak help <command>`, or `uak <command> -help`, shows a command's options.
 
@@ -160,7 +161,7 @@ Per-project values fit best in the project's `.claude/settings.local.json` under
 
 ## Where `uak` keeps its state
 
-The lock queue, run records, logs, test reports, run summaries (`Summaries/`, for `uak runs show`), mutation journals (`Mutations/`, for `uak mutate`, written whole in `MutationsPending/` first; those `uak mutate -restore -accept` or `-force` set aside go to `DiscardedMutations/`, which you may delete once you have checked them) and the project's own settings (`config.json`, which `uak test config` writes) go in the first of these folders that can be written:
+The lock queue, run records, logs, test reports, run summaries (`Summaries/`, for `uak runs show`), mutation journals (`Mutations/`, for `uak mutate`, written whole in `MutationsPending/` first; those `uak mutate -restore -accept` or `-force` set aside go to `DiscardedMutations/`, which you may delete once you have checked them), what a rebuild left mixed (`RebuildNeeded.json`, which a whole `uak build` that succeeds with no edit overlapping it clears, once any file that couldn't be marked, and has a recorded time, is saved (one without clears when a build's mark of it takes); delete it if no build can clear it, as when its target no longer exists) and the project's own settings (`config.json`, which `uak test config` writes) go in the first of these folders that can be written:
 1. `<Project>/Saved/AgentKit`;
 2. `<Engine root>/Engine/Saved/AgentKit/Projects/<project key>`, or `<Engine root>/Engine/Saved/AgentKit` when there is no project;
 3. `$UAK_HOME/State/<project key>`, or `$UAK_HOME/State/<engine key>` when there is no project.

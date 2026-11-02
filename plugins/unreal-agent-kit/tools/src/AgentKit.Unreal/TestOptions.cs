@@ -68,7 +68,7 @@ internal sealed record TestOptions
 				throw new UakUsageException("-gpu, -windowed, -resx= and -resy= are for editor runs: a cooked run's game renders with -nullrhi");
 			}
 			CookedTestCommandLine.CheckFilter(Filter);
-			PassThrough = CookedTestCommandLine.CheckPassThrough(arguments.Rest);
+			PassThrough = CookedTestCommandLine.CheckPassThrough(arguments.PassThrough);
 		}
 		else
 		{
@@ -85,7 +85,7 @@ internal sealed record TestOptions
 				throw new UakUsageException("-resx= and -resy= size the window of a -windowed run");
 			}
 			EditorTestCommandLine.CheckFilter(Filter);
-			PassThrough = EditorTestCommandLine.CheckPassThrough(arguments.Rest);
+			PassThrough = EditorTestCommandLine.CheckPassThrough(arguments.PassThrough);
 		}
 		return new TestOptions
 		{

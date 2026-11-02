@@ -3,6 +3,7 @@
 using System.Globalization;
 using System.Security.Cryptography;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using AgentKit.Core;
 using Microsoft.Extensions.Logging;
 
@@ -99,6 +100,29 @@ public enum MutationAcceptAction
 /// <param name="Why">Why, in a few words.</param>
 public sealed record MutationAcceptCheck(MutationAcceptAction Action, byte[]? Bytes, string Why);
 
+/// <summary>What stopped the last build that was to take a mutant out of the binaries (<see cref="MutationRecord.RebuildFailure"/>).</summary>
+public sealed class MutationRebuildFailure
+{
+	/// <summary>When that build started (UTC): a change since may let the next one succeed.</summary>
+	public DateTime Started { get; set; }
+
+	/// <summary>The file of its first error, as the compiler named it; null when the build named none.</summary>
+	public string? File { get; set; }
+
+	/// <summary>The line of that error, if any.</summary>
+	public int? Line { get; set; }
+
+	/// <summary>That error's text, or why the build couldn't run.</summary>
+	public string? Message { get; set; }
+
+	/// <summary>The build's log.</summary>
+	public string? LogFile { get; set; }
+
+	/// <summary>"Foo.cpp(12)", or null when the build named no file.</summary>
+	[JsonIgnore]
+	public string? Where => File is null ? null : Line is int line ? $"{File}({line.ToString(CultureInfo.InvariantCulture)})" : File;
+}
+
 /// <summary>The record <c>&lt;State&gt;/Mutations/&lt;name&gt;/journal.json</c> holds.</summary>
 public sealed class MutationRecord
 {
@@ -107,6 +131,10 @@ public sealed class MutationRecord
 	public int Pid { get; set; }
 	public DateTime? ProcessStart { get; set; }
 	public DateTime Started { get; set; }
+
+	/// <summary>Inside a detached run: its name and owner ("run M1, owner E3"), for whoever finds the journal; else null.</summary>
+	public string? StartedBy { get; set; }
+
 	public MutationPhase Phase { get; set; }
 	public List<MutationFile> Files { get; set; } = [];
 
@@ -160,6 +188,20 @@ public sealed class MutationRecord
 	/// its files were back), when only a build that recompiles the files clears the journal.
 	/// </summary>
 	public List<MutationBinary>? Binaries { get; set; }
+
+	/// <summary>
+	/// Why the last build of <see cref="BuildTarget"/> since the stamp failed, for the messages of whoever is refused meanwhile
+	/// and for a retry of the build (<c>uak test</c> and <c>uak mutate</c>, once a source file changed since). Null when none
+	/// failed. It clears nothing, and nothing but the rules of <see cref="MutationJournal.ClearAfterBuild"/> clears the journal.
+	/// </summary>
+	public MutationRebuildFailure? RebuildFailure { get; set; }
+
+	/// <summary>
+	/// What builds overlapped and <see cref="RebuildNeededFile"/> couldn't take, an entry for each: the journal stands for it
+	/// (<see cref="MutationJournal.IsSpent"/>), as nothing else would refuse, until a build hands it to the marker. Null when it
+	/// holds none, as a journal of 0.4.1 does; 0.4.1 ignores it.
+	/// </summary>
+	public List<RebuildNeededEntry>? UnkeptOverlap { get; set; }
 }
 
 /// <summary>A binary the mutant build wrote, as it was once the files were back.</summary>
@@ -244,6 +286,16 @@ public sealed class MutationJournal
 {
 	private const string RecordName = MutationFolders.RecordName;
 	private const string BackupExtension = MutationFolders.BackupExtension;
+
+	/// <summary>How the name of a probe of a file system's clock ends (<see cref="ProbeFileTime"/>): it is no one's but uak's.</summary>
+	public const string ProbeSuffix = ".uakprobe.tmp";
+
+	/// <summary>
+	/// How old a probe or a temporary file a dead process left must be before it is deleted (<see cref="IsLeftover"/>). Each
+	/// lives for milliseconds to seconds, so one this old is no live process's, wherever it runs: another machine's, in a tree
+	/// on a share, has a process ID this machine can't ask about.
+	/// </summary>
+	public static readonly TimeSpan LeftoverAge = TimeSpan.FromHours(1);
 
 	/// <summary>The name of the patch's copy in a journal's folder.</summary>
 	public const string PatchCopyName = "patch.diff";
@@ -413,7 +465,7 @@ public sealed class MutationJournal
 	}
 
 	/// <summary>
-	/// For a command that holds the editor lock: refuses (a usage error) while a mutation journal is left, or a folder under
+	/// For a command that holds the editor lock: refuses (<see cref="UakRefusalException"/>) while a mutation journal is left, or a folder under
 	/// <c>Mutations</c> can't be read, unless the journal is the run of the holder whose hold this process joined
 	/// (<see cref="IsRunOf"/>). With <paramref name="building"/>, a journal whose files are restored is allowed: a build is
 	/// what takes the mutation out of the binaries. A journal whose files are back and stamped for a recompile, and none of
@@ -431,7 +483,7 @@ public sealed class MutationJournal
 		(List<MutationJournal> journals, List<UnreadableMutationJournal> unreadable) = List(context);
 		if (unreadable.Count > 0)
 		{
-			throw new UakUsageException(DescribeUnreadable(unreadable[0]));
+			throw new UakRefusalException(DescribeUnreadable(unreadable[0]));
 		}
 		foreach (MutationJournal journal in journals)
 		{
@@ -449,18 +501,25 @@ public sealed class MutationJournal
 				TryClear(context, journal, "no binary the mutant build wrote is left as it wrote it");
 				continue;
 			}
-			throw new UakUsageException(journal.DescribeStopped());
+			throw new UakRefusalException(journal.DescribeStopped());
 		}
 	}
 
 	/// <summary>
-	/// Whether the journal's files are back (phase <see cref="MutationPhase.Restored"/>), stamped for a recompile, and none of
-	/// the binaries its mutant build wrote may still hold the mutation (its list known, <see cref="StillHeldBinaries"/>):
-	/// neither the tree nor the binaries can hold the patch, and the next build recompiles what the mutant build compiled.
+	/// Whether the journal's files are back (phase <see cref="MutationPhase.Restored"/>), stamped for a recompile, none of
+	/// the binaries its mutant build wrote may still hold the mutation (its list known, <see cref="StillHeldBinaries"/>), and it
+	/// holds no overlap (<see cref="MutationRecord.UnkeptOverlap"/>): neither the tree nor the binaries can hold the patch, the
+	/// next build recompiles what the mutant build compiled, and nothing is left for the journal to refuse for.
 	/// </summary>
 	public bool IsSpent()
 	{
-		return Record.Phase == MutationPhase.Restored && Record.RecompileStamp is not null && StillHeldBinaries() is { Count: 0 };
+		return Record.Phase == MutationPhase.Restored && Record.RecompileStamp is not null && StillHeldBinaries() is { Count: 0 } && Record.UnkeptOverlap is null;
+	}
+
+	/// <summary>Whether the patch is out of the binaries, and all that keeps the journal is an overlap it holds (<see cref="MutationRecord.UnkeptOverlap"/>). A failed rebuild linked nothing, so it only counts against what it compiled.</summary>
+	public bool WaitsOnlyOnUnkeptOverlap()
+	{
+		return Record.UnkeptOverlap is not null && Record.RecompileStamp is not null && (StillHeldBinaries() is { Count: 0 } || (Record.RebuildFailure is null && HasRecompiled()));
 	}
 
 	/// <summary>
@@ -519,6 +578,52 @@ public sealed class MutationJournal
 		Save();
 	}
 
+	/// <summary>Records why the rebuild failed, or that none did (<see cref="MutationRecord.RebuildFailure"/>); saved with the next change.</summary>
+	public void SetRebuildFailure(MutationRebuildFailure? failure)
+	{
+		Record.RebuildFailure = failure;
+	}
+
+	/// <summary>Records what the marker couldn't take (<see cref="MutationRecord.UnkeptOverlap"/>).</summary>
+	public void AddUnkeptOverlap(RebuildNeededEntry entry)
+	{
+		ArgumentNullException.ThrowIfNull(entry);
+		(Record.UnkeptOverlap ??= []).Add(entry);
+		Save();
+	}
+
+	/// <summary>Lets go of what <see cref="MutationRecord.UnkeptOverlap"/> held, now that the marker has it.</summary>
+	public void ClearUnkeptOverlap()
+	{
+		Record.UnkeptOverlap = null;
+		Save();
+	}
+
+	/// <summary>
+	/// Records <paramref name="entry"/> in every journal of a stopped run (<see cref="AddUnkeptOverlap"/>), for a build whose
+	/// overlap the marker couldn't take: any of them may be what refuses next, and the first to be spent would otherwise go.
+	/// Returns how many journals hold it: none when no stopped run has one.
+	/// </summary>
+	public static int RecordUnkeptOverlap(UakContext context, RebuildNeededEntry entry)
+	{
+		ArgumentNullException.ThrowIfNull(context);
+		LockHolderInfo? holder = EditorLock.GetInheritedHolder(context);
+		int recorded = 0;
+		foreach (MutationJournal journal in List(context).Journals.Where(journal => !IsRunOf(journal.Record, holder)))
+		{
+			journal.AddUnkeptOverlap(entry);
+			recorded++;
+		}
+		return recorded;
+	}
+
+	/// <summary>What <see cref="MutationRecord.UnkeptOverlap"/> holds, for a message.</summary>
+	public string DescribeUnkeptOverlap()
+	{
+		List<string> files = [.. (Record.UnkeptOverlap ?? []).SelectMany(entry => entry.Stamped.Concat(entry.NotMarked)).Distinct(StringComparer.OrdinalIgnoreCase)];
+		return $"source files changed while a build ran, so its binaries may mix old and new, and {RebuildNeededFile.FileName} couldn't record it, so this journal stands in its place: {RebuildNeededFile.Name(files)}";
+	}
+
 	/// <summary>Records the build the mutant was built with (<see cref="MutationRecord.BuildTarget"/>); saved with the next change.</summary>
 	public void SetBuild(string target, string platform, string configuration)
 	{
@@ -559,8 +664,9 @@ public sealed class MutationJournal
 	/// among them) stay. Where the time can't be set (a share or an ACL that allows writes and no change of attributes), the
 	/// file's own bytes are written whole instead (<see cref="WriteFile"/>), which gives it the clock's time, past the stamp
 	/// once the caller has waited; that needs no such right, unless the file is read-only, hidden or system, when it fails
-	/// too. A probe a run killed before its stamp left beside a file (<see cref="ProbeFileTime"/>) is deleted on the way:
-	/// the journal is past the restore that deletes such files. <paramref name="setTime"/> sets a time (for tests).
+	/// too. A temporary file or a probe a run killed before its stamp left beside a file (<see cref="ProbeFileTime"/>) is
+	/// deleted on the way once it is a leftover (<see cref="IsLeftover"/>): the journal is past the restore that deletes such
+	/// files. <paramref name="setTime"/> sets a time (for tests).
 	/// </summary>
 	/// <exception cref="IOException">A file's time can't be set, or didn't take.</exception>
 	public static void StampFiles(IEnumerable<string> paths, DateTime stamp, DateTime reference, Action<string, DateTime>? setTime = null)
@@ -603,22 +709,32 @@ public sealed class MutationJournal
 	}
 
 	/// <summary>
-	/// The time of the file system a file is on: a temporary file written beside it, its write time read back, and deleted
-	/// (named as <see cref="WriteFile"/>'s are, so a run killed here leaves one the next stamp deletes, <see cref="StampFiles"/>). A
-	/// file server's clock may run ahead of this machine's, and it stamps what the build writes there. Null when it can't be told.
+	/// The time of the file system a file is on: a temporary file written beside it, its write time read back, and deleted. It is
+	/// named <c>&lt;file&gt;.&lt;pid&gt;.&lt;guid&gt;.uakprobe.tmp</c>, so a run killed here leaves one that is known for what it
+	/// is: the next probe of that folder deletes it once it is a leftover (<see cref="DeleteStaleProbes"/>), and so does the
+	/// next stamp of that file (<see cref="StampFiles"/>). A file server's clock may run ahead of this machine's, and it stamps
+	/// what the build writes there. Null when it can't be told, and when the probe is gone before its time is read (another
+	/// machine's uak deleted it, say), which reads back as <see cref="DateTime.FromFileTimeUtc"/>(0), 1601, no time at all.
 	/// </summary>
-	public static DateTime? ProbeFileTime(string path)
+	public static DateTime? ProbeFileTime(string path) => ProbeFileTime(path, null);
+
+	/// <summary>As <see cref="ProbeFileTime(string)"/>, calling <paramref name="afterWrite"/> once the probe is written (for tests).</summary>
+	internal static DateTime? ProbeFileTime(string path, Action<string>? afterWrite)
 	{
 		ArgumentException.ThrowIfNullOrEmpty(path);
-		if (!System.IO.Directory.Exists(Path.GetDirectoryName(path)))
+		string? folder = Path.GetDirectoryName(path);
+		if (folder is null || !System.IO.Directory.Exists(folder))
 		{
 			return null;
 		}
-		string probe = $"{path}.{Environment.ProcessId.ToString(CultureInfo.InvariantCulture)}.{Guid.NewGuid():N}.tmp";
+		DeleteStaleProbes(folder);
+		string probe = $"{path}.{Environment.ProcessId.ToString(CultureInfo.InvariantCulture)}.{Guid.NewGuid():N}{ProbeSuffix}";
 		try
 		{
 			File.WriteAllBytes(probe, []);
-			return File.GetLastWriteTimeUtc(probe);
+			afterWrite?.Invoke(probe);
+			DateTime written = File.GetLastWriteTimeUtc(probe);
+			return written == DateTime.FromFileTimeUtc(0) ? null : written;
 		}
 		catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
 		{
@@ -665,6 +781,45 @@ public sealed class MutationJournal
 	}
 
 	/// <summary>
+	/// The files mutation journals look after, with the write time up to which a change to one is the journal's own: a restored
+	/// file's stamp, and for a file not stamped yet any time at all. Anything newer than that is an edit. A journal keeps its
+	/// times to the millisecond, so a stamp read back is up to a millisecond older than the file's time, hence the one added.
+	/// </summary>
+	public static Dictionary<string, DateTime> GetManagedFiles(UakContext context)
+	{
+		Dictionary<string, DateTime> managed = new(StringComparer.OrdinalIgnoreCase);
+		foreach (MutationJournal journal in List(context).Journals)
+		{
+			foreach (MutationFile file in journal.Record.Files)
+			{
+				managed[file.Path] = journal.Record.RecompileStamp?.AddMilliseconds(1) ?? DateTime.MaxValue;
+			}
+		}
+		return managed;
+	}
+
+	/// <summary>
+	/// For a command that holds the lock and would be refused: the journals in its way, when each is one whose rebuild failed,
+	/// with its files back and stamped and its build known, so that all a <c>uak build</c> of its target could do for it is
+	/// what the run tried. Empty when anything else is in the way (a patch in the tree, a journal uak can't read, a rebuild that
+	/// was up to date), which no build can clear.
+	/// </summary>
+	public static List<MutationJournal> FindRebuildable(UakContext context)
+	{
+		(List<MutationJournal> journals, List<UnreadableMutationJournal> unreadable) = List(context);
+		if (unreadable.Count > 0)
+		{
+			return [];
+		}
+		LockHolderInfo? holder = EditorLock.GetInheritedHolder(context);
+		List<MutationJournal> inTheWay = [.. journals.Where(journal => !IsRunOf(journal.Record, holder) && !journal.IsSpent())];
+		return inTheWay.All(journal => journal.Record is
+		{
+			Phase: MutationPhase.Restored, RecompileStamp: not null, RebuildFailure: not null, BuildTarget: not null, BuildPlatform: not null, BuildConfiguration: not null,
+		}) ? inTheWay : [];
+	}
+
+	/// <summary>
 	/// After a build, under the lock it held, for every stopped run's journal whose files are back and stamped for a recompile
 	/// and whose mutant was built as this build's target, platform and configuration (a build given other UBT arguments, which
 	/// may build part of it, doesn't count: don't call this for one): notes the files it recompiled (<see cref="NoteRecompiled"/>, by
@@ -672,11 +827,14 @@ public sealed class MutationJournal
 	/// <paramref name="succeeded"/> and every file has been seen recompiled (<see cref="HasRecompiled"/>), clears the journal:
 	/// that build relinked what the mutant build linked. A build that succeeded without that evidence may be up to date with
 	/// the mutant's objects, so the journal stays, with a warning. Any journal that is spent (<see cref="IsSpent"/>) goes too.
+	/// A journal that holds an overlap (<see cref="MutationRecord.UnkeptOverlap"/>) stays whatever a build showed.
 	/// A journal not stamped (of 0.4.0, or one whose stamp didn't take) needs <c>uak mutate -restore</c>, which stamps first.
 	/// A build never waits for <see cref="StillHeldBinaries"/>: a binary the mutant build wrote may be one an unrelated change
-	/// made it link, which no later build relinks, so no journal could ever clear. Returns the names cleared.
+	/// made it link, which no later build relinks, so no journal could ever clear. A journal of the same build that stays
+	/// records <paramref name="failure"/>, what stopped this build (null: it succeeded). Returns the names cleared.
 	/// </summary>
-	public static List<string> ClearAfterBuild(UakContext context, string target, string platform, string configuration, bool succeeded, Func<MutationFile, bool> recompiled)
+	public static List<string> ClearAfterBuild(UakContext context, string target, string platform, string configuration, bool succeeded, Func<MutationFile, bool> recompiled,
+		MutationRebuildFailure? failure)
 	{
 		ArgumentNullException.ThrowIfNull(context);
 		LockHolderInfo? holder = EditorLock.GetInheritedHolder(context);
@@ -689,21 +847,26 @@ public sealed class MutationJournal
 			{
 				continue;
 			}
-			bool sameBuild = target.Equals(record.BuildTarget, StringComparison.OrdinalIgnoreCase)
-				&& platform.Equals(record.BuildPlatform, StringComparison.OrdinalIgnoreCase) && configuration.Equals(record.BuildConfiguration, StringComparison.OrdinalIgnoreCase);
+			bool sameBuild = IsBuildOf(record, target, platform, configuration);
 			if (sameBuild)
 			{
 				journal.NoteRecompiled(recompiled);
 			}
-			bool rebuilt = sameBuild && succeeded && journal.HasRecompiled();
+			bool rebuilt = sameBuild && succeeded && journal.HasRecompiled() && record.UnkeptOverlap is null;
 			if (rebuilt || journal.IsSpent())
 			{
 				if (TryClear(context, journal, rebuilt ? $"this build of {target} recompiled what its mutant build compiled" : "no binary the mutant build wrote is left as it wrote it"))
 				{
 					cleared.Add(record.Name);
 				}
+				continue;
 			}
-			else if (sameBuild && succeeded)
+			if (sameBuild)
+			{
+				record.RebuildFailure = failure;
+				journal.Save();
+			}
+			if (sameBuild && succeeded && !journal.HasRecompiled())
 			{
 				context.Logger.LogWarning("The mutation journal '{Name}' stays: this build shows no compile of {Files}, so {Which} may still hold its patch. `uak mutate -restore -name={Name}`"
 					+ " marks them again and rebuilds; if no build compiles them, `-restore -name={Name} -force` sets the journal aside.", record.Name, journal.DescribeAwaitingRecompile(),
@@ -713,8 +876,40 @@ public sealed class MutationJournal
 		return cleared;
 	}
 
+	/// <summary>As the overload that takes a failure, for a build that records none: what project commands built against 0.4.1 call.</summary>
+	public static List<string> ClearAfterBuild(UakContext context, string target, string platform, string configuration, bool succeeded, Func<MutationFile, bool> recompiled)
+	{
+		return ClearAfterBuild(context, target, platform, configuration, succeeded, recompiled, null);
+	}
+
+	/// <summary>Whether a build of this target, platform and configuration is the one the journal's mutant was built as.</summary>
+	private static bool IsBuildOf(MutationRecord record, string target, string platform, string configuration)
+	{
+		return target.Equals(record.BuildTarget, StringComparison.OrdinalIgnoreCase) && platform.Equals(record.BuildPlatform, StringComparison.OrdinalIgnoreCase)
+			&& configuration.Equals(record.BuildConfiguration, StringComparison.OrdinalIgnoreCase);
+	}
+
 	/// <summary>
-	/// For <c>uak compile</c>, which takes no lock: refuses (a usage error) while a stopped run's journal whose files aren't
+	/// Under the lock, for a rebuild that could not run at all, so <see cref="ClearAfterBuild(UakContext, string, string, string, bool, Func{MutationFile, bool}, MutationRebuildFailure?)"/>
+	/// never saw it: records <paramref name="failure"/> in each stopped run's journal it would have counted for.
+	/// </summary>
+	public static void RecordRebuildFailure(UakContext context, string target, string platform, string configuration, MutationRebuildFailure failure)
+	{
+		ArgumentNullException.ThrowIfNull(context);
+		LockHolderInfo? holder = EditorLock.GetInheritedHolder(context);
+		foreach (MutationJournal journal in List(context).Journals)
+		{
+			MutationRecord record = journal.Record;
+			if (!IsRunOf(record, holder) && record.Phase == MutationPhase.Restored && record.RecompileStamp is not null && IsBuildOf(record, target, platform, configuration))
+			{
+				record.RebuildFailure = failure;
+				journal.Save();
+			}
+		}
+	}
+
+	/// <summary>
+	/// For <c>uak compile</c>, which takes no lock: refuses (<see cref="UakRefusalException"/>) while a stopped run's journal whose files aren't
 	/// back is left (one stopped after it put its files back, before its rebuild, is allowed: the compile reads the files), or
 	/// a folder can't be read, naming the files; returns a warning for each run that surely still runs, whose patch is in the
 	/// tree while it builds and tests. A folder that can't be read is looked at again for up to <see cref="DefaultSettleTime"/>
@@ -747,7 +942,7 @@ public sealed class MutationJournal
 		(List<MutationJournal> journals, List<UnreadableMutationJournal> unreadable) = ListSettled(context, settle);
 		if (unreadable.Count > 0)
 		{
-			throw new UakUsageException(DescribeUnreadable(unreadable[0]));
+			throw new UakRefusalException(DescribeUnreadable(unreadable[0]));
 		}
 		List<string> warnings = [];
 		foreach (MutationJournal journal in journals)
@@ -759,7 +954,7 @@ public sealed class MutationJournal
 			}
 			else if (journal.Record.Phase != MutationPhase.Restored)
 			{
-				throw new UakUsageException(journal.DescribeStopped());
+				throw new UakRefusalException(journal.DescribeStopped());
 			}
 		}
 		return warnings;
@@ -771,12 +966,21 @@ public sealed class MutationJournal
 		string run = $"run `uak mutate -restore -name={Record.Name}` on its own (not inside `uak lock run`: it takes the editor lock itself)";
 		if (Record.Phase == MutationPhase.Restored && Record.RecompileStamp is not null)
 		{
+			string handOver = $"a whole `uak build`, on its own, not inside `uak lock run`, that can write it hands them over, as does {run}; if neither can,"
+				+ $" `uak mutate -restore -name={Record.Name} -force` sets the journal aside";
+			if (WaitsOnlyOnUnkeptOverlap())
+			{
+				return $"the mutation run '{Record.Name}'{DescribeStarter()} put its files back (the tree holds no mutation) and no binary holds its patch ({Record.Patch}), but {DescribeUnkeptOverlap()}: {handOver}";
+			}
 			string build = Record.BuildTarget is null ? "" : $" of {Record.BuildTarget} ({Record.BuildPlatform} {Record.BuildConfiguration})";
 			string clears = HasRecompiled() ? $"the next `uak build`{build} that succeeds clears this (once the tree builds again), as does {run}"
 				: $"a `uak build`{build} that shows a compile of {DescribeAwaitingRecompile()} and succeeds clears this, as does {run}, which marks them again; if no build"
 					+ $" compiles them, `uak mutate -restore -name={Record.Name} -force` sets the journal aside";
-			return $"the mutation run '{Record.Name}' put its files back (the tree holds no mutation) and marked them so the next build recompiles them, but"
-				+ $" no build since has recompiled them and succeeded, so {DescribeHeld()} may still hold its patch ({Record.Patch}): {clears}";
+			string failed = Record.RebuildFailure is null ? "" : $" ({DescribeRebuildFailure()})";
+			string once = Record.RebuildFailure?.Where is null ? "" : $"once {Record.RebuildFailure.File} builds again, ";
+			string unkept = Record.UnkeptOverlap is null ? "" : $". Also, {DescribeUnkeptOverlap()}: {handOver}";
+			return $"the mutation run '{Record.Name}'{DescribeStarter()} put its files back (the tree holds no mutation) and marked them so the next build recompiles them, but"
+				+ $" no build since has recompiled them and succeeded{failed}, so {DescribeHeld()} may still hold its patch ({Record.Patch}): {once}{clears}{unkept}";
 		}
 		if (Record.Phase == MutationPhase.Restored)
 		{
@@ -801,6 +1005,46 @@ public sealed class MutationJournal
 
 	private string DescribeFiles() => string.Join(", ", Record.Files.Select(file => file.Path));
 
+	/// <summary>Whose run this was, for a message: " (run M1, owner E3, PID 1234, started 2026-01-02T03:04:05.000Z)".</summary>
+	public string DescribeStarter()
+	{
+		string by = Record.StartedBy is null ? "" : Record.StartedBy + ", ";
+		return $" ({by}PID {Record.Pid.ToString(CultureInfo.InvariantCulture)}, started {UakJson.FormatTime(Record.Started)})";
+	}
+
+	/// <summary>
+	/// What stopped the last rebuild, for a message: the file of its first error, whether the patch touched it, the error and
+	/// the log. Empty when none failed.
+	/// </summary>
+	public string DescribeRebuildFailure()
+	{
+		if (Record.RebuildFailure is not MutationRebuildFailure failure)
+		{
+			return "";
+		}
+		string where = failure.Where is null ? "the last rebuild failed" : $"the last rebuild failed in {failure.Where}";
+		string others = failure.File is null ? "" : Record.Files.Exists(file => IsSameFile(file.Path, failure.File)) ? ", a file of this patch" : ", which this patch doesn't touch: another agent's edit, most likely";
+		string error = string.IsNullOrEmpty(failure.Message) ? "" : $": {failure.Message}";
+		string log = failure.LogFile is null ? "" : $"; log {failure.LogFile}";
+		return where + others + error + log;
+	}
+
+	/// <summary>Whether a compiler's name for a file (a full path, or only its name) is this path.</summary>
+	private static bool IsSameFile(string path, string name)
+	{
+		return Path.IsPathFullyQualified(name)
+			? Path.GetFullPath(path).Equals(Path.GetFullPath(name), StringComparison.OrdinalIgnoreCase)
+			: Path.GetFileName(path).Equals(Path.GetFileName(name), StringComparison.OrdinalIgnoreCase);
+	}
+
+	/// <summary>Inside a detached run, its name and owner (<see cref="MutationRecord.StartedBy"/>); else null.</summary>
+	private static string? FindStarter()
+	{
+		string? run = Environment.GetEnvironmentVariable(RunSummaries.RunNameVariable);
+		string? owner = Environment.GetEnvironmentVariable(RunSummaries.RunOwnerVariable);
+		return string.IsNullOrEmpty(run) ? null : string.IsNullOrEmpty(owner) ? $"run {run}" : $"run {run}, owner {owner}";
+	}
+
 	/// <summary>The binaries that may still hold the mutation (<see cref="StillHeldBinaries"/>), for a message.</summary>
 	public string DescribeHeld()
 	{
@@ -817,7 +1061,7 @@ public sealed class MutationJournal
 	/// <exception cref="UakUsageException">
 	/// The name can't name a folder as it is, a journal or copies of that name are left from an earlier run, a folder of that
 	/// name that holds neither can't be deleted, or a file can't be read or copied (then nothing is left behind: the tree is
-	/// untouched).
+	/// untouched). A journal or copies left is a refusal (<see cref="UakRefusalException"/>).
 	/// </exception>
 	public static MutationJournal Begin(UakContext context, string name, string patch, IReadOnlyList<string> files, byte[]? patchBytes = null)
 	{
@@ -830,7 +1074,7 @@ public sealed class MutationJournal
 		{
 			if (MutationFolders.HoldsJournal(folder))
 			{
-				throw new UakUsageException($"a mutation journal named '{name}' is left in {folder}: run `uak mutate -restore -name={name}` first");
+				throw new UakRefusalException($"a mutation journal named '{name}' is left in {folder}: run `uak mutate -restore -name={name}` first");
 			}
 			try
 			{
@@ -852,6 +1096,7 @@ public sealed class MutationJournal
 			Pid = self.Pid,
 			ProcessStart = self.StartTimeUtc,
 			Started = DateTime.UtcNow,
+			StartedBy = FindStarter(),
 			Phase = MutationPhase.Applying,
 		};
 		try
@@ -1015,7 +1260,7 @@ public sealed class MutationJournal
 	}
 
 	/// <summary>
-	/// Refuses (a usage error) when a file no longer holds the bytes it was copied with (or a file the patch creates now
+	/// Refuses (<see cref="MutationFileChangedException"/>) when a file no longer holds the bytes it was copied with (or a file the patch creates now
 	/// exists): someone changed it after the copy was taken, and the patch would overwrite their change. Called just before
 	/// the patch is applied.
 	/// </summary>
@@ -1105,7 +1350,7 @@ public sealed class MutationJournal
 			{
 				continue;
 			}
-			// A temporary file a killed write of this tree left beside it (WriteFile) is no one's.
+			// A temporary file a killed write of this tree left beside it (WriteFile) is no one's, once it is a leftover.
 			DeleteLeftoverTemporaryFiles(entry.Path);
 			byte[]? current = File.Exists(entry.Path) ? File.ReadAllBytes(entry.Path) : null;
 			string? currentHash = current is null ? null : Hash(current);
@@ -1280,7 +1525,69 @@ public sealed class MutationJournal
 		return links > 1 ? $"one of {links} hard links to one file: a new file renamed over it would part them" : null;
 	}
 
-	/// <summary>Deletes the temporary files a killed <see cref="WriteFile"/> left beside a file (<c>&lt;file&gt;.&lt;pid&gt;.&lt;guid&gt;.tmp</c>).</summary>
+	/// <summary>
+	/// Deletes the probes (<see cref="ProbeFileTime"/>) in <paramref name="folder"/> that are leftovers (<see cref="IsLeftover"/>),
+	/// which a run killed while it probed left. What can't be listed or deleted stays.
+	/// </summary>
+	public static void DeleteStaleProbes(string folder)
+	{
+		try
+		{
+			foreach (string probe in System.IO.Directory.EnumerateFiles(folder, "*" + ProbeSuffix))
+			{
+				string found = Path.GetFileName(probe);
+				if (!found.EndsWith(ProbeSuffix, StringComparison.Ordinal))
+				{
+					continue;
+				}
+				string[] parts = found[..^ProbeSuffix.Length].Split('.');
+				if (parts.Length >= 3 && parts[^1].Length == 32 && parts[^1].All(char.IsAsciiHexDigitLower) && parts[^2].Length > 0 && parts[^2].All(char.IsAsciiDigit)
+					&& IsLeftover(probe, parts[^2]))
+				{
+					StateFiles.TryDelete(probe);
+				}
+			}
+		}
+		catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+		{
+			// What can't be listed stays: a probe is no part of the tree's sources.
+		}
+	}
+
+	/// <summary>
+	/// Whether <paramref name="file"/>, a probe or a temporary file named for the process <paramref name="pid"/>, is a leftover
+	/// to delete: that process no longer runs on this machine, and the file's own write time is more than
+	/// <see cref="LeftoverAge"/> old. A live run's may be in the middle of its write and read, here or on another machine that
+	/// builds in the same tree on a share (whose process IDs this machine can't ask about), and deleting it would fail that
+	/// write or leave a probe with no time to read. A reused process ID keeps one until that process ends too.
+	/// </summary>
+	private static bool IsLeftover(string file, string pid)
+	{
+		return int.TryParse(pid, NumberStyles.None, CultureInfo.InvariantCulture, out int id) && ProcessIdentity.TryGet(id) is null
+			&& IsOlderThanLeftoverAge(file);
+	}
+
+	/// <summary>
+	/// Whether <paramref name="file"/>'s write time is more than <see cref="LeftoverAge"/> ago. A time past what a
+	/// <see cref="DateTime"/> holds (after the year 9999) gives no age, and a file that can't be judged stays.
+	/// </summary>
+	private static bool IsOlderThanLeftoverAge(string file)
+	{
+		try
+		{
+			return DateTime.UtcNow - File.GetLastWriteTimeUtc(file) > LeftoverAge;
+		}
+		catch (ArgumentException)
+		{
+			return false;
+		}
+	}
+
+	/// <summary>
+	/// Deletes the temporary files a killed <see cref="WriteFile"/> or probe (<see cref="ProbeFileTime"/>) left beside a file
+	/// (<c>&lt;file&gt;.&lt;pid&gt;.&lt;guid&gt;.tmp</c>, <c>&lt;file&gt;.&lt;pid&gt;.&lt;guid&gt;.uakprobe.tmp</c>), once each is a
+	/// leftover (<see cref="IsLeftover"/>): a live write's temporary file is as much in use as a live probe.
+	/// </summary>
 	private static void DeleteLeftoverTemporaryFiles(string path)
 	{
 		string? folder = Path.GetDirectoryName(path);
@@ -1300,7 +1607,8 @@ public sealed class MutationJournal
 					continue;
 				}
 				string[] parts = found[(name.Length + 1)..^".tmp".Length].Split('.');
-				if (parts.Length == 2 && parts[0].Length > 0 && parts[0].All(char.IsAsciiDigit) && parts[1].Length == 32 && parts[1].All(char.IsAsciiHexDigitLower))
+				if ((parts.Length == 2 || (parts.Length == 3 && parts[2] == "uakprobe")) && parts[0].Length > 0 && parts[0].All(char.IsAsciiDigit)
+					&& parts[1].Length == 32 && parts[1].All(char.IsAsciiHexDigitLower) && IsLeftover(temporary, parts[0]))
 				{
 					StateFiles.TryDelete(temporary);
 				}
@@ -1445,12 +1753,15 @@ public sealed class MutationJournal
 	public static string Hash(byte[] bytes) => Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
 }
 
-/// <summary>A file changed after the journal copied it, before the patch was written to it: the patch is not applied to it.</summary>
-public sealed class MutationFileChangedException : UakUsageException
+/// <summary>
+/// A file changed after the journal copied it, before the patch was written to it: the patch is not applied to it. A refusal:
+/// the command was given right, and what stops it is an edit on disk, which its help says nothing of.
+/// </summary>
+public sealed class MutationFileChangedException : UakRefusalException
 {
 	/// <summary>Creates the exception for <paramref name="path"/>.</summary>
 	public MutationFileChangedException(string path)
-		: base($"{path} changed while the patch was being prepared or applied: it was not written")
+		: base($"{path} changed while the patch was being prepared or applied: it was not written. Run the check again once that edit is done")
 	{
 		Path = path;
 	}

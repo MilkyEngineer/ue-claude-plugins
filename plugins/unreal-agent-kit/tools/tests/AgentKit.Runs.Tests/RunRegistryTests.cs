@@ -212,6 +212,17 @@ public sealed class RunRegistryTests
 	}
 
 	[TestMethod]
+	public async Task CommandsThatTakeACommandStartNothingForADottedWordThatCouldBeEitherThing()
+	{
+		UakUsageException started = await Assert.ThrowsExactlyAsync<UakUsageException>(() => new RunsStartCommand().RunAsync(_state.Context, ["-name=x", "-owner=y", ".tool.bat", "arg"], TestContext.CancellationToken));
+		UakUsageException adopted = await Assert.ThrowsExactlyAsync<UakUsageException>(() => new RunsAdoptCommand().RunAsync(_state.Context, ["-pid=1", "-name=x", "-owner=y", ".tool.bat"], TestContext.CancellationToken));
+
+		StringAssert.Contains(started.Message, "nothing was run");
+		StringAssert.Contains(adopted.Message, "nothing was run");
+		Assert.IsNull(_registry.Read("x"));
+	}
+
+	[TestMethod]
 	public void WrapperCommandRelaunchesThisUakForTheSameContext()
 	{
 		List<string> command = RunsStartCommand.GetWrapperCommand(_state.Context);

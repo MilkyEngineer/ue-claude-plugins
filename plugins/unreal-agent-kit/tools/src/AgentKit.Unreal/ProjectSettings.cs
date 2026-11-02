@@ -24,7 +24,7 @@ public static class ProjectSettings
 	public static string? GetCookedMaps(UakContext context)
 	{
 		JsonObject? Root = Read(GetFile(context));
-		return Root?["test"]?["cookedMaps"] is JsonValue Value && Value.TryGetValue(out string? Maps) && !string.IsNullOrEmpty(Maps) ? Maps : null;
+		return (Root?["test"] as JsonObject)?["cookedMaps"] is JsonValue Value && Value.TryGetValue(out string? Maps) && !string.IsNullOrEmpty(Maps) ? Maps : null;
 	}
 
 	/// <summary>Saves <c>uak test -cooked</c>'s default -map=, or forgets it (null).</summary>
@@ -43,6 +43,59 @@ public static class ProjectSettings
 		}
 		Root["test"] = Test;
 		StateFiles.WriteJson(File, Root);
+	}
+
+	/// <summary>
+	/// The source files the project's builds write themselves, as paths from the project folder with '/' (<see cref="ParseBuildWrites"/>),
+	/// which aren't edits of a build. Empty when none is saved.
+	/// </summary>
+	public static IReadOnlyList<string> GetBuildWrites(UakContext context)
+	{
+		JsonObject? Root = Read(GetFile(context));
+		return (Root?["build"] as JsonObject)?["writes"] is JsonArray Saved ? [.. Saved.OfType<JsonValue>().Select(Value => Value.TryGetValue(out string? Relative) ? Relative : "").Where(Relative => Relative.Length > 0)] : [];
+	}
+
+	/// <summary>Saves the files of <see cref="GetBuildWrites"/>, or forgets them (null).</summary>
+	public static void SetBuildWrites(UakContext context, IReadOnlyList<string>? paths)
+	{
+		string File = GetFile(context);
+		JsonObject Root = Read(File) ?? [];
+		JsonObject Build = Root["build"] as JsonObject ?? [];
+		if (paths is null)
+		{
+			Build.Remove("writes");
+		}
+		else
+		{
+			JsonArray Writes = [];
+			foreach (string Relative in paths)
+			{
+				Writes.Add(JsonValue.Create(Relative));
+			}
+			Build["writes"] = Writes;
+		}
+		Root["build"] = Build;
+		StateFiles.WriteJson(File, Root);
+	}
+
+	/// <summary>Reads -build-writes=: exact project-relative paths joined with '+', refused if one has a wildcard, is absolute, or isn't a plain path inside the project.</summary>
+	public static List<string> ParseBuildWrites(string value)
+	{
+		List<string> Paths = [];
+		foreach (string Given in value.Split('+', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+		{
+			string Relative = Given.Replace('\\', '/');
+			if (Relative.IndexOfAny(['*', '?']) >= 0)
+			{
+				throw new UakUsageException($"-build-writes: {Given} has a wildcard: name each file exactly");
+			}
+			if (Path.IsPathRooted(Given) || Relative.Contains(':', StringComparison.Ordinal) || Relative.Split('/').Any(Part => Part is "" or "." or ".."))
+			{
+				throw new UakUsageException($"-build-writes: {Given} isn't a path from the project folder");
+			}
+			Paths.Add(Relative);
+		}
+		return Paths.Count > 0 ? Paths : throw new UakUsageException("-build-writes= names no file");
 	}
 
 	static JsonObject? Read(string file)
@@ -70,18 +123,25 @@ public sealed class TestConfigCommand : IUakCommand
 	public string Name => "test config";
 
 	/// <inheritdoc/>
-	public string Summary => "Show or save this project's defaults for uak test (the maps a cooked run cooks).";
+	public string Summary => "Show or save this project's settings for uak test and its builds (the maps a cooked run cooks, the files a build writes itself).";
 
 	/// <inheritdoc/>
 	public string Usage =>
 		"""
-		uak test config [-cooked-maps=<map>[+<map>...]] [-reset]
-		  Without options: prints the saved defaults and where they are kept.
+		uak test config [-cooked-maps=<map>[+<map>...]] [-build-writes=<path>[+<path>...]] [-reset]
+		  Without options: prints the saved settings and where they are kept.
 		  -cooked-maps=<maps>   The maps `uak test -cooked` cooks when -map= isn't given, e.g.
 		                        -cooked-maps=/Game/Maps/Test+/Engine/Maps/Entry (the first is the one the game opens).
 		                        From Git Bash, set MSYS_NO_PATHCONV=1 so the shell leaves /Game/... alone.
-		  -reset                Forget the saved defaults.
-		The defaults are this project's, kept in <State>/config.json (the state folder `uak env` shows).
+		  -build-writes=<paths> The source files a build writes itself (a pre-build step's output), which aren't edits:
+		                        no warning, no recompile mark, no EditedDuringBuild, no `uak mutate` exit 4 and no
+		                        retried rebuild for them. Exact paths from the project folder, no wildcards, e.g.
+		                        -build-writes=Source/Game/Private/Version.gen.h. Replaces any saved list. Empty by default.
+		                        Warns about a file that doesn't exist, or lies outside Source and Plugins, the only
+		                        folders uak looks in, and saves it all the same. '+' separates paths, so a path with a
+		                        '+' in it can't be named.
+		  -reset                Forget the saved settings.
+		The settings are this project's, kept in <State>/config.json (the state folder `uak env` shows).
 		""";
 
 	/// <inheritdoc/>
@@ -92,28 +152,57 @@ public sealed class TestConfigCommand : IUakCommand
 	{
 		return UnrealServices.GuardAsync(context, () =>
 		{
-			UakArguments Arguments = new(arguments);
+			UakArguments Arguments = new(arguments, DotSplitRule.Options);
 			string? Maps = Arguments.GetString("cooked-maps");
+			string? Writes = Arguments.GetString("build-writes");
 			bool Reset = Arguments.GetFlag("reset");
 			Arguments.ThrowIfUnknown();
 			Arguments.ThrowIfMorePositionalThan(0);
 			UnrealServices.RequireProject(context);
-			if (Maps is not null && Reset)
+			if ((Maps is not null || Writes is not null) && Reset)
 			{
-				throw new UakUsageException("give -cooked-maps= or -reset, not both");
+				throw new UakUsageException("give -cooked-maps= or -build-writes=, or -reset, not both");
 			}
-			if (Maps is not null)
+			// All of it checked first: a value that's refused saves nothing.
+			string? ParsedMaps = Maps is null ? null : string.Join('+', CookedTestCommandLine.ParseMaps(Maps));
+			List<string>? ParsedWrites = Writes is null ? null : ProjectSettings.ParseBuildWrites(Writes);
+			if (ParsedMaps is not null)
 			{
-				ProjectSettings.SetCookedMaps(context, string.Join('+', CookedTestCommandLine.ParseMaps(Maps)));
+				ProjectSettings.SetCookedMaps(context, ParsedMaps);
 			}
-			else if (Reset)
+			if (ParsedWrites is not null)
+			{
+				ProjectSettings.SetBuildWrites(context, ParsedWrites);
+				WarnAboutBuildWrites(context, ParsedWrites);
+			}
+			if (Reset)
 			{
 				ProjectSettings.SetCookedMaps(context, null);
+				ProjectSettings.SetBuildWrites(context, null);
 			}
 			string? Saved = ProjectSettings.GetCookedMaps(context);
+			IReadOnlyList<string> SavedWrites = ProjectSettings.GetBuildWrites(context);
 			context.Logger.LogInformation("cooked-maps: {Maps}", Saved ?? "(none: a cooked run cooks the project's maps unless -map= is given)");
+			context.Logger.LogInformation("build-writes: {Writes}", SavedWrites.Count > 0 ? string.Join('+', SavedWrites) : "(none: every source file written during a build counts as an edit)");
 			context.Logger.LogInformation("Kept in {File}", ProjectSettings.GetFile(context));
 			return Task.FromResult(UakExitCodes.Success);
 		});
+	}
+
+	/// <summary>Warns about what can't be meant as it stands. Saved all the same: a build may yet write a file that isn't there.</summary>
+	static void WarnAboutBuildWrites(UakContext context, List<string> paths)
+	{
+		string? Project = context.ProjectDirectory?.FullName;
+		foreach (string Relative in paths)
+		{
+			if (Project is not null && !File.Exists(Path.Combine(Project, Relative)))
+			{
+				context.Logger.LogWarning("-build-writes: {File} doesn't exist: check the path", Relative);
+			}
+			if (!BuildEdits.SourceRoots.Contains(Relative.Split('/')[0], StringComparer.OrdinalIgnoreCase))
+			{
+				context.Logger.LogWarning("-build-writes: {File} isn't under Source or Plugins, the only folders uak looks in, so naming it changes nothing", Relative);
+			}
+		}
 	}
 }

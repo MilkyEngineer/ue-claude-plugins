@@ -126,6 +126,7 @@ internal sealed class LockPaths
 		QueueDirectory = Path.Combine(LockDirectory, "Queue");
 		HolderFile = Path.Combine(LockDirectory, "holder.json");
 		CompilesDirectory = Path.Combine(LockDirectory, "Compiles");
+		UbtReservationsDirectory = Path.Combine(LockDirectory, "UbtReservations");
 		OrphansDirectory = Path.Combine(LockDirectory, "Orphans");
 	}
 
@@ -140,6 +141,9 @@ internal sealed class LockPaths
 
 	/// <summary>&lt;State&gt;/Lock/Compiles: one marker per running <c>uak compile</c>, which a quiet hold waits for.</summary>
 	public string CompilesDirectory { get; }
+
+	/// <summary>&lt;State&gt;/Lock/UbtReservations: one marker per cooked run whose UAT is about to run UBT, which <c>uak compile</c> waits for.</summary>
+	public string UbtReservationsDirectory { get; }
 
 	/// <summary>&lt;State&gt;/Lock/Orphans: one record per command that outlived its dead holder and the wait for it (<see cref="OrphanRecords"/>).</summary>
 	public string OrphansDirectory { get; }

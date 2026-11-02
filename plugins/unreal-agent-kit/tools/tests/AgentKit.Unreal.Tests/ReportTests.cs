@@ -246,6 +246,132 @@ public sealed class ReportTests
 		Assert.AreEqual("/Engine/Maps/Entry", Settings.RootElement.GetProperty("test").GetProperty("cookedMaps").GetString());
 	}
 
+	[TestMethod]
+	public async Task SavedBuildWritesArePrintedAndForgotten()
+	{
+		using Sandbox Box = new();
+		TestConfigCommand Config = new();
+		Assert.IsEmpty(ProjectSettings.GetBuildWrites(Box.Context()));
+
+		Assert.AreEqual(0, await Config.RunAsync(Box.Context(), [@"-build-writes=Source\Game\Private\Version.gen.h+Source/Game/Public/Stamp.h"], CancellationToken.None), Box.Logger.Text);
+
+		CollectionAssert.AreEqual(new[] { "Source/Game/Private/Version.gen.h", "Source/Game/Public/Stamp.h" }, ProjectSettings.GetBuildWrites(Box.Context()).ToArray());
+		Assert.Contains("build-writes: Source/Game/Private/Version.gen.h+Source/Game/Public/Stamp.h", Box.Logger.Text);
+
+		Assert.AreEqual(0, await Config.RunAsync(Box.Context(), ["-reset"], CancellationToken.None), Box.Logger.Text);
+
+		Assert.IsEmpty(ProjectSettings.GetBuildWrites(Box.Context()));
+		Assert.Contains("build-writes: (none", Box.Logger.Text);
+	}
+
+	[TestMethod]
+	public async Task BuildWritesSurviveWindowsPowerShellSplittingThem()
+	{
+		// Windows PowerShell 5.1 splits -build-writes=Source/Version.gen.h at its first dot.
+		using Sandbox Box = new();
+
+		Assert.AreEqual(0, await new TestConfigCommand().RunAsync(Box.Context(), ["-build-writes=Source/Version", ".gen.h"], CancellationToken.None), Box.Logger.Text);
+
+		CollectionAssert.AreEqual(new[] { "Source/Version.gen.h" }, ProjectSettings.GetBuildWrites(Box.Context()).ToArray());
+	}
+
+	[TestMethod]
+	[DataRow("Source/*.h")]
+	[DataRow("Source/Game/Version?.h")]
+	[DataRow("C:/Project/Source/Foo.h")]
+	[DataRow("/Source/Foo.h")]
+	[DataRow(@"\Source\Foo.h")]
+	[DataRow("../Other/Foo.h")]
+	[DataRow("Source/../Foo.h")]
+	[DataRow("./Source/Foo.h")]
+	[DataRow("Source//Foo.h")]
+	[DataRow("Source/Good.h+Source/*.h")]
+	[DataRow("+")]
+	public async Task BuildWritesTakeOnlyExactPathsFromTheProject(string paths)
+	{
+		using Sandbox Box = new();
+
+		Assert.AreEqual(2, await new TestConfigCommand().RunAsync(Box.Context(), ["-build-writes=" + paths], CancellationToken.None));
+
+		Assert.IsEmpty(ProjectSettings.GetBuildWrites(Box.Context()));
+	}
+
+	[TestMethod]
+	public async Task NothingIsSavedBesideAValueThatIsRefused()
+	{
+		using Sandbox Box = new();
+
+		Assert.AreEqual(2, await new TestConfigCommand().RunAsync(Box.Context(), ["-cooked-maps=/Game/Maps/Test", "-build-writes=Source/*.h"], CancellationToken.None));
+
+		Assert.IsNull(ProjectSettings.GetCookedMaps(Box.Context()));
+		Assert.IsEmpty(ProjectSettings.GetBuildWrites(Box.Context()));
+		Assert.IsFalse(System.IO.File.Exists(ProjectSettings.GetFile(Box.Context())));
+	}
+
+	[TestMethod]
+	public async Task AFileThatIsntThereIsWarnedAboutAndSaved()
+	{
+		// A build may yet write it, but a typing error would otherwise say nothing.
+		using Sandbox Box = new();
+
+		Assert.AreEqual(0, await new TestConfigCommand().RunAsync(Box.Context(), ["-build-writes=Source/Game/Public/Missing.h+Source/Game/Public/Foo.h"], CancellationToken.None), Box.Logger.Text);
+
+		Assert.Contains("Source/Game/Public/Missing.h doesn't exist", Box.Logger.Text);
+		Assert.DoesNotContain("Foo.h doesn't exist", Box.Logger.Text);
+		Assert.DoesNotContain("isn't under Source or Plugins", Box.Logger.Text);
+		CollectionAssert.AreEqual(new[] { "Source/Game/Public/Missing.h", "Source/Game/Public/Foo.h" }, ProjectSettings.GetBuildWrites(Box.Context()).ToArray());
+	}
+
+	[TestMethod]
+	public async Task AFileOutsideTheFoldersUakLooksInIsWarnedAboutAndSaved()
+	{
+		using Sandbox Box = new();
+
+		Assert.AreEqual(0, await new TestConfigCommand().RunAsync(Box.Context(), ["-build-writes=Game.uproject"], CancellationToken.None), Box.Logger.Text);
+
+		Assert.Contains("Game.uproject isn't under Source or Plugins", Box.Logger.Text);
+		Assert.DoesNotContain("doesn't exist", Box.Logger.Text);
+		CollectionAssert.AreEqual(new[] { "Game.uproject" }, ProjectSettings.GetBuildWrites(Box.Context()).ToArray());
+	}
+
+	[TestMethod]
+	public async Task AFileUnderPluginsIsInTheFoldersUakLooksIn()
+	{
+		using Sandbox Box = new();
+		Sandbox.Write(Path.Combine(Box.ProjectDirectory, "Plugins", "Foo", "Stamp.h"), "");
+
+		Assert.AreEqual(0, await new TestConfigCommand().RunAsync(Box.Context(), ["-build-writes=plugins/Foo/Stamp.h"], CancellationToken.None), Box.Logger.Text);
+
+		Assert.DoesNotContain("isn't under Source or Plugins", Box.Logger.Text);
+	}
+
+	[TestMethod]
+	public async Task ResetIsRefusedBesideANewValue()
+	{
+		using Sandbox Box = new();
+		ProjectSettings.SetBuildWrites(Box.Context(), ["Source/Stamp.h"]);
+
+		Assert.AreEqual(2, await new TestConfigCommand().RunAsync(Box.Context(), ["-build-writes=Source/Foo.h", "-reset"], CancellationToken.None));
+
+		CollectionAssert.AreEqual(new[] { "Source/Stamp.h" }, ProjectSettings.GetBuildWrites(Box.Context()).ToArray());
+	}
+
+	[TestMethod]
+	public async Task BuildWritesKeepTheOtherSettings()
+	{
+		using Sandbox Box = new();
+		string File = ProjectSettings.GetFile(Box.Context());
+		Sandbox.Write(File, """{ "other": { "kept": true }, "build": { "future": 1 } }""");
+
+		Assert.AreEqual(0, await new TestConfigCommand().RunAsync(Box.Context(), ["-build-writes=Source/Foo.h", "-cooked-maps=/Engine/Maps/Entry"], CancellationToken.None), Box.Logger.Text);
+
+		using JsonDocument Settings = JsonDocument.Parse(System.IO.File.ReadAllText(File));
+		Assert.IsTrue(Settings.RootElement.GetProperty("other").GetProperty("kept").GetBoolean());
+		Assert.AreEqual(1, Settings.RootElement.GetProperty("build").GetProperty("future").GetInt32());
+		Assert.AreEqual("Source/Foo.h", Settings.RootElement.GetProperty("build").GetProperty("writes")[0].GetString());
+		Assert.AreEqual("/Engine/Maps/Entry", ProjectSettings.GetCookedMaps(Box.Context()));
+	}
+
 	// ---- memory-aware compile -dependents ----
 
 	[TestMethod]

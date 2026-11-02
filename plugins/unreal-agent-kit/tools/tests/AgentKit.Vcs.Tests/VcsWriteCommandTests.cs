@@ -477,10 +477,11 @@ public sealed class VcsWriteCommandTests
 		root.Write("Saved/AgentKit/Mutations/M1/journal.json", "{ \"Name\": \"M1\", \"Files\": [ { \"Path\": \"" + game.Replace("\\", "\\\\", StringComparison.Ordinal) + "\" } ] }");
 		FakePerforceConnection connection = new FakePerforceConnection(root.Path).On("change", "change-o-pending").On("shelve", "shelve").On("describe", "describe-s-pending");
 
-		UakUsageException refused = await Assert.ThrowsExactlyAsync<UakUsageException>(() => RunAsync(new VcsShelveCommand { Guards = () => [] }, root, connection, Token, "-c=12346"));
+		// A refusal, not a usage error: the host prints no pointer to the help (K7 section 5).
+		UakRefusalException refused = await Assert.ThrowsExactlyAsync<UakRefusalException>(() => RunAsync(new VcsShelveCommand { Guards = () => [] }, root, connection, Token, "-c=12346"));
 		StringAssert.Contains(refused.Message, "uak mutate journal is left");
 		StringAssert.Contains(refused.Message, game);
-		await Assert.ThrowsExactlyAsync<UakUsageException>(() => RunAsync(new VcsShelveCommand { Guards = () => [] }, root, connection, Token, game));
+		await Assert.ThrowsExactlyAsync<UakRefusalException>(() => RunAsync(new VcsShelveCommand { Guards = () => [] }, root, connection, Token, game));
 		Assert.IsFalse(connection.Calls.Any(call => call.Command is "shelve" or "change" or "reopen"), "nothing was shelved, created or moved");
 
 		// A folder without a journal or copies changed nothing: it doesn't stop a shelve.
@@ -504,7 +505,7 @@ public sealed class VcsWriteCommandTests
 		Assert.AreEqual(UakExitCodes.Failure, exitCode);
 		StringAssert.Contains(errors + string.Join("\n", log), "//Game/main/Binaries/Win64/UnrealEditor-Game.dll");
 		Assert.IsFalse(connection.Calls.Any(call => call.Command == "shelve"));
-		StringAssert.Contains((await Assert.ThrowsExactlyAsync<UakUsageException>(() => RunAsync(new VcsShelveCommand { Guards = () => [] }, root, connection, Token, dll))).Message, "may have left its patch in these binaries");
+		StringAssert.Contains((await Assert.ThrowsExactlyAsync<UakRefusalException>(() => RunAsync(new VcsShelveCommand { Guards = () => [] }, root, connection, Token, dll))).Message, "may have left its patch in these binaries");
 
 		// It wrote another: this shelf is safe.
 		root.Write(journal, record + ", \"Binaries\": [ { \"Path\": \"" + dll.Replace("Game.dll", "Other.dll", StringComparison.Ordinal).Replace("\\", "\\\\", StringComparison.Ordinal) + "\" } ] }");

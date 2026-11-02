@@ -16,11 +16,16 @@ public sealed class TestEnvironment
 	/// <summary>
 	/// Tests must not run under a hold of the machine they run on: if the test host itself was started inside
 	/// <c>uak lock run</c>, its inherited UAK_LOCK_HELD would make every lock request for a test project fail at once.
+	/// Nor under a detached run: <c>uak runs start</c> passes on its run's name, which would prefix every holder's, and its priority.
 	/// </summary>
 	[AssemblyInitialize]
 	public static void Initialize(TestContext context)
 	{
 		Environment.SetEnvironmentVariable("UAK_LOCK_HELD", null);
+		Environment.SetEnvironmentVariable("UAK_LOCK_NAME", null);
+		Environment.SetEnvironmentVariable("UAK_LOCK_PRIORITY", null);
+		Environment.SetEnvironmentVariable(RunSummaries.RunNameVariable, null);
+		Environment.SetEnvironmentVariable(RunSummaries.RunOwnerVariable, null);
 	}
 }
 

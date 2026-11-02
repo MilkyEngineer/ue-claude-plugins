@@ -86,7 +86,7 @@ public sealed class BuildLogSummary
 	/// <summary>The reason in "Result: Failed (Reason)", or null.</summary>
 	public string? ResultReason { get; set; }
 
-	/// <summary>Whether UBT said "Target is up to date".</summary>
+	/// <summary>Whether UBT said "Target is up to date", or "Targets are up to date" for a run of several.</summary>
 	public bool UpToDate { get; set; }
 
 	/// <summary>UBT's "Total execution time", in seconds, or null.</summary>
@@ -154,7 +154,7 @@ public sealed partial class BuildLogParser
 			Summary.Result = M.Groups["result"].Value;
 			Summary.ResultReason = M.Groups["why"].Success ? M.Groups["why"].Value : null;
 		}
-		else if (Text.Contains("Target is up to date", StringComparison.Ordinal))
+		else if (Text.Contains("Target is up to date", StringComparison.Ordinal) || Text.Contains("Targets are up to date", StringComparison.Ordinal))
 		{
 			Summary.UpToDate = true;
 		}

@@ -18,7 +18,7 @@ internal sealed class VcsArguments
 
 	public static VcsArguments Parse(IReadOnlyList<string> arguments, bool allowPaths, bool allowPathFilter)
 	{
-		UakArguments parsed = new(arguments);
+		UakArguments parsed = new(arguments, allowPaths ? DotSplitRule.Paths : DotSplitRule.Options);
 		VcsArguments result = new()
 		{
 			// -vcs= is normally a global option (before the command); accepting it here too overrides that.

@@ -93,11 +93,28 @@ public static class StateFiles
 	{
 		try
 		{
+			return ReadSharedIfThere(path);
+		}
+		catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+		{
+			return null;
+		}
+	}
+
+	/// <summary>
+	/// As <see cref="ReadShared"/>, for a caller to whom a file that can't be read isn't a missing one: null only when it is missing.
+	/// </summary>
+	/// <exception cref="IOException">The file exists and can't be read.</exception>
+	/// <exception cref="UnauthorizedAccessException">The file exists and can't be read.</exception>
+	public static string? ReadSharedIfThere(string path)
+	{
+		try
+		{
 			using FileStream stream = new(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
 			using StreamReader reader = new(stream, UakJson.Utf8NoBom, detectEncodingFromByteOrderMarks: true);
 			return reader.ReadToEnd();
 		}
-		catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+		catch (Exception exception) when (exception is FileNotFoundException or DirectoryNotFoundException)
 		{
 			return null;
 		}

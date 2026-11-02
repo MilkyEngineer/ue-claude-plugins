@@ -119,6 +119,17 @@ public sealed class LockUnitTests
 	}
 
 	[TestMethod]
+	public async Task LockRunRunsNothingForADottedWordThatCouldBeEitherThing()
+	{
+		using TempState state = new();
+
+		UakUsageException refused = await Assert.ThrowsExactlyAsync<UakUsageException>(() => new LockRunCommand().RunAsync(state.Context, ["-name=x", ".tool.bat", "arg"], TestContext.CancellationToken));
+
+		Assert.Contains("nothing was run", refused.Message);
+		Assert.IsNull(EditorLock.GetStatus(state.Context).Holder);
+	}
+
+	[TestMethod]
 	public void StatusFormatsAnEmptyLock()
 	{
 		using TempState state = new();

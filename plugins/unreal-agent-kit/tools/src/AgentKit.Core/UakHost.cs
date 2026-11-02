@@ -42,7 +42,8 @@ public static class UakHost
 
 	/// <summary>
 	/// Splits the command line into the global options and the rest (the command path and its arguments). Throws
-	/// <see cref="UakUsageException"/> for an unknown option before the command path.
+	/// <see cref="UakUsageException"/> for an unknown option before the command path. A '.' token after an option with a value
+	/// is what Windows PowerShell 5.1 split from it (<see cref="UakArguments.RejoinSplit"/>): no command starts with a dot.
 	/// </summary>
 	public static (GlobalOptions Options, IReadOnlyList<string> Remaining) ParseGlobalOptions(IReadOnlyList<string> arguments)
 	{
@@ -56,6 +57,10 @@ public static class UakHost
 			int Equals = Body.IndexOf('=', StringComparison.Ordinal);
 			string Key = Equals < 0 ? Body : Body[..Equals];
 			string? Value = Equals < 0 ? null : Body[(Equals + 1)..];
+			if (Value is not null && Index + 1 < arguments.Count && arguments[Index + 1].StartsWith('.'))
+			{
+				Value += arguments[++Index];
+			}
 			switch (Key.ToLowerInvariant())
 			{
 				case "project":
@@ -220,6 +225,12 @@ public static class UakHost
 		{
 			return await Command.RunAsync(Context, CommandArguments, Cancel.Token).ConfigureAwait(false);
 		}
+		catch (UakRefusalException Error)
+		{
+			// No usage error: the command was given right, and its help says nothing of what refused it.
+			Err.WriteLine("error: refused: " + Error.Message);
+			return UakExitCodes.UsageError;
+		}
 		catch (UakUsageException Error)
 		{
 			Err.WriteLine("error: " + Error.Message);
@@ -348,7 +359,7 @@ public static class UakHost
 		writer.WriteLine("The engine is -engine=, else UAK_ENGINE, else the project's EngineAssociation, as Unreal reads it: a version,");
 		writer.WriteLine("  a registered build's GUID or a path names the engine (one that names none is an error); an empty one means the");
 		writer.WriteLine("  engine whose folder holds the project.");
-		writer.WriteLine("Exit codes: 0 success, 1 failure, 2 usage or setup error (3: 'uak runs wait' timed out). 'uak help <command>' shows a command's usage.");
+		writer.WriteLine("Exit codes: 0 success, 1 failure, 2 usage or setup error, or a refusal (3: 'uak runs wait' timed out). 'uak help <command>' shows a command's usage.");
 	}
 
 	/// <summary>One line on stderr when the project has commands that are not loaded because the user has not opted in.</summary>
