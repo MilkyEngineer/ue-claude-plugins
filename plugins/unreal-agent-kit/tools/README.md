@@ -35,7 +35,7 @@ With UE 5.7's SDK (8.0), which predates `--solution`, the test command is `<dotn
 ```
 
 - **What it makes.** A self-contained `uak` for this machine. It needs no installed .NET, and no `DOTNET_ROOT`.
-- **Where it goes.** To `$UAK_HOME/<kit version>/`, where `UAK_HOME` defaults to `~/.unreal-agent-kit`. The kit version is the `version` in `.claude-plugin/plugin.json` (and `<Version>` in `Directory.Build.props`). For kit version 0.4.3: `~/.unreal-agent-kit/0.4.3/uak.exe` on Windows, `~/.unreal-agent-kit/0.4.3/uak` elsewhere.
+- **Where it goes.** To `$UAK_HOME/<kit version>/`, where `UAK_HOME` defaults to `~/.unreal-agent-kit`. The kit version is the `version` in `.claude-plugin/plugin.json` (and `<Version>` in `Directory.Build.props`). For kit version 0.4.4: `~/.unreal-agent-kit/0.4.4/uak.exe` on Windows, `~/.unreal-agent-kit/0.4.4/uak` elsewhere.
   - The folder is outside the plugin, which Claude Code replaces on every update.
   - Each kit version gets its own folder, so publishing never overwrites a `uak` that is running.
 - **What to do next.** In Claude Code sessions, the plugin's `bin/` puts it on `PATH`. Elsewhere, put that folder on `PATH`, or call `uak` by its full path. Then check it with `uak env`.
@@ -58,6 +58,22 @@ A source engine gets its binary dependencies from GitDependencies (`Setup.bat`),
 - **Output.** Each state lists at most 50 files, then a count of the rest; `-all` lists every file, and `status -json` prints every file as JSON.
 
 Neither takes the editor lock; both are safe while builds run.
+
+## Cooker options for cooked test runs
+
+`uak test -cooked -cooker-options=<args>` passes more arguments to the cook commandlet: the `-COOKDIR=` folders through UAT BuildCookRun's `-cookdir=<folder>+<folder>`, the rest through its `-AdditionalCookerOptions`; `uak test config -cooked-cooker-options=<args>` saves a default for the project, kept beside `cookedMaps` in `<State>/config.json`. A use: name test-only content folders for each cooked test run instead of listing them in the project's `DirectoriesToAlwaysCook`, which a Shipping cook would pick up too.
+
+```
+uak test -cooked -filter=Game. -name=cooked "-cooker-options=-COOKDIR=/TestContent/Golden -COOKDIR=/Game/Tests"
+uak test config "-cooked-cooker-options=-COOKDIR=/TestContent/Golden"
+```
+
+- **Syntax.** Switches separated by spaces, each a `-` and a letter. Quote the whole option in the shell. No argument can hold a space, and quotes, `% ! & | < > ^`, tabs and control characters are refused, as for game arguments after `--` (RunUAT.bat expands its arguments unquoted while it scans them). `-run`, `-TargetPlatform` and `-abslog` are refused too, as UAT starts the commandlet with them, and so is any switch that holds `abslog=`, which the commandlet would find anywhere in its command line. `-COOKDIR=` and `-NEVERCOOKDIR=` must be spelt so (one `-`, a value): the cooker ignores `--COOKDIR=` and the like, so uak refuses them. A `-COOKDIR=` names one folder and can't hold a `+`, which separates `-cookdir=` folders.
+- **Which apply.** A run's `-cooker-options=` replaces the saved default for that run; an empty `-cooker-options=` passes none. An empty `-cooked-cooker-options=` forgets the default, and `uak test config -reset` forgets it with the other settings.
+- **`-skipcook`.** No cook runs, so nothing is passed or resolved: a warning says so for `-cooker-options=`, and an info line for the saved default, which isn't checked either, as it is unused.
+- **`-COOKDIR=` package paths.** The cooker cooks the `.uasset` files under each `-COOKDIR=` folder on disk (not maps: name those with `-map=`), and runs in the editor's binaries folder, so uak turns a package path into its folder before UAT starts: `/Game/<rest>` is `<Project>/Content/<rest>`, `/Engine/<rest>` is the engine's `Content/<rest>`, and `/<Name>/<rest>` is the `Content/<rest>` of the plugin whose descriptor is `<Name>.uplugin`, looked for in the project's `Plugins` folder, then in the engine's (a folder that holds a `.uplugin` isn't searched further, as the engine does; plugins the engine finds elsewhere, through the project's `AdditionalPluginDirectories` or under `Platforms/*/Plugins`, aren't searched). Names match ignoring case on Windows. On Windows a value that starts with one `/` is a package path; elsewhere, where a full path starts with `/` too, only when its first part is `Game`, `Engine` or a plugin found, and any other is kept as a folder. A value that isn't a package path is passed as given, and warned about when it isn't a full path to an existing folder. The run is refused (exit 2, before the lock) when a package path names no plugin (on Windows), has a part that no package name can hold (`\ : * ? " < > | ' , . & ! ~ @ #`, white space) or a `+`, resolves to a folder that doesn't exist or whose path holds a `+` or a character refused above, or names a plugin that two plugins share. A folder may hold a space (as `Documents/Unreal Projects` does): BuildCookRun quotes each `-cookdir=` folder for the cooker. `-NEVERCOOKDIR=` is passed as given, through `-AdditionalCookerOptions`: the cooker reads a package path there itself. From Git Bash, set `MSYS_NO_PATHCONV=1` so the shell leaves `/Game/...` alone.
+- **Saved default.** Kept as typed, so it holds on another machine, and resolved again by each run. `uak test config` shows what it resolves to here (`resolves here to:`), and warns when a cooked run here would refuse it.
+- **Report.** The summary prints `cooker options: <args> (<where from>; given as <typed>)`, the last part only when a package path was resolved, and `-resultfile` adds `CookerOptions` (those passed, resolved), `CookerOptionsGiven` (as typed), `CookerOptionsSource` (`run`, `saved` or null) and `CookerOptionsUnused`.
 
 ## Project commands
 

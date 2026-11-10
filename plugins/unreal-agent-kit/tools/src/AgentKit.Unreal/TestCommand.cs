@@ -140,6 +140,32 @@ public sealed class TestCommand : IUakCommand
 		  -skipbuild            Use the game's binaries as built (no -build).
 		  -skipcook             Use the build as staged (-skipcook -skipstage instead of -cook -stage).
 		  -timeout=<seconds>    How long the game may run before UAT stops it (-RunTimeoutSeconds, default 1800).
+		  -cooker-options=<args>
+		                        More cooker arguments, separated by spaces, e.g.
+		                        "-cooker-options=-COOKDIR=/TestContent/Golden -COOKDIR=/Game/Tests" (quote the whole
+		                        option in the shell). The -COOKDIR= folders go to UAT's -cookdir=<folder>+<folder>, the
+		                        rest through its -AdditionalCookerOptions. Replaces those `uak test config
+		                        -cooked-cooker-options=` saved for this run; an empty -cooker-options= passes none. Each
+		                        is a switch ('-' and a letter). Rejected: -run, -TargetPlatform and -abslog (UAT sets
+		                        them), any switch holding abslog=, quotes, % ! & | < > ^, tabs and control characters; no
+		                        argument can hold a space. -COOKDIR= and -NEVERCOOKDIR= are spelt so (one '-', a value),
+		                        and a -COOKDIR= names one folder, without a '+'.
+		                        -COOKDIR= cooks the .uasset files under a folder on disk (maps are named with -map=), so
+		                        uak turns a package path into its folder first: /Game/<rest> is <Project>/Content/<rest>,
+		                        /Engine/<rest> the engine's Content/<rest>, and /<Plugin>/<rest> the Content/<rest> of
+		                        the plugin <Plugin>.uplugin, searched for in the project's Plugins folder, then the
+		                        engine's (not AdditionalPluginDirectories or Platforms/*/Plugins; names ignore case on
+		                        Windows). On Windows every value that starts with one '/' is a package path; elsewhere
+		                        only one whose first part is Game, Engine or a plugin found (else it is a full path).
+		                        From Git Bash, set MSYS_NO_PATHCONV=1 so the shell leaves /Game/... alone.
+		                        Refused: a package path whose parts hold a character no package name can (or '+'), whose
+		                        folder doesn't exist, or a plugin name two plugins share. A folder may hold a space.
+		                        Any other -COOKDIR= is passed as given, with a warning when it isn't a full path to a
+		                        folder that exists; -NEVERCOOKDIR= is passed as given (the cooker reads package paths
+		                        there). Unused with -skipcook, which runs no cook and checks or resolves nothing saved:
+		                        a warning says so (an info line for saved ones). The summary and -resultfile
+		                        (CookerOptions as passed, CookerOptionsGiven as typed, CookerOptionsSource,
+		                        CookerOptionsUnused) show them.
 		  -- <game argument>    More game arguments, through UAT's -addcmdline. Rejected: -ExecCmds, -testexit, -abslog,
 		                        -ReportExportPath, quotes, and % ! & | < > ^.
 		An editor run passes only when the editor found tests, every found test completed ("Found N automation tests"),
@@ -409,6 +435,15 @@ public sealed class TestCommand : IUakCommand
 			Maps = Saved;
 			context.Logger.LogInformation("Maps: {Maps} (saved by `uak test config`; -map= overrides)", Saved);
 		}
+		CookerOptionsChoice Cooker = ChooseCookerOptions(context, options, Platform.IsWindows);
+		foreach (string Line in Cooker.Details)
+		{
+			context.Logger.LogInformation("{Line}", Line);
+		}
+		foreach (string Warning in Cooker.Warnings)
+		{
+			context.Logger.LogWarning("{Warning}", Warning);
+		}
 		CookedTestRun Run = new()
 		{
 			ProjectFile = Project,
@@ -420,6 +455,7 @@ public sealed class TestCommand : IUakCommand
 			SkipCook = options.SkipCook,
 			TimeoutSeconds = options.Timeout ?? CookedTestCommandLine.DefaultTimeoutSeconds,
 			GameArguments = options.PassThrough,
+			CookerOptions = Cooker.Passed,
 			LogFolder = Path.Combine(Path.GetDirectoryName(Project)!, "Saved", "Logs", options.Name),
 		};
 
@@ -560,7 +596,8 @@ public sealed class TestCommand : IUakCommand
 			Notes.Add($"{BuildEdits.Name(Unsaved)} could not be marked for a recompile, so no later build picks {Them} up: {Kept}."
 				+ $" {Save} the editor with `uak build` and the game with a cooked run{TimelessNote}, before you test; -skipbuild tests whatever was staged");
 		}
-		(TestRunOutcome Outcome, ExpectCheck? Check, List<string> FilterWarnings) = Finish(context, options, expected, Summary, Extra, Tree, Watch, " in Client.log", Tail, Edits.Warnings("build"), Notes);
+		(TestRunOutcome Outcome, ExpectCheck? Check, List<string> FilterWarnings) = Finish(context, options, expected, Summary, Extra, Tree, Watch, " in Client.log", Tail,
+			[.. Cooker.Warnings, .. Edits.Warnings("build")], Notes, Cooker.Details);
 		UnrealServices.WriteResultFile(options.ResultFile, new
 		{
 			Mode = "cooked",
@@ -579,6 +616,10 @@ public sealed class TestCommand : IUakCommand
 			Uat.Summary.UbtConflict,
 			EditedDuringBuild = Edits.Overlapped,
 			EditNotMarked = Edits.NotMarked,
+			CookerOptions = Cooker.Passed,
+			CookerOptionsGiven = Cooker.Given,
+			CookerOptionsSource = Cooker.Source,
+			CookerOptionsUnused = Cooker.Unused,
 			GameExitCode = Uat.Summary.ClientExitCode,
 			Uat.Summary.TimedOutAfterSeconds,
 			Summary.TestCompleteExitCode,
@@ -593,6 +634,73 @@ public sealed class TestCommand : IUakCommand
 			UatLog,
 		});
 		return Outcome;
+	}
+
+	/// <summary>The cooker options a cooked run passes, where they came from, and what the summary says of them.</summary>
+	internal sealed record CookerOptionsChoice
+	{
+		/// <summary>The cooker arguments UAT gets (-cookdir= and -AdditionalCookerOptions), -COOKDIR= package paths resolved: none with -skipcook.</summary>
+		public IReadOnlyList<string> Passed { get; init; } = [];
+
+		/// <summary>The cooker arguments as given or saved, package paths and all.</summary>
+		public IReadOnlyList<string> Given { get; init; } = [];
+
+		/// <summary>Those given or saved but unused, as -skipcook runs no cook.</summary>
+		public IReadOnlyList<string> Unused { get; init; } = [];
+
+		/// <summary>"run" for -cooker-options= (empty included), "saved" for <c>uak test config</c>'s, null for neither.</summary>
+		public string? Source { get; init; }
+
+		/// <summary>The summary's info lines about them.</summary>
+		public List<string> Details { get; } = [];
+
+		/// <summary>The summary's warnings about them.</summary>
+		public List<string> Warnings { get; } = [];
+	}
+
+	/// <summary>
+	/// The cooker options of a cooked run: -cooker-options= when given (empty for none), else those <c>uak test config</c> saved,
+	/// checked again as a hand-edited file may hold anything. With -skipcook none is passed: a warning says so for
+	/// -cooker-options=, and an info line for the saved ones, which a project sets for every run and which aren't checked then,
+	/// as they are unused. Otherwise each -COOKDIR=
+	/// package path is resolved to its folder now (<see cref="CookedTestCommandLine.ResolveCookDirs"/>), so a saved one stays the
+	/// same on every machine.
+	/// </summary>
+	/// <exception cref="UakUsageException">The saved options can't be passed, or a package path can't be resolved.</exception>
+	internal static CookerOptionsChoice ChooseCookerOptions(UakContext context, TestOptions options, bool windows)
+	{
+		string? Saved = ProjectSettings.GetCookedCookerOptions(context);
+		// With -skipcook the saved ones are unused, so they aren't checked: a run that cooks nothing isn't refused over them.
+		IReadOnlyList<string> Given = options.CookerOptions
+			?? (Saved is null ? []
+				: options.SkipCook ? Saved.Split(' ', StringSplitOptions.RemoveEmptyEntries)
+				: CookedTestCommandLine.ParseCookerOptions(Saved, $"cookedCookerOptions in {ProjectSettings.GetFile(context)} (`uak test config -cooked-cooker-options=` saves it)"));
+		string? Source = options.CookerOptions is not null ? "run" : Saved is not null ? "saved" : null;
+		string From = Source == "run" ? "-cooker-options=" : "saved by `uak test config`; -cooker-options= overrides";
+		string Joined = string.Join(' ', Given);
+		if (Given.Count == 0)
+		{
+			CookerOptionsChoice None = new() { Source = Source, Given = Given };
+			if (Source == "run" && Saved is not null)
+			{
+				None.Details.Add($"cooker options: none (-cooker-options= sets aside the saved {Saved})");
+			}
+			return None;
+		}
+		if (options.SkipCook)
+		{
+			CookerOptionsChoice Unused = new() { Unused = Given, Given = Given, Source = Source };
+			string Line = $"cooker options: unused, as -skipcook runs no cook: {Joined} ({From})";
+			(Source == "run" ? Unused.Warnings : Unused.Details).Add(Line);
+			return Unused;
+		}
+		IReadOnlyList<string> Passed = CookedTestCommandLine.ResolveCookDirs(Given, Source == "run" ? "-cooker-options" : "cookedCookerOptions (saved by `uak test config`)",
+			Path.GetDirectoryName(UnrealServices.RequireProject(context))!, context.EngineDirectory?.FullName, windows);
+		CookerOptionsChoice Choice = new() { Passed = Passed, Given = Given, Source = Source };
+		string Resolved = Passed.SequenceEqual(Given) ? "" : $"; given as {Joined}";
+		Choice.Details.Add($"cooker options: {string.Join(' ', Passed)} ({From}{Resolved})");
+		Choice.Warnings.AddRange(CookedTestCommandLine.CookDirWarnings(Passed));
+		return Choice;
 	}
 
 	/// <summary>
@@ -613,13 +721,13 @@ public sealed class TestCommand : IUakCommand
 
 	/// <summary>
 	/// Judges a run and prints its report: the skipped, never-run and failed tests, then the summary (recorded for
-	/// <c>uak runs show</c>): the tree, the watched categories, the filter's warnings, the expect check, the problems and the
-	/// verdict line, which ends with <paramref name="tail"/>. <paramref name="notes"/> are problems that aren't judged: each is
-	/// printed and reported as a problem, and the verdict stays as it was.
+	/// <c>uak runs show</c>): the tree, <paramref name="details"/>, the warnings, the watched categories, the filter's warnings,
+	/// the expect check, the problems and the verdict line, which ends with <paramref name="tail"/>. <paramref name="notes"/> are
+	/// problems that aren't judged: each is printed and reported as a problem, and the verdict stays as it was.
 	/// </summary>
 	(TestRunOutcome Outcome, ExpectCheck? Check, List<string> FilterWarnings) Finish(UakContext context, TestOptions options, ExpectedTests? expected,
 		AutomationLogSummary summary, List<string> extraProblems, VcsTreeState tree, List<LogCategoryCount> watch, string watchSource, string tail, IEnumerable<string>? warnings = null,
-		IReadOnlyList<string>? notes = null)
+		IReadOnlyList<string>? notes = null, IReadOnlyList<string>? details = null)
 	{
 		ExpectCheck? Check = expected?.Check(summary);
 		List<string> Problems = [.. summary.Problems(), .. extraProblems, .. Check?.Problems() ?? []];
@@ -632,6 +740,10 @@ public sealed class TestCommand : IUakCommand
 		ReportTests(context, summary, Check);
 		SummaryWriter Out = new(context.Logger);
 		Out.Info("tree: " + tree);
+		foreach (string Detail in details ?? [])
+		{
+			Out.Info(Detail);
+		}
 		foreach (string Warning in warnings ?? [])
 		{
 			Out.Warning(Warning);

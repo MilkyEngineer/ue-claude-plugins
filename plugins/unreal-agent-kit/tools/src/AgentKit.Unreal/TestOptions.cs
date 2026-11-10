@@ -26,6 +26,9 @@ internal sealed record TestOptions
 	public string? ResultFile { get; init; }
 	public IReadOnlyList<string> PassThrough { get; init; } = [];
 
+	/// <summary>The cooker arguments of -cooker-options=, checked; empty for an empty -cooker-options= (none), null when it isn't given (the saved default).</summary>
+	public IReadOnlyList<string>? CookerOptions { get; init; }
+
 	/// <summary>Whether the run records its summary for <c>uak runs show</c>; <c>uak mutate</c> records its own instead.</summary>
 	public bool RecordSummary { get; init; } = true;
 
@@ -46,6 +49,7 @@ internal sealed record TestOptions
 		bool SkipBuild = arguments.GetFlag("skipbuild");
 		bool SkipCook = arguments.GetFlag("skipcook");
 		int? Timeout = arguments.GetInt("timeout", 1);
+		string? CookerOptions = arguments.GetStringOrEmpty("cooker-options");
 		string? ExpectFile = arguments.GetString("expect");
 		bool AllowUnexpected = arguments.GetFlag("allow-unexpected");
 		IReadOnlyList<string> Watch = LogCategoryCounts.ParseWatch(arguments.GetString("watch"));
@@ -61,6 +65,7 @@ internal sealed record TestOptions
 			throw new UakUsageException("-allow-unexpected goes with -expect=<file>");
 		}
 		IReadOnlyList<string> PassThrough;
+		IReadOnlyList<string>? ParsedCookerOptions = null;
 		if (Cooked)
 		{
 			if (Gpu || Windowed || ResX is not null || ResY is not null)
@@ -69,12 +74,13 @@ internal sealed record TestOptions
 			}
 			CookedTestCommandLine.CheckFilter(Filter);
 			PassThrough = CookedTestCommandLine.CheckPassThrough(arguments.PassThrough);
+			ParsedCookerOptions = CookerOptions is null ? null : CookedTestCommandLine.ParseCookerOptions(CookerOptions, "-cooker-options");
 		}
 		else
 		{
-			if (Maps is not null || Configuration is not null || PlatformName is not null || SkipBuild || SkipCook || Timeout is not null)
+			if (Maps is not null || Configuration is not null || PlatformName is not null || SkipBuild || SkipCook || Timeout is not null || CookerOptions is not null)
 			{
-				throw new UakUsageException("-map=, -config=, -platform=, -skipbuild, -skipcook and -timeout= are for cooked runs: add -cooked");
+				throw new UakUsageException("-map=, -config=, -platform=, -skipbuild, -skipcook, -timeout= and -cooker-options= are for cooked runs: add -cooked");
 			}
 			if (Gpu && Windowed)
 			{
@@ -107,6 +113,7 @@ internal sealed record TestOptions
 			Name = Name,
 			ResultFile = ResultFile,
 			PassThrough = PassThrough,
+			CookerOptions = ParsedCookerOptions,
 		};
 	}
 }

@@ -191,6 +191,20 @@ public sealed class UakArguments
 		return Value;
 	}
 
+	/// <summary>
+	/// The value of -Key=Value, "" for -Key= (an option whose empty value means "none"), or null when absent. A bare -Key is a
+	/// usage error.
+	/// </summary>
+	public string? GetStringOrEmpty(string key)
+	{
+		Read.Add(key);
+		if (!Options.TryGetValue(key, out string? Value))
+		{
+			return null;
+		}
+		return Value ?? throw new UakUsageException($"-{key} needs a value (-{key}=..., or -{key}= for none).");
+	}
+
 	/// <summary>The value of -Key=Value; a usage error when absent.</summary>
 	public string GetRequiredString(string key) => GetString(key) ?? throw new UakUsageException($"-{key}=... is required.");
 
